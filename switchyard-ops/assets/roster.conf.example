@@ -1,0 +1,41 @@
+# roster.conf — CITY-LOCAL config for switchyard-ops. NOT versioned in this repo.
+#
+# Install to:  $GC_PACK_STATE_DIR/roster.conf
+#              (typically <city>/.gc/runtime/packs/switchyard-ops/roster.conf)
+#
+# Everything here is OPTIONAL. With no roster.conf at all, switchyard-ops
+# derives its roster from `gc agent list --json`: every agent with
+# pool.min >= 1 that is not suspended. That covers the normal case.
+#
+# You only need this file for things gc config cannot express.
+
+# ---------------------------------------------------------------------------
+# PINNED_EXTRA — agents that must stay alive but must NOT be reconciler-pinned.
+#
+# The singleton-alias hazard: an agent whose alias is held by a long-lived
+# manual session. Setting min_active_sessions=1 does NOT keep that session
+# alive — the reconciler only counts sessions it spawned — so it mints a
+# SECOND session that fights the alias. Such agents stay pool.min=0, and
+# loop-health keeps them alive by waking the alias instead.
+#
+# Format: rig/agent[:tmux-prefix]
+#   Liveness is checked against gc's tmux server by pane-name prefix. Sessions
+#   are normally named <agent-base>-<wisp-id>; give an explicit prefix when a
+#   manual session uses a different name (e.g. "s-<wisp-id>" -> prefix "s").
+#
+# config-drift ASSERTS these are not min=1, and mails the mayor if they are.
+#
+# PINNED_EXTRA="<rig>/<coordinator>:<tmux-prefix>"
+
+# ---------------------------------------------------------------------------
+# RETRO_AGENT — which agent drafts the nightly cross-project report.
+# Unset => nightly-retro no-ops (and says so, once per day, to the mayor).
+#
+# RETRO_AGENT="<rig>/<coordinator>"
+
+# ---------------------------------------------------------------------------
+# COORDINATORS — override the set nudged by intake-sweep.
+# Unset => the liveness roster (derived pins + PINNED_EXTRA), which is normally
+# exactly the coordinator set: pinned, long-lived, one per rig.
+#
+# COORDINATORS="<rig>/<coordinator> <rig>/<coordinator>"

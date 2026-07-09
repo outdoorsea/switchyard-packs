@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "switchyard": {
+      "command": "switchyard-mcp",
+      "env": {
+        "SWITCHYARD_BASE_URL": "https://switchyard.work"
+      }
+    }
+  }
+}

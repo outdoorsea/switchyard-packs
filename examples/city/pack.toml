@@ -1,0 +1,45 @@
+# Example city pack manifest. Copy to your city root as `pack.toml`.
+#
+# This file is CITY-LOCAL: it pins which packs this city consumes and at which
+# sha. It is not part of the portable pack collection — each city keeps its own.
+#
+# Layering (see packs/docs/OPERATING-MODEL.md):
+#   Layer 0  gc core .......... sessions, rigs, mail, beads, orders, wisps
+#   Layer 1  gastown .......... the coding-platform pack (pinned, unforked)
+#   Layer 2  switchyard-mcp ... overlay: switchyard MCP into every rig's crew
+#   Layer 3  switchyard-ops ... this city's own heartbeat (timed orders)
+
+[pack]
+name = "example-city"
+version = ""
+schema = 2
+
+[imports]
+  # --- Layer 1: the coding platform. Pin a sha; never fork. -----------------
+  [imports.gastown]
+    source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
+    version = "sha:<pin-a-gastown-commit>"
+
+  # --- gc builtins -----------------------------------------------------------
+  [imports.core]
+    source = "https://github.com/gastownhall/gascity/tree/main/internal/bootstrap/packs/core"
+    version = "sha:<pin-a-gascity-commit>"
+  [imports.bd]
+    source = "https://github.com/gastownhall/gascity/tree/main/examples/bd"
+    version = "sha:<pin-a-gascity-commit>"
+
+  # --- Layer 3: the city heartbeat ------------------------------------------
+  # switchyard-packs is the PUBLIC mirror of switchyard's packs/ tree — clone it
+  # anonymously, pin a commit. Prefer `gc import add <url>` over hand-editing:
+  # it resolves the sha and writes packs.lock for you.
+  [imports.switchyard-ops]
+    source = "https://github.com/outdoorsea/switchyard-packs/tree/main/switchyard-ops"
+    version = "sha:<pin-a-mirror-commit>"
+
+# Layer 2 (switchyard-mcp) is imported PER RIG, not city-wide — see city.toml.
+
+# Optional: user tmux bindings. gc's tmux server ignores ~/.tmux.conf, and the
+# default WheelUpPane breaks scroll-through to full-screen TUIs. Drop
+# tmux-userbindings.sh into your city root to use this.
+# [global]
+#   session_live = ["$GC_CITY/tmux-userbindings.sh"]

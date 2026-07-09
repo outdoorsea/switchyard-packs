@@ -1,0 +1,27 @@
+# switchyard-mcp — projects the switchyard-mcp MCP server into agents so they
+# can drive switchyard (projects, blueprints, PRDs, epics, reports) via MCP
+# tools. Pure enhancement pack — no agents defined, just an overlay.
+#
+# Prerequisites:
+#   - `switchyard-mcp` binary on PATH. It is built from this same repo, two
+#     directories up — so the pack and the server it wires can never skew:
+#       go build -o ~/.local/bin/switchyard-mcp ./cmd/switchyard-mcp
+#   - a switchyard API token, kept OUT of this overlay (so the overlay is safe to version).
+#     The server self-resolves the token (check with `switchyard-mcp doctor`), in order:
+#       1. $SWITCHYARD_API_TOKEN, else
+#       2. the token file  ~/Library/Application Support/switchyard/token  (chmod 600)
+#     Recommended: run `switchyard-mcp login` once (browser flow) — it writes that token
+#     file, which every agent session then reads. This keeps the secret machine-local and
+#     out of gc config + git. (Do NOT hardcode SWITCHYARD_API_TOKEN in overlay/.claude/
+#     settings.json; that was the old approach and leaks the token into the repo.)
+#
+# Usage — import PER RIG (not city-wide) in your city.toml, for each rig whose
+# crew should drive switchyard:
+#   [rigs.imports.switchyard-mcp]
+#   source = "https://github.com/outdoorsea/switchyard-packs/tree/main/switchyard-mcp"
+#   # ...or a local checkout: source = "/path/to/switchyard/packs/switchyard-mcp"
+# ...then `gc reload` and restart the rig's sessions.
+
+[pack]
+name = "switchyard-mcp"
+schema = 2

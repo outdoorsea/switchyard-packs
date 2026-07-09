@@ -1,0 +1,30 @@
+# switchyard-ops — the 24-hour heartbeat for any Gas City driven by switchyard.
+#
+# Encodes the continuous-improvement loop as mechanical exec orders:
+#   loop-health    — pinned coordinators alive + status probe honest (30m)
+#   intake-sweep   — nudge coordinators to triage switchyard intake (4h)
+#   nightly-retro  — nudge the retro agent to draft daily reports (24h)
+#   stray-reaper   — detect sessions from foreign/stale city paths (6h)
+#   config-drift   — config-as-code guard (6h; no-ops if the city isn't a repo)
+#
+# Governing invariant: every silent failure becomes mail to the mayor within
+# one order cycle.
+#
+# CITY-AGNOSTIC: this pack names no rig and no agent. The liveness roster is
+# derived from `gc agent list --json` (pool.min >= 1, not suspended). Anything
+# gc cannot express — singleton aliases, which agent runs the retro — lives in a
+# city-local, un-versioned $GC_PACK_STATE_DIR/roster.conf. See
+# assets/roster.conf.example.
+#
+# Requires: jq, tmux, and (for the sweeps to be useful) the switchyard-mcp
+# overlay imported into any rig whose coordinator should drive switchyard.
+#
+# Import city-wide:
+#   [imports.switchyard-ops]
+#   source = "https://github.com/outdoorsea/switchyard-packs/tree/main/switchyard-ops"
+#   # ...or from a local checkout of this repo:
+#   #   source = "/path/to/switchyard/packs/switchyard-ops"
+
+[pack]
+name = "switchyard-ops"
+schema = 2

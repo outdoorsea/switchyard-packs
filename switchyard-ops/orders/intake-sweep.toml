@@ -1,0 +1,8 @@
+# Intake must never sit: a nudge is mechanical, the triage judgment happens
+# inside the coordinator session that receives it (which has the switchyard
+# MCP via the switchyard-mcp overlay).
+[order]
+description = "Nudge coordinators to triage their project's switchyard intake and dispatched epics"
+trigger = "cooldown"
+interval = "4h"
+exec = "$PACK_DIR/assets/scripts/intake-sweep.sh"

@@ -1,0 +1,10 @@
+# Detection only — a stray session is reported to the mayor, never killed by a
+# script. The signature: a session labeled for THIS city whose GC_CITY points at
+# a different path, i.e. a leftover from a moved or duplicated city root. Such a
+# session reads and writes the WRONG store, which is a silent-corruption class,
+# not a cosmetic one.
+[order]
+description = "Report agent sessions running from foreign or stale city paths"
+trigger = "cooldown"
+interval = "6h"
+exec = "$PACK_DIR/assets/scripts/stray-reaper.sh"

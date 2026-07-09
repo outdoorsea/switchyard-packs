@@ -1,0 +1,11 @@
+# Interim mechanism: once switchyard generates the retro server-side (report
+# section + source=retro intake candidates), retire this order. Until then the
+# city's configured RETRO_AGENT drafts the daily reports on a nudge.
+#
+# Requires RETRO_AGENT in the city's roster.conf. With none set, the order
+# no-ops and says so to the mayor once per day rather than failing silently.
+[order]
+description = "Nudge the configured retro agent to draft daily reports across switchyard projects"
+trigger = "cooldown"
+interval = "24h"
+exec = "$PACK_DIR/assets/scripts/nightly-retro.sh"

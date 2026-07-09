@@ -1,0 +1,15 @@
+# The failure mode this guards: `gc rig add` / `gc rig resume` rewrite city.toml
+# in place — comments drop and hand-tuned [[patches.agent]] blocks can vanish —
+# and the rewrite sits uncommitted, silently diverging from the config-as-code
+# record. Mechanical check, no LLM judgment: compare the TRACKED config surface
+# against git HEAD, flag stray config dupes (the "city 2.toml" class that has
+# shadowed real config before), and assert that no singleton-alias agent has
+# been reconciler-pinned (a min=1 patch on one mints a fighting twin).
+#
+# No-ops cleanly when the city root is not a git repo — config-as-code is
+# optional. The singleton assertion still runs.
+[order]
+description = "Config-as-code drift guard: uncommitted tracked config, stray dupes, singleton-alias re-pins"
+trigger = "cooldown"
+interval = "6h"
+exec = "$PACK_DIR/assets/scripts/config-drift.sh"

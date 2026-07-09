@@ -1,0 +1,10 @@
+# The failure mode this guards (observed 2026-07-03): every pinned agent had a
+# live process while `gc status`'s runtime probe timed out and reported the
+# whole city stopped — so nothing woke anything and orders went stale.
+# Mechanical check, no LLM judgment: verify processes, verify the probe
+# answers, nudge what's missing, mail the mayor when the probe itself lies.
+[order]
+description = "Verify pinned coordinators are alive and the status probe answers; wake or escalate"
+trigger = "cooldown"
+interval = "30m"
+exec = "$PACK_DIR/assets/scripts/loop-health.sh"

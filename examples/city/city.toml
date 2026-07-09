@@ -1,0 +1,49 @@
+# Example city.toml. Copy to your city root and edit.
+#
+# city.toml is DELIBERATELY machine-specific: it is the rig roster this box
+# runs, plus pool tuning and operational holds. Keep it OUT of any shared repo —
+# the portable pins live in pack.toml. Two machines running the same packs will
+# have different city.toml files, and that is correct.
+#
+# NOTE: `gc rig add` / `gc rig resume` REWRITE this file and drop comments.
+# After any gc command that rewrites config, re-check your [[patches.agent]]
+# blocks. The config-drift order mails the mayor when the tracked surface
+# diverges from git HEAD.
+
+[workspace]
+provider = "claude"
+
+[providers]
+  [providers.claude]
+    base = "builtin:claude"
+
+# --- One rig per product. Each imports gastown (delivery crew) and the ------
+# --- switchyard-mcp overlay (so its coordinator can drive switchyard). ------
+[[rigs]]
+name = "example-rig"
+prefix = "ex"
+default_branch = "main"
+  [rigs.imports]
+    [rigs.imports.gastown]
+      source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
+      version = "sha:<pin-a-gastown-commit>"
+    [rigs.imports.switchyard-mcp]
+      source = "https://github.com/outdoorsea/switchyard-packs/tree/main/switchyard-mcp"
+      version = "sha:<pin-a-mirror-commit>"
+
+# --- Coordinators: pinned. Workers: elastic. -------------------------------
+# A coordinator is a long-lived crew agent that owns one rig's switchyard
+# project. Pin it with min_active_sessions = 1 and switchyard-ops will discover
+# it automatically — no roster to maintain.
+#
+# EXCEPTION — singleton aliases: if a coordinator's alias is held by a manual
+# session you start yourself, do NOT pin it. min=1 does not keep your session
+# alive (the reconciler only counts sessions it spawned); it mints a SECOND
+# session that fights the alias. Leave it min=0 and list it in
+# roster.conf's PINNED_EXTRA so loop-health wakes the alias instead.
+#
+# [[patches.agent]]
+#   dir = "example-rig"
+#   name = "coordinator"
+#   min_active_sessions = 1
+#   max_active_sessions = 1

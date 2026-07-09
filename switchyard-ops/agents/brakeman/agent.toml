@@ -25,6 +25,20 @@
 # name — and that string is a wire contract with the refinery, which validates
 # it on handoff. Renaming the branch means owning the handoff step forever, so
 # we don't. The agent is ours; the method stays gastown's.
+#
+# ⚠ REQUIRED RIG CONFIG — otherwise handoff strands the bead:
+#
+#     [[rigs]]
+#     formula_vars = { binding_prefix = "gastown." }
+#
+# `{{binding_prefix}}` is the import binding of the pack that COOKED the
+# formula, not the pack that owns it. Because brakeman lives in switchyard-ops,
+# `mol-polecat-work`'s submit step renders
+# `REFINERY_TARGET="$GC_RIG/switchyard-ops.refinery"` — an agent that does not
+# exist, since this pack ships no refinery. The worker then pushes its branch,
+# assigns to nobody, and the bead sits open forever: a silent failure. Pinning
+# binding_prefix on the rig renders `gastown.refinery` instead. gastown's own
+# polecat already resolves to that value, so the override is a no-op for it.
 scope = "rig"
 
 # fresh: a worker starts each turn with a clean context. Resuming a polecat-style
@@ -50,3 +64,14 @@ idle_timeout = "2h"
 # yard; namepool.txt must hold at least that many names.
 min_active_sessions = 0
 max_active_sessions = 4
+
+# `gc sling <rig>/switchyard-ops.brakeman <bead>` now attaches this formula
+# automatically (`gc formula cook mol-polecat-work --attach <bead>`); pass
+# --no-formula to route a raw bead instead.
+#
+# This is not a convenience. A bead routed to a worker WITHOUT a formula goes
+# in_progress, never releases its assignee, and every later `gc hook --claim` on
+# that session returns existing_assignment for it — forever. A session waking
+# fresh after compaction cannot distinguish "assigned and done" from "assigned
+# and not started", so it loops. The default makes the safe path the easy one.
+default_sling_formula = "mol-polecat-work"

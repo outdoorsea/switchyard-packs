@@ -101,6 +101,24 @@ gc sling YOUR_RIG/switchyard-ops.brakeman ex-1234
 Set `default_sling_targets` on the rig and a bare `gc sling ex-1234` lands in the
 pool, so dispatch never has to name an agent.
 
+### One required rig setting
+
+```toml
+[[rigs]]
+  formula_vars = { binding_prefix = "gastown." }
+```
+
+Without it the handoff **strands your bead, silently**. `{{binding_prefix}}` in
+gastown's `mol-polecat-work` resolves to the import binding of the pack that
+*cooked* the formula — `switchyard-ops` — so the submit step hands off to
+`YOUR_RIG/switchyard-ops.refinery`, which nobody ships. The worker pushes its
+branch, assigns to nobody, and the bead sits open with no reviewer. Pinning the
+var renders `gastown.refinery`. gastown's own polecat already resolves to that
+value, so the override changes nothing for it.
+
+Verified the hard way: a shadow run got as far as a pushed `polecat/<bead>`
+branch before the handoff evaporated.
+
 Concurrent sessions draw names from
 [`agents/brakeman/namepool.txt`](switchyard-ops/agents/brakeman/namepool.txt) —
 railway occupations: `fireman`, `switchman`, `shunter`, `hostler`, `carman`, …

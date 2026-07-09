@@ -27,9 +27,18 @@ default_branch = "main"
 
 # A bare `gc sling <bead>` with no target picks one of these at random. Name the
 # worker pool here and dispatch never has to know an agent's name.
-# (This key must precede [rigs.imports] — a bare key after a subtable header
+# (These keys must precede [rigs.imports] — a bare key after a subtable header
 # would be parsed as belonging to that subtable.)
 default_sling_targets = ["example-rig/switchyard-ops.brakeman"]
+
+# REQUIRED when brakeman is in play. {{binding_prefix}} in gastown's
+# mol-polecat-work is the binding of the pack that COOKED the formula — which is
+# switchyard-ops, not gastown. Left alone, the submit step hands work off to
+# "example-rig/switchyard-ops.refinery", an agent nobody ships, and the bead is
+# stranded open with its branch pushed and no reviewer. Pinning it renders
+# "gastown.refinery". gastown's own polecat resolves to the same value, so this
+# is a no-op for it.
+formula_vars = { binding_prefix = "gastown." }
 
   [rigs.imports]
     [rigs.imports.gastown]

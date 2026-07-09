@@ -10,14 +10,25 @@
 # Governing invariant: every silent failure becomes mail to the mayor within
 # one order cycle.
 #
-# CITY-AGNOSTIC: this pack names no rig and no agent. The liveness roster is
-# derived from `gc agent list --json` (pool.min >= 1, not suspended). Anything
-# gc cannot express — singleton aliases, which agent runs the retro — lives in a
-# city-local, un-versioned $GC_PACK_STATE_DIR/roster.conf. See
-# assets/roster.conf.example.
+# ...and ships one agent:
+#   brakeman       — the worker pool. This is what you sling beads to. Sessions
+#                    are named after railway occupations (see its namepool.txt).
 #
-# Requires: jq, tmux, and (for the sweeps to be useful) the switchyard-mcp
-# overlay imported into any rig whose coordinator should drive switchyard.
+# TWO IMPORT SCOPES. gc expands city-scoped agents from a city import and
+# rig-scoped agents from a rig import, so this pack is imported twice:
+#   [imports.switchyard-ops]       -> the five orders (the city heartbeat)
+#   [rigs.imports.switchyard-ops]  -> brakeman (workers inside that rig)
+# Import it city-wide only and you get a heartbeat with nobody to sling to.
+#
+# CITY-AGNOSTIC: this pack names no rig, and the only agent it names is its own.
+# The liveness roster is derived from `gc agent list --json` (pool.min >= 1, not
+# suspended). Anything gc cannot express — singleton aliases, which agent runs
+# the retro — lives in a city-local, un-versioned $GC_PACK_STATE_DIR/roster.conf.
+# See assets/roster.conf.example.
+#
+# Requires: jq, tmux, gastown (brakeman runs its mol-polecat-work formula and
+# hands off to its refinery), and — for the sweeps to be useful — the
+# switchyard-mcp overlay in any rig whose coordinator should drive switchyard.
 #
 # Import city-wide:
 #   [imports.switchyard-ops]

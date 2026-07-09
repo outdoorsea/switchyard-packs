@@ -1,0 +1,38 @@
+# Railway industry occupations — themed session names for the brakeman pool.
+# https://en.wikipedia.org/wiki/List_of_railway_industry_occupations
+#
+# `gc` draws one name per concurrent session, so this pool must hold at least
+# max_active_sessions entries. Keep them single-word and lowercase: a name
+# becomes a session alias, a tmux pane title, and a bead assignee.
+#
+# Deliberately absent: `brakeman` (the agent's own name), plus `conductor` and
+# `dispatcher`, which name coordinator roles elsewhere in a switchyard city.
+# A session must never collide with an agent alias.
+fireman
+switchman
+shunter
+hostler
+carman
+stoker
+signalman
+pointsman
+trackman
+towerman
+flagman
+lampman
+telegrapher
+tallyman
+checker
+ganger
+lengthman
+linesman
+oiler
+wiper
+greaser
+boilermaker
+plateman
+riveter
+machinist
+coalman
+porter
+herder

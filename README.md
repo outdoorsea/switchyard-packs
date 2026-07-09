@@ -9,6 +9,7 @@ the MCP tool surface, and the orders that use them, together.
 
 ```
 packs/switchyard-ops/     Layer 3 — the city's 24-hour heartbeat (timed orders)
+                                  + brakeman, the worker pool you sling to
 packs/switchyard-mcp/     Layer 2 — overlay: switchyard MCP into a rig's crew
 packs/examples/city/      a reference pack.toml + city.toml to copy
 packs/docs/OPERATING-MODEL.md   roles, layering, token economy, gotchas
@@ -44,15 +45,23 @@ mirror's root is this directory's root and each pack is a top-level subpath.
 The mirror is a projection, never a source. Send changes here.
 
 ```sh
-# city-wide: the heartbeat
+# city-wide: the heartbeat orders
 gc import add https://github.com/outdoorsea/switchyard-packs/tree/main/switchyard-ops
 
 # per rig: the MCP overlay, for each rig whose crew drives switchyard
 gc import add https://github.com/outdoorsea/switchyard-packs/tree/main/switchyard-mcp --rig YOUR_RIG
 
+# per rig, AGAIN: switchyard-ops at rig scope, which materializes the workers
+gc import add https://github.com/outdoorsea/switchyard-packs/tree/main/switchyard-ops --rig YOUR_RIG
+
 gc import install
 gc import check
 ```
+
+`switchyard-ops` is imported **twice on purpose**. `gc` expands city-scoped
+agents from a city import and rig-scoped agents from a rig import: the city
+import gives you the orders, the rig import gives you the `brakeman` workers.
+Import it city-wide only and you get a heartbeat with nobody to sling to.
 
 `gc import add` writes the `[imports.*]` entry and locks the resolved commit
 into `packs.lock`; see [`examples/city/`](examples/city/README.md) for the TOML
@@ -78,6 +87,36 @@ failure becomes mail to the mayor within one order cycle.**
 | `nightly-retro` | 24h | Daily reports + improvement candidates |
 | `stray-reaper` | 6h | Sessions rooted at a stale city path |
 | `config-drift` | 6h | Config-as-code guard (no-ops if the city isn't a git repo) |
+
+## Workers: the brakeman pool
+
+`switchyard-ops` ships one agent, `brakeman` — an elastic pool that claims a
+routed bead, builds it in a bead-scoped worktree, and hands the branch to
+gastown's refinery. It is the thing you sling work to:
+
+```sh
+gc sling YOUR_RIG/switchyard-ops.brakeman ex-1234
+```
+
+Set `default_sling_targets` on the rig and a bare `gc sling ex-1234` lands in the
+pool, so dispatch never has to name an agent.
+
+Concurrent sessions draw names from
+[`agents/brakeman/namepool.txt`](switchyard-ops/agents/brakeman/namepool.txt) —
+railway occupations: `fireman`, `switchman`, `shunter`, `hostler`, `carman`, …
+The name identifies a *session*, not a specialty. Every brakeman claims from the
+same queue. Keep at least `max_active_sessions` names in the pool.
+
+The pool sits at `min_active_sessions = 0`: an idle worker is pure token burn,
+and claims are cheap. It scales up on demand and drains back to nothing.
+
+**A brakeman runs gastown's `mol-polecat-work`, unchanged.** That formula is
+agent-agnostic — it claims via `gc hook --claim`, scopes its worktree to the
+bead rather than the agent, and hands off to the refinery. Nothing in it
+requires the claimant to be called `polecat`. The one place the old name
+survives is the feature branch it cuts, `polecat/<bead-id>`, and that string is
+a wire contract the refinery validates on handoff. Renaming it would mean owning
+the handoff step forever. The agent is ours; the method stays gastown's.
 
 ## No roster to maintain
 

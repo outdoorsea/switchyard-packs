@@ -1,0 +1,52 @@
+# brakeman — the switchyard worker pool. One agent, N concurrent sessions.
+#
+# A brakeman claims a routed work bead, builds it in a bead-scoped worktree,
+# and hands the branch to the refinery for merge. This is the unit you sling
+# work to:
+#
+#   gc sling <rig>/switchyard-ops.brakeman <bead-id>
+#
+# ...or list it in the rig's `default_sling_targets` so a bare `gc sling <bead>`
+# lands here. Routing is by metadata: `gc` stamps `gc.routed_to=<qualified
+# name>` on the bead, and each session's work query claims beads addressed to
+# its own pool.
+#
+# scope = "rig": this agent only materializes where the pack is imported PER RIG
+# (`[rigs.imports.switchyard-ops]`). Importing switchyard-ops city-wide gives you
+# the orders; importing it into a rig gives you the workers. Most cities want both.
+#
+# Individual session names come from namepool.txt — see the note there.
+#
+# NOTE ON FORMULAS: a brakeman runs gastown's `mol-polecat-work`, unchanged.
+# That formula is agent-agnostic: it claims via `gc hook --claim`, scopes its
+# worktree to the *bead* rather than the agent, and hands off to
+# `{{binding_prefix}}refinery`. Nothing in it requires the claimant to be named
+# `polecat`. Only the feature branch it cuts, `polecat/<bead-id>`, carries that
+# name — and that string is a wire contract with the refinery, which validates
+# it on handoff. Renaming the branch means owning the handoff step forever, so
+# we don't. The agent is ours; the method stays gastown's.
+scope = "rig"
+
+# fresh: a worker starts each turn with a clean context. Resuming a polecat-style
+# worker replays a finished build for no benefit and burns the window.
+wake_mode = "fresh"
+
+# Worktrees are scoped to the work bead, not the agent, so a session can pick up
+# new work while an old worktree is still being recovered.
+work_dir = ".gc/worktrees/{{.Rig}}/workers/{{.AgentBase}}"
+
+nudge = "Run gc hook --claim --json now; if it returns work, execute the claimed formula immediately."
+
+# Vendored from the gastown pack (assets/scripts/worktree-setup.sh,
+# sha256 ab0a5ed4770dd27b3961fd7f1f5714cf55d30d1d9022127349a6a55cffb6a9c1).
+# {{.ConfigDir}} resolves to THIS pack, so the copy must live here — a pack
+# cannot reach into a sibling pack's assets.
+pre_start = ["{{.ConfigDir}}/assets/scripts/worktree-setup.sh {{.RigRoot}} {{.WorkDir}} {{.AgentBase}} --sync"]
+
+idle_timeout = "2h"
+
+# min 0: an idle worker is pure token burn, and claims are cheap. The pool scales
+# up on demand and drains back to nothing. Raise max_active_sessions to widen the
+# yard; namepool.txt must hold at least that many names.
+min_active_sessions = 0
+max_active_sessions = 4

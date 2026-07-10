@@ -6,6 +6,9 @@ set -u
 
 . "$(dirname "$0")/../lib/roster.sh"
 
+# Orders run once, at city scope. See sy_city_scope_only.
+sy_city_scope_only
+
 PROMPT="$(dirname "$0")/../prompts/intake-sweep.md"
 [ -r "$PROMPT" ] || exit 0
 MSG="$(cat "$PROMPT")"

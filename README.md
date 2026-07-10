@@ -63,6 +63,12 @@ agents from a city import and rig-scoped agents from a rig import: the city
 import gives you the orders, the rig import gives you the `brakeman` workers.
 Import it city-wide only and you get a heartbeat with nobody to sling to.
 
+`gc` registers the pack's orders under *both* imports, so each order would run
+once per rig on top of once for the city — duplicate nudges, duplicate mail.
+Every order here is city-wide by construction (they iterate rigs themselves), so
+the rig-scoped copies exit immediately: `gc` sets `GC_RIG` only for those, and
+each script starts with `sy_city_scope_only`.
+
 `gc import add` writes the `[imports.*]` entry and locks the resolved commit
 into `packs.lock`; see [`examples/city/`](examples/city/README.md) for the TOML
 it produces.

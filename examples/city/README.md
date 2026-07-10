@@ -10,6 +10,13 @@ these into a fresh city root and edit.
   tmux-userbindings.sh <- optional
 ```
 
+> **Setting up a new machine?** The guided, agent-executable runbook is
+> [`../../onboarding/gas-city.md`](../../onboarding/gas-city.md) — this page is the
+> reference for the files it seeds. The shipped `city.toml` also carries a
+> commented **token-hardening** block; read
+> [`../../docs/TOKEN-HARDENING.md`](../../docs/TOKEN-HARDENING.md) before you
+> uncomment it (the witness relaxation is non-Bedrock only).
+
 ## Bring it up
 
 ```sh

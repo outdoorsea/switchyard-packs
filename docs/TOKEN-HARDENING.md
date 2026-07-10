@@ -12,6 +12,10 @@ respawn to discover there is nothing to do.
 
 Optimize **wake/respawn frequency first.** Everything below is a corollary.
 
+Complementary lever, in [`OPERATING-MODEL.md`](OPERATING-MODEL.md#token-economy):
+pin a cheaper `model` on the mechanical tier (witness, boot, patrol). That cuts
+the *price* of each wake; this doc cuts the *count*. Do both.
+
 ## The levers, ranked
 
 ### 1. `witness.max_session_age` — a Bedrock workaround you probably don't need

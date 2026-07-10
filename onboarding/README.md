@@ -38,9 +38,9 @@ machine-local file — **never** hardcode it into a client's settings.
 
 | Surface | What it is | Guide |
 |---|---|---|
-| **Single terminal** | one agent + `switchyard-mcp` + `AGENTS.md` — the minimal setup | `single-terminal.md` *(next)* |
-| **Claude Code desktop** | the above, plus the `plugins/switchyard` slash commands | `claude-code.md` *(next)* |
-| **OpenAI desktop / Codex** | Codex or ChatGPT desktop with the MCP server; `AGENTS.md` is native | `openai-desktop.md` *(next)* |
+| **Single terminal** | one agent + `switchyard-mcp` + `AGENTS.md` — the minimal setup | [`single-terminal.md`](single-terminal.md) |
+| **Claude Code desktop** | the above, plus the `plugins/switchyard` slash commands | [`claude-code.md`](claude-code.md) |
+| **OpenAI desktop / Codex** | Codex or ChatGPT desktop with the MCP server; `AGENTS.md` is native | [`openai-desktop.md`](openai-desktop.md) |
 | **Hermes** | *(pending: client details)* | `hermes.md` |
 | **openclaw** | *(pending: client details)* | `openclaw.md` |
 | **Gas City** | the fleet: coordinators + `brakeman` workers on a heartbeat | [`../examples/city/`](../examples/city/README.md) + [`../docs/OPERATING-MODEL.md`](../docs/OPERATING-MODEL.md) |

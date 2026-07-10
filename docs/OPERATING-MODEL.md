@@ -92,6 +92,11 @@ Idle agents dominate cost, and they are a configuration choice:
   checks in rarely is a patrol agent that is not patrolling. Cut tool calls per
   turn; keep the cadence.
 
+For the concrete per-agent settings that put these into practice — the witness
+Bedrock respawn, deacon/witness `idle_timeout`, worker blast radius, and the
+`[[patches.agent]]` fully-qualified-name rule — see
+[`TOKEN-HARDENING.md`](TOKEN-HARDENING.md).
+
 ## Observability contract
 
 1. `gc status` must answer inside its timeout. A wedged probe is a P0 city bug,

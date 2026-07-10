@@ -4,6 +4,11 @@ switchyard is the backlog authority; an **agent** does the work. This directory
 gets any agent client connected and operating — from a single terminal to a full
 Gas City fleet.
 
+> **Standing up a whole Gas City on a fresh machine?** Don't read — delegate.
+> Open a coding-agent session there and paste [`new-machine.md`](new-machine.md);
+> it drives the [`gas-city.md`](gas-city.md) runbook end-to-end and stops to ask
+> you at the three human gates.
+
 ## The model: one core, many front doors
 
 Every surface below is the same two things:

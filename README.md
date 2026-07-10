@@ -8,11 +8,13 @@ from the API it calls. Pin a switchyard commit and you have pinned the server,
 the MCP tool surface, and the orders that use them, together.
 
 ```
+packs/onboarding/         first-run: pick your surface, connect it, drive switchyard
 packs/switchyard-ops/     Layer 3 — the city's 24-hour heartbeat (timed orders)
                                   + brakeman, the worker pool you sling to
 packs/switchyard-mcp/     Layer 2 — overlay: switchyard MCP into a rig's crew
 packs/examples/city/      a reference pack.toml + city.toml to copy
 packs/docs/OPERATING-MODEL.md   roles, layering, token economy, gotchas
+packs/docs/TOKEN-HARDENING.md   keep an idle fleet from paying to idle
 packs/docs/LOOP.md              the 24-hour cadence and escalation discipline
 ```
 

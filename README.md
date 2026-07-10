@@ -16,7 +16,13 @@ packs/docs/OPERATING-MODEL.md   roles, layering, token economy, gotchas
 packs/docs/LOOP.md              the 24-hour cadence and escalation discipline
 ```
 
-Start with [`docs/OPERATING-MODEL.md`](docs/OPERATING-MODEL.md), then copy
+**Setting up for the first time — any surface (single terminal, Claude Code,
+OpenAI desktop, Gas City)?** Start at [`onboarding/`](onboarding/README.md): one
+shared operating manual ([`AGENTS.md`](onboarding/AGENTS.md)) plus a per-client
+"register the MCP server" page.
+
+For the Gas City design of record, read
+[`docs/OPERATING-MODEL.md`](docs/OPERATING-MODEL.md), then copy
 [`examples/city/`](examples/city/README.md).
 
 ## Packs vs. the Claude Code plugin

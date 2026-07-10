@@ -68,3 +68,24 @@ formula_vars = { binding_prefix = "gastown." }
 #   name = "coordinator"
 #   min_active_sessions = 1
 #   max_active_sessions = 1
+
+# --- Token hardening (recommended; see docs/TOKEN-HARDENING.md) -------------
+# gastown crew are wake_mode="fresh", so every respawn/wake re-bills the full
+# prompt as input tokens — an idle city mostly pays for pinned agents waking to
+# find no work. Two safe cuts for a builtin:claude (NON-Bedrock) city:
+#
+#   deacon: hourly idle heartbeat -> every 4h
+# [[patches.agent]]
+#   name = "gastown.deacon"
+#   idle_timeout = "4h"
+#
+#   witness: rig-scoped, always-on. Its default max_session_age="5h" is a
+#   Bedrock STS cred-cache workaround (forces a full ~13KB-prompt respawn every
+#   5h); off Bedrock it just burns tokens. Relax it, per rig (no def-level
+#   fan-out — one entry per rig, fully-qualified name):
+# [[patches.agent]]
+#   name = "example-rig/gastown.witness"
+#   idle_timeout    = "3h"    # was 1h
+#   max_session_age = "24h"   # was 5h; on Bedrock use "7h30m" instead of removing
+#
+# Verify a patch landed:  gc config show | grep -A12 'name = "witness"'

@@ -41,8 +41,8 @@ machine-local file — **never** hardcode it into a client's settings.
 | **Single terminal** | one agent + `switchyard-mcp` + `AGENTS.md` — the minimal setup | [`single-terminal.md`](single-terminal.md) |
 | **Claude Code desktop** | the above, plus the `plugins/switchyard` slash commands | [`claude-code.md`](claude-code.md) |
 | **OpenAI desktop / Codex** | Codex or ChatGPT desktop with the MCP server; `AGENTS.md` is native | [`openai-desktop.md`](openai-desktop.md) |
-| **Hermes** | *(pending: client details)* | `hermes.md` |
-| **openclaw** | *(pending: client details)* | `openclaw.md` |
+| **Hermes** | Nous Research self-improving terminal agent + gateway; MCP-native, with per-server tool filtering | [`hermes.md`](hermes.md) |
+| **openclaw** | predecessor to Hermes — `hermes claw migrate` moves you over, then follow [`hermes.md`](hermes.md) | `openclaw.md` *(pending its repo)* |
 | **Gas City** | the fleet: coordinators + `brakeman` workers on a heartbeat | [`../examples/city/`](../examples/city/README.md) + [`../docs/OPERATING-MODEL.md`](../docs/OPERATING-MODEL.md) |
 
 **Every light surface is the same three steps:** install the client, register

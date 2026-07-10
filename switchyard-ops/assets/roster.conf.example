@@ -39,3 +39,12 @@
 # exactly the coordinator set: pinned, long-lived, one per rig.
 #
 # COORDINATORS="<rig>/<coordinator> <rig>/<coordinator>"
+
+# ---------------------------------------------------------------------------
+# MERGE_STRATEGY — what merge-gate stamps on beads routed to a worker pool.
+# Unset => "mr": the refinery opens a merge/pull request instead of landing the
+# commit itself. Set "direct" only if you genuinely want agents committing to
+# your default branch unreviewed (gastown's own default, and the reason this
+# order exists).
+#
+# MERGE_STRATEGY="mr"

@@ -1,0 +1,16 @@
+# Stamp merge_strategy on every bead routed to a worker pool, before the
+# refinery reaches it. gastown's refinery defaults to `direct`, which lands an
+# agent's unreviewed commit on the rig's default branch.
+#
+# Cadence is 5m, not 30m, because this is a RACE, not a sweep: a worker claims a
+# freshly slung bead within about a minute. The gate wins because the refinery
+# only reads merge_strategy at handoff — several minutes later, after the worker
+# has built, committed, and pushed. It is still a backstop, not a guarantee: the
+# durable fix is to stamp the bead at creation time, wherever beads are minted
+# from switchyard PRDs. Protect your default branch and an un-stamped bead fails
+# loudly instead of landing.
+[order]
+description = "Ensure worker-routed beads carry a merge_strategy so the refinery never merges unreviewed"
+trigger = "cooldown"
+interval = "5m"
+exec = "$PACK_DIR/assets/scripts/merge-gate.sh"

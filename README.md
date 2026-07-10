@@ -82,11 +82,32 @@ failure becomes mail to the mayor within one order cycle.**
 
 | Order | Every | Purpose |
 |---|---|---|
+| `merge-gate` | 5m | Worker beads carry a `merge_strategy` before the refinery sees them |
 | `loop-health` | 30m | Pinned coordinators alive; escalate when the status probe lies |
 | `intake-sweep` | 4h | Nudge coordinators to triage their switchyard project |
 | `nightly-retro` | 24h | Daily reports + improvement candidates |
 | `stray-reaper` | 6h | Sessions rooted at a stale city path |
 | `config-drift` | 6h | Config-as-code guard (no-ops if the city isn't a git repo) |
+
+### Review before merge
+
+gastown's refinery reads `metadata.merge_strategy` off the **work bead** and
+defaults to **`direct`** — it lands the agent's commit on your default branch,
+unreviewed. `gc sling --merge` does *not* set that: it is a `gc convoy create`
+flag and a silent no-op on a bead route.
+
+So `merge-gate` stamps every open bead routed to a `*.brakeman` pool with
+`merge_strategy=mr` (override via `MERGE_STRATEGY` in `roster.conf`). gastown
+decides *how* work merges; this pack decides *that it must be reviewed*.
+
+It is a backstop, not a guarantee — stamp the bead where it is minted if you
+can, and **protect your default branch** so an un-stamped bead fails loudly
+instead of landing.
+
+> **GitLab rigs:** gastown's `mr` mode shells out to `gh pr create` / `gh pr
+> view` and has no `glab` support, so on a GitLab remote the refinery cannot
+> open the MR. Per its own contract it records a blocked reason and escalates to
+> the mayor rather than merging. Fixing this belongs upstream in gastown.
 
 ## Workers: the brakeman pool
 

@@ -42,8 +42,8 @@ machine-local file — **never** hardcode it into a client's settings.
 | **Claude Code desktop** | the above, plus the `plugins/switchyard` slash commands | [`claude-code.md`](claude-code.md) |
 | **OpenAI desktop / Codex** | Codex or ChatGPT desktop with the MCP server; `AGENTS.md` is native | [`openai-desktop.md`](openai-desktop.md) |
 | **Hermes** | Nous Research self-improving terminal agent + gateway; MCP-native, with per-server tool filtering | [`hermes.md`](hermes.md) |
-| **openclaw** | predecessor to Hermes — `hermes claw migrate` moves you over, then follow [`hermes.md`](hermes.md) | `openclaw.md` *(pending its repo)* |
-| **Gas City** | the fleet: coordinators + `brakeman` workers on a heartbeat | [`../examples/city/`](../examples/city/README.md) + [`../docs/OPERATING-MODEL.md`](../docs/OPERATING-MODEL.md) |
+| **openclaw** | cross-platform personal assistant; MCP-capable, reads workspace `AGENTS.md` | [`openclaw.md`](openclaw.md) |
+| **Gas City** | the fleet: coordinators + `brakeman` workers on a heartbeat — **agent-executable setup runbook** | [`gas-city.md`](gas-city.md) |
 
 **Every light surface is the same three steps:** install the client, register
 `switchyard-mcp`, add `AGENTS.md`. The per-surface page only spells out *where*

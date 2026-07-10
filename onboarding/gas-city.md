@@ -54,48 +54,58 @@ never write it into any config file. See [`README.md`](README.md).
 
 ## Step 3 — Create the city
 
-Pick a city root (e.g. `~/gc-<name>`) and initialize it, then seed config from
-this repo's example.
+`gc init` **runs an interactive wizard by default** — an agent must pass flags to
+make it non-interactive. It scaffolds `.gc/`, `pack.toml`, `city.toml`,
+`packs.lock`, and prompt templates, and **brings up a managed-local Dolt store for
+the city** (even `--no-start` only skips the agents, not Dolt — so the store is
+live after this step):
 
 ```sh
-mkdir -p ~/gc-city && cd ~/gc-city
-gc init                                  # initializes the city + beads store
-# seed portable pins + machine-local roster from the examples:
-curl -fsSL https://raw.githubusercontent.com/outdoorsea/switchyard-packs/main/examples/city/pack.toml -o pack.toml
-curl -fsSL https://raw.githubusercontent.com/outdoorsea/switchyard-packs/main/examples/city/city.toml -o city.toml
+gc init --template gastown --default-provider claude ~/gc-<name>
+cd ~/gc-<name>
 ```
 
-**HUMAN decision:** what is the first rig — its **name**, short **prefix**, and
-the **git repo/path** of the product it works on? Edit `city.toml`:
-- rename `example-rig` → your rig name, set `prefix`, `default_branch`
-- keep `formula_vars = { binding_prefix = "gastown." }` — **required**, or the
-  worker handoff silently strands beads (see the root README)
-- keep `default_sling_targets = ["<rig>/switchyard-ops.brakeman"]`
+**Checkpoint:** scaffold exists and the city's Dolt is up.
+```sh
+ls .gc pack.toml city.toml packs.lock >/dev/null && echo "scaffold ok"
+gc dolt health        # Server: running … (started by init)
+```
 
-**Checkpoint:** `python3 -c "import tomllib,sys; tomllib.load(open('city.toml','rb')); tomllib.load(open('pack.toml','rb')); print('toml ok')"`
+## Step 4 — Add the first rig, then the switchyard packs  **(HUMAN)**
 
-## Step 4 — Pin and install the packs
+A rig is a **local checkout of the product's git repo**. Clone the product first;
+`gc rig add` probes its `origin/HEAD` and writes canonical rig imports.
 
-`pack.toml` ships with `<pin-a-…-commit>` placeholders. Resolve them with
-`gc import add`, which writes the pinned `[imports.*]` entry and locks the commit
-into `packs.lock`:
+**HUMAN decision:** which product repo, and the rig's **name** + bead **prefix**.
 
 ```sh
-# Layer 1: the coding platform (city-scope)
+# 1. register the product as a rig
+gc rig add /path/to/product-repo --name <rig> --prefix <p>
+
+# 2. see what the template already imported (add only what's missing below)
+gc import list
+
+# 3. city-scope, ONCE each — skip any already listed:
 gc import add https://github.com/gastownhall/gascity-packs/tree/main/gastown
-# Layer 3: the switchyard heartbeat + brakeman pool (city-scope, ONCE)
 gc import add https://github.com/outdoorsea/switchyard-packs/tree/main/switchyard-ops
-# Layer 2: the MCP overlay (PER RIG — repeat --rig for each rig)
+
+# 4. per-rig overlay (the rig must exist first):
 gc import add https://github.com/outdoorsea/switchyard-packs/tree/main/switchyard-mcp --rig <rig>
 
-gc import install
-gc import check
+gc import install && gc import check
 ```
-**Import `switchyard-ops` at city scope only** — a second `--rig` import
-double-registers every order. See the root README's scope table.
 
-**Checkpoint:** `gc import check` passes and `packs.lock` now has real SHAs (no
-`<pin-…>` left in `pack.toml`).
+Then add the **two required switchyard-ops settings** to your rig's block in
+`city.toml` — copy them verbatim from the reference
+[`examples/city/city.toml`](../examples/city/README.md) — and `gc reload`:
+- `formula_vars = { binding_prefix = "gastown." }` — without it the worker handoff
+  **silently strands beads**
+- `default_sling_targets = ["<rig>/switchyard-ops.brakeman"]`
+
+**Import `switchyard-ops` at city scope only** — a second `--rig` import
+double-registers every order (root README's scope table).
+
+**Checkpoint:** `gc import check` passes; `packs.lock` has real SHAs.
 
 ## Step 5 — Bring it up
 

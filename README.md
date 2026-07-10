@@ -45,29 +45,39 @@ mirror's root is this directory's root and each pack is a top-level subpath.
 The mirror is a projection, never a source. Send changes here.
 
 ```sh
-# city-wide: the heartbeat orders
+# city-wide, ONCE: the heartbeat orders AND a brakeman pool in every rig
 gc import add https://github.com/outdoorsea/switchyard-packs/tree/main/switchyard-ops
 
 # per rig: the MCP overlay, for each rig whose crew drives switchyard
 gc import add https://github.com/outdoorsea/switchyard-packs/tree/main/switchyard-mcp --rig YOUR_RIG
 
-# per rig, AGAIN: switchyard-ops at rig scope, which materializes the workers
-gc import add https://github.com/outdoorsea/switchyard-packs/tree/main/switchyard-ops --rig YOUR_RIG
-
 gc import install
 gc import check
 ```
 
-`switchyard-ops` is imported **twice on purpose**. `gc` expands city-scoped
-agents from a city import and rig-scoped agents from a rig import: the city
-import gives you the orders, the rig import gives you the `brakeman` workers.
-Import it city-wide only and you get a heartbeat with nobody to sling to.
+**Import `switchyard-ops` at city scope only.** One city import yields both the
+orders *and* a `brakeman` pool in every rig — `gc` expands a pack's rig-scoped
+agents into each rig from the city import. Adding `--rig` on top registers every
+order a second time under that rig, so `loop-health` and `intake-sweep` nudge
+twice per cycle and mail the mayor twice per escalation.
 
-`gc` registers the pack's orders under *both* imports, so each order would run
-once per rig on top of once for the city — duplicate nudges, duplicate mail.
-Every order here is city-wide by construction (they iterate rigs themselves), so
-the rig-scoped copies exit immediately: `gc` sets `GC_RIG` only for those, and
-each script starts with `sy_city_scope_only`.
+Measured on a 14-rig city:
+
+| Import scope | `brakeman` agents | order registrations |
+|---|---|---|
+| city only | 14 | 1 |
+| rig only | 1 | 1 (that rig) |
+| both | 14 | **2** |
+
+To keep workers out of a rig, suspend the agent there rather than withholding
+the import:
+
+```toml
+[[patches.agent]]
+  dir = "<rig>"
+  name = "brakeman"
+  suspended = true
+```
 
 `gc import add` writes the `[imports.*]` entry and locks the resolved commit
 into `packs.lock`; see [`examples/city/`](examples/city/README.md) for the TOML

@@ -14,9 +14,6 @@ set -u
 
 . "$(dirname "$0")/../lib/roster.sh"
 
-# Orders run once, at city scope. See sy_city_scope_only.
-sy_city_scope_only
-
 CITY_NAME="$(sy_city_name)"
 MARKER="$(sy_state_dir)/loop-health.probe-alerted"
 

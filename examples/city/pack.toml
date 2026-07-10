@@ -28,7 +28,9 @@ schema = 2
     source = "https://github.com/gastownhall/gascity/tree/main/examples/bd"
     version = "sha:<pin-a-gascity-commit>"
 
-  # --- Layer 3: the city heartbeat ------------------------------------------
+  # --- Layer 3: the city heartbeat + the worker pool -------------------------
+  # This ONE import yields both: the timed orders, and a brakeman pool in every
+  # rig. Do not also import it per-rig — that double-registers every order.
   # switchyard-packs is the PUBLIC mirror of switchyard's packs/ tree — clone it
   # anonymously, pin a commit. Prefer `gc import add <url>` over hand-editing:
   # it resolves the sha and writes packs.lock for you.

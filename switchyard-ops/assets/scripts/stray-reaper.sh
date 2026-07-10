@@ -6,9 +6,6 @@ set -u
 
 . "$(dirname "$0")/../lib/roster.sh"
 
-# Orders run once, at city scope. See sy_city_scope_only.
-sy_city_scope_only
-
 CITY="$(sy_city)"
 CITY_NAME="$(sy_city_name)"
 

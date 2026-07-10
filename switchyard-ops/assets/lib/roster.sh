@@ -50,18 +50,28 @@ sy_timeout() {
 sy_city() { printf '%s' "${GC_CITY:?switchyard-ops: GC_CITY is not set — orders must run under gc}"; }
 sy_city_name() { basename "$(sy_city)"; }
 
-# This pack is imported TWICE — city scope for the orders, rig scope for the
-# brakeman agent (gc expands city-scoped agents from a city import and
-# rig-scoped agents from a rig import). gc registers the pack's orders under
-# BOTH, so every order would otherwise run once per rig plus once for the city:
-# duplicate nudges, duplicate mail, N redundant sweeps.
+# IMPORT THIS PACK AT CITY SCOPE ONLY.
 #
-# Every order is city-wide by construction — each already iterates rigs itself.
-# So the rig-scoped copies exit immediately. gc sets GC_RIG only for the
-# rig-scoped invocation.
-sy_city_scope_only() {
-  if [ -n "${GC_RIG:-}" ]; then exit 0; fi
-}
+#   [imports.switchyard-ops]        in pack.toml     <- correct
+#   [rigs.imports.switchyard-ops]   in city.toml     <- redundant, and harmful
+#
+# A city import alone yields BOTH: the orders (registered once) and a brakeman
+# pool in every rig — gc expands a pack's rig-scoped agents into each rig from
+# the city import. Adding the rig import as well registers every order a second
+# time under that rig, so loop-health and intake-sweep nudge twice per cycle and
+# mail the mayor twice per escalation.
+#
+# Measured on a 14-rig city:
+#   city only -> 14 brakemen, 1 merge-gate registration
+#   rig only  ->  1 brakeman,  1 merge-gate registration (that rig)
+#   both      -> 14 brakemen, 2 merge-gate registrations
+#
+# To keep workers out of a rig, suspend the agent there rather than withholding
+# the import:
+#   [[patches.agent]]
+#     dir = "<rig>"
+#     name = "brakeman"
+#     suspended = true
 
 # gc gives every pack a per-city, per-pack state dir. Fall back to the city's
 # runtime dir when a caller is invoked outside an order (e.g. a manual test).

@@ -19,9 +19,6 @@ set -u
 
 . "$(dirname "$0")/../lib/roster.sh"
 
-# Orders run once, at city scope. See sy_city_scope_only.
-sy_city_scope_only
-
 sy_load_conf
 # A city that genuinely wants direct-to-branch merges sets MERGE_STRATEGY=direct
 # in roster.conf. Anything else is passed through verbatim (e.g. "local").

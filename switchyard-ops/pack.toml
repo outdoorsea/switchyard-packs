@@ -15,11 +15,13 @@
 #   brakeman       — the worker pool. This is what you sling beads to. Sessions
 #                    are named after railway occupations (see its namepool.txt).
 #
-# TWO IMPORT SCOPES. gc expands city-scoped agents from a city import and
-# rig-scoped agents from a rig import, so this pack is imported twice:
-#   [imports.switchyard-ops]       -> the five orders (the city heartbeat)
-#   [rigs.imports.switchyard-ops]  -> brakeman (workers inside that rig)
-# Import it city-wide only and you get a heartbeat with nobody to sling to.
+# IMPORT AT CITY SCOPE ONLY — `[imports.switchyard-ops]` in pack.toml.
+# One city import yields BOTH the orders and a brakeman pool in every rig: gc
+# expands a pack's rig-scoped agents into each rig from the city import. Adding
+# `[rigs.imports.switchyard-ops]` on top registers every order a SECOND time
+# under that rig — duplicate nudges, duplicate mail. To keep workers out of a
+# rig, suspend the agent there ([[patches.agent]] suspended = true) rather than
+# withholding the import.
 #
 # CITY-AGNOSTIC: this pack names no rig, and the only agent it names is its own.
 # The liveness roster is derived from `gc agent list --json` (pool.min >= 1, not

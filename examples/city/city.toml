@@ -47,13 +47,10 @@ formula_vars = { binding_prefix = "gastown." }
     [rigs.imports.switchyard-mcp]
       source = "https://github.com/outdoorsea/switchyard-packs/tree/main/switchyard-mcp"
       version = "sha:<pin-a-mirror-commit>"
-    # switchyard-ops is imported city-wide too (pack.toml) for its orders. THIS
-    # rig-scoped import is what materializes the brakeman worker pool.
-    # Sling explicitly with:
+    # switchyard-ops is NOT imported here. Its single city-scope import
+    # (pack.toml) already gives this rig a brakeman pool; importing it again at
+    # rig scope would register every order a second time. Sling with:
     #   gc sling example-rig/switchyard-ops.brakeman ex-1234
-    [rigs.imports.switchyard-ops]
-      source = "https://github.com/outdoorsea/switchyard-packs/tree/main/switchyard-ops"
-      version = "sha:<pin-a-mirror-commit>"
 
 # --- Coordinators: pinned. Workers: elastic. -------------------------------
 # A coordinator is a long-lived crew agent that owns one rig's switchyard

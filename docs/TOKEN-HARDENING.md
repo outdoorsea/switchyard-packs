@@ -143,3 +143,16 @@ Put in `city.toml` under `[patches]`. Repeat the witness block for each rig.
 - **Deterministic escalation.** The `oversight-rig` pack (gascity-packs) escalates
   via a condition-triggered order → mechanical rollup script, with no second agent
   re-judging the first. That pattern — not the pack — is worth adopting here.
+- **Cut the coordinator first-turn.** A pinned coordinator's fresh wake re-derives
+  the whole rig from `gc prime` at max effort — ~12k tokens and several minutes
+  observed. Feed it a *smallest-useful context pack* (switchyard's Context-Assembly
+  work) and/or drop its effort tier, so a routine triage turn is cheap.
+- **Event-driven coordinator wakes.** Coordinators poll on a timer even when their
+  project has no new work. A companion SSE → wake bridge (switchyard's town-event
+  bridge) would wake a coordinator only when real work arrives — idle rigs cost
+  ~nothing instead of a full LLM turn per interval.
+- **One dispatch source per rig.** If both the companion (`local_dispatch`) and a
+  coordinator triage-and-sling, work is handled twice. Pick one path per rig.
+- **Cap the worker pools.** `polecat` and `brakeman` default to `max_active_sessions
+  = 5`; capping to 2 per rig bounds concurrent build churn — token spend *and* the
+  #191 drain-churn blast radius — without starving throughput.

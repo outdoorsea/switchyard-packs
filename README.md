@@ -27,6 +27,58 @@ For the Gas City design of record, read
 [`docs/OPERATING-MODEL.md`](docs/OPERATING-MODEL.md), then copy
 [`examples/city/`](examples/city/README.md).
 
+## Roles at a glance
+
+Work flows in one loop: **switchyard → companion → coordinator → worker →
+refinery → back to switchyard.** The switchyard cloud is the backlog authority;
+everything else is a role in the local Gas City.
+
+```mermaid
+flowchart TB
+  subgraph CLOUD["switchyard.work — backlog authority"]
+    PRD["approved PRDs · epics · claim pool"]
+  end
+  subgraph CITY["Gas City (one machine)"]
+    subgraph RIG["per rig × N"]
+      comp["companion<br/>daemon · no LLM"]
+      coord["coordinator<br/>compass/magnet/… · pinned"]
+      pool["brakeman / polecat<br/>worker pool · ≤2"]
+      ref["refinery<br/>on-demand"]
+      wit["witness<br/>always-on"]
+    end
+    subgraph CREW["city crew · gastown"]
+      mayor["mayor"]
+      deacon["deacon"]
+      boot["boot"]
+      dog["dog pool"]
+    end
+  end
+  PRD -->|sync approved work| comp
+  comp -->|mint local beads + notify| coord
+  coord -->|sling| pool
+  pool -->|branch| ref
+  ref -->|merged PR| comp
+  comp -->|report progress| PRD
+  wit -.->|watch stuck / orphans| pool
+```
+
+| Role | Layer | LLM? | Lifecycle | Job |
+|---|---|:--:|---|---|
+| **switchyard** | cloud | — | — | PRDs, epics, the claim pool — the source of truth |
+| **companion** | per-rig bridge | no | daemon | sync approved PRDs → local beads; report progress up |
+| **coordinator** (compass/magnet/…) | per-rig | yes | **pinned** | triage the rig's switchyard project; sling work to the pool |
+| **brakeman** / **polecat** | per-rig | yes | on-demand pool (≤2) | claim a bead → build in a scoped worktree → hand off |
+| **refinery** | per-rig | yes | on-demand | review + merge (opens the MR/PR per `merge_strategy`) |
+| **witness** | per-rig | yes | **always-on** | watch for stuck beads, orphaned work, lease expiry |
+| **mayor** | city | yes | always-on | human interface + city-level coordination |
+| **deacon** | city | yes | always-on | patrol: health, queue starvation, maintenance |
+| **boot** | city | yes | watchdog | controller freeze-detector |
+| **dog** | city | yes | on-demand pool | mechanical maintenance (stale-DB sweeps, GC) |
+
+The **always-on** tiers (witness × rigs, mayor, deacon) dominate a *quiet*
+city's cost — they wake to find no work. Keeping that cheap is the whole subject
+of [`docs/TOKEN-HARDENING.md`](docs/TOKEN-HARDENING.md).
+
 ## Packs vs. the Claude Code plugin
 
 [`plugins/switchyard/`](../plugins/switchyard) and these packs solve different

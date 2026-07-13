@@ -1,0 +1,13 @@
+# disk-watch: gc has on-demand doctor checks for disk (worktree-disk-size,
+# dolt-noms-size, events-log-size) but nothing SCHEDULES them, so a rig worktree
+# or backup dir can bloat for days unseen. disk-watch runs them on a cadence and
+# mails the mayor on breach — the loop's "silent problem becomes visible"
+# invariant, applied to disk. DETECTOR ONLY: it deletes nothing (events-rotate is
+# the sole auto-actioner; everything else is unsafe to auto-delete). Thresholds
+# are env-tunable (DISK_WATCH_*_MB); mails at most once per 24h so a known-large
+# footprint does not nag.
+[order]
+description = "Mail the mayor when a city path (worktree/backup/.gc/event log) crosses a size threshold"
+trigger = "cooldown"
+interval = "12h"
+exec = "$PACK_DIR/assets/scripts/disk-watch.sh"

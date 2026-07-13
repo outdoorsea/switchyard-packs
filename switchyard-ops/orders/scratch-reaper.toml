@@ -1,0 +1,15 @@
+# scratch-reaper: when a formula runs `gc` from the wrong cwd, gc creates a
+# stunted .gc/ right there — leaving orphaned dirs at the CITY ROOT (observed:
+# mol-dog-* left ~25 gff-<bead>[-<formula>]/ dirs, each holding only .gc/). They
+# are not worktrees and hold no data (no Dolt store) — just session scratch — but
+# they accumulate as clutter. stray-reaper reports stray SESSIONS; this reports
+# stray gc-SCRATCH dirs. Same invariant: a leftover becomes mail to the mayor.
+#
+# Report-only by default (safe). SCRATCH_REAPER_PRUNE=1 also removes the ones
+# whose ONLY entry is .gc/ (guaranteed no build/work artifacts); anything with
+# extra content is reported, never deleted.
+[order]
+description = "Report (optionally prune) orphaned gc-scratch dirs at the city root"
+trigger = "cooldown"
+interval = "6h"
+exec = "$PACK_DIR/assets/scripts/scratch-reaper.sh"

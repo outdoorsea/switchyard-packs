@@ -33,6 +33,23 @@ for entry in $(sy_roster); do
   fi
 done
 
+# Debounce mailing (NOT nudging): a coordinator missing for a SINGLE cycle is
+# usually a transient reconcile blip — a restart respawns ~all pinned sessions at
+# once and they return within a cycle. Nudge every miss immediately (below), but
+# only MAIL for agents missing across TWO consecutive checks, or a known reconcile
+# trains the mayor to ignore loop-health. State: last cycle's misses.
+LAST_MISSING="$(sy_state_dir)/loop-health.missing-last"
+prev_missing=""
+[ -f "$LAST_MISSING" ] && prev_missing="$(cat "$LAST_MISSING" 2>/dev/null)"
+persist=""
+for a in $missing; do
+  for b in $prev_missing; do
+    [ "$a" = "$b" ] && persist="$persist $a" && break
+  done
+done
+mkdir -p "$(dirname "$LAST_MISSING")" 2>/dev/null
+printf '%s' "$missing" > "$LAST_MISSING" 2>/dev/null
+
 probe_ok=1
 sy_timeout 90 gc status >/dev/null 2>&1 || probe_ok=0
 
@@ -58,14 +75,14 @@ if [ -f "$MARKER" ] && [ -z "$(find "$MARKER" -mmin +1440 2>/dev/null)" ]; then
   recently_alerted=1
 fi
 
-if [ "$probe_ok" -eq 0 ] && [ -n "$missing" ]; then
-  gc mail send mayor -s "ESCALATION loop-health: probe down AND pinned sessions missing" -m "The runtime status probe did not answer within 90s AND these pinned sessions had no live process:$missing. This is the blind-reconciler failure mode: nothing can wake anything, because everything reads the probe. Sessions were nudged/woken; verify, and consider a supervisor bounce if the reconciler does not converge." >/dev/null 2>&1
+if [ "$probe_ok" -eq 0 ] && [ -n "$persist" ]; then
+  gc mail send mayor -s "ESCALATION loop-health: probe down AND pinned sessions missing" -m "The runtime status probe did not answer within 90s AND these pinned sessions had no live process for two consecutive checks:$persist. This is the blind-reconciler failure mode: nothing can wake anything, because everything reads the probe. Sessions were nudged/woken; verify, and consider a supervisor bounce if the reconciler does not converge." >/dev/null 2>&1
   touch "$MARKER" 2>/dev/null
 elif [ "$probe_ok" -eq 0 ] && [ "$recently_alerted" -eq 0 ]; then
   gc mail send mayor -s "loop-health: runtime status probe slow/failing (daily notice)" -m "gc status did not answer within 90s. All pinned sessions have live processes, so this is the chronic slow-probe condition, not an outage. This notice repeats at most once per 24h." >/dev/null 2>&1
   touch "$MARKER" 2>/dev/null
-elif [ -n "$missing" ]; then
-  gc mail send mayor -s "loop-health: nudged stopped coordinators" -m "These pinned sessions had no live process and were nudged awake:$missing" >/dev/null 2>&1
+elif [ -n "$persist" ]; then
+  gc mail send mayor -s "loop-health: nudged stopped coordinators" -m "These pinned sessions had no live process across two consecutive checks and were nudged awake:$persist" >/dev/null 2>&1
 fi
 
 exit 0

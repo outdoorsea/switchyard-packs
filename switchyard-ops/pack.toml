@@ -8,6 +8,8 @@
 #   stray-reaper   — detect sessions from foreign/stale city paths (6h)
 #   config-drift   — config-as-code guard (6h; no-ops if the city isn't a repo)
 #   events-rotate  — cap .gc/events.jsonl to a recent tail (24h; gc has no retention)
+#   scratch-reaper — report/prune orphaned gc-scratch dirs at the city root (6h)
+#   disk-watch     — mail the mayor when a path crosses a size threshold (12h)
 #
 # Governing invariant: every silent failure becomes mail to the mayor within
 # one order cycle.

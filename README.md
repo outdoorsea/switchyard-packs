@@ -153,7 +153,7 @@ source = "/path/to/switchyard/packs/switchyard-ops"
 
 ## What `switchyard-ops` gives you
 
-Five mechanical orders, run by the dog pool, under one invariant: **every silent
+Six mechanical orders, run by the dog pool, under one invariant: **every silent
 failure becomes mail to the mayor within one order cycle.**
 
 | Order | Every | Purpose |
@@ -164,6 +164,7 @@ failure becomes mail to the mayor within one order cycle.**
 | `nightly-retro` | 24h | Daily reports + improvement candidates |
 | `stray-reaper` | 6h | Sessions rooted at a stale city path |
 | `config-drift` | 6h | Config-as-code guard (no-ops if the city isn't a git repo) |
+| `events-rotate` | 24h | Cap `.gc/events.jsonl` to a recent tail (gc ships no retention for it) |
 
 ### Review before merge
 

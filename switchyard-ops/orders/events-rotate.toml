@@ -1,0 +1,21 @@
+# gc appends every session/order/bead event to .gc/events.jsonl and ships NO
+# retention for it — unlike order-tracking beads, which auto-prune on a TTL. At
+# an observed ~48 MB/day it crosses gc-doctor's 100 MB threshold in ~2 days and
+# grows ~1.5 GB/month unbounded. This order caps it: keep the recent tail, drop
+# the rest.
+#
+# Truncate-only, in-place. The log is append-only telemetry keyed by `seq`, not
+# event-sourced state — gc never replays it (gc-doctor itself recommends
+# truncation), so dropping old lines is safe. The rewrite MUST stay in-place
+# (`> file`, same inode) because gc holds the file with a live O_APPEND fd: a
+# rename would strand that fd on the unlinked old inode and lose every
+# subsequent event until gc restarts. The script copy-truncates accordingly.
+#
+# Tunables (env, e.g. from $GC_PACK_STATE_DIR/roster.conf):
+#   EVENTS_ROTATE_MAX_MB     only rotate above this size (default 100)
+#   EVENTS_ROTATE_KEEP_LINES tail retained on rotate     (default 30000, ~1 day)
+[order]
+description = "Cap .gc/events.jsonl to a recent tail (truncate-only, in-place)"
+trigger = "cooldown"
+interval = "24h"
+exec = "$PACK_DIR/assets/scripts/events-rotate.sh"

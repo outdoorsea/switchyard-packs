@@ -1,9 +1,15 @@
-# scratch-reaper: when a formula runs `gc` from the wrong cwd, gc creates a
-# stunted .gc/ right there — leaving orphaned dirs at the CITY ROOT (observed:
-# mol-dog-* left ~25 gff-<bead>[-<formula>]/ dirs, each holding only .gc/). They
-# are not worktrees and hold no data (no Dolt store) — just session scratch — but
-# they accumulate as clutter. stray-reaper reports stray SESSIONS; this reports
-# stray gc-SCRATCH dirs. Same invariant: a leftover becomes mail to the mayor.
+# scratch-reaper: report orphaned gc-scratch dirs at the CITY ROOT. Each is the
+# work_dir of an ephemeral agent session, left behind when that session drained:
+# an ephemeral session derives its work_dir from its scope root, so an agent
+# scoped to the city lands directly in the city root (observed: mol-dog-* left
+# ~25 gff-<bead>[-<formula>]/ dirs, each holding only .gc/) and nothing removes
+# the directory when the session ends. They are not worktrees and hold no data
+# (no Dolt store) — just session scratch — but they accumulate as clutter.
+# stray-reaper reports stray SESSIONS; this reports stray gc-SCRATCH dirs. Same
+# invariant: a leftover becomes mail to the mayor.
+#
+# A RUNNING session's work_dir has the same shape, so the script gates every
+# removal on the session records — see its header for the full contract.
 #
 # Report-only by default (safe). SCRATCH_REAPER_PRUNE=1 also removes the ones
 # whose ONLY entry is .gc/ (guaranteed no build/work artifacts); anything with

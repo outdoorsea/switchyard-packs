@@ -1,10 +1,24 @@
 #!/bin/sh
-# scratch-reaper: report orphaned gc-scratch directories at the CITY ROOT. When a
-# formula runs `gc` from the wrong cwd, gc creates a stunted .gc/ there (seen:
-# mol-dog-* leaving gff-<bead>[-<formula>]/ dirs, each holding only .gc/). They are
-# not worktrees and hold no data (no Dolt store) — just session scratch — but they
-# pile up as clutter. stray-reaper reports stray SESSIONS; this reports stray
-# gc-SCRATCH dirs. Same invariant: a leftover becomes mail to the mayor.
+# scratch-reaper: report orphaned gc-scratch directories at the CITY ROOT.
+#
+# WHAT THEY ARE. Each one is the work_dir of an ephemeral agent session, left
+# behind when that session drained. An ephemeral session derives its work_dir
+# from its SCOPE ROOT, so an agent scoped to the city (the dog pool) lands
+# directly in the city root — creating gff-<bead>[-<formula>]/ there, each
+# holding only a .gc/ — and nothing removes that directory when the session
+# ends (seen: mol-dog-* leaving ~25 of them). Removing it at drain time is a
+# gas-town core change, tracked separately; this sweep contains the symptom.
+#
+# That origin is the whole reason for the gates below: these directories are
+# not the debris of a stray process, they are what a session's working
+# directory looks like — and a RUNNING session's work_dir has the identical
+# shape. Anything this script proposes for removal is therefore a directory it
+# must first prove is nobody's. See the live-session gate further down.
+#
+# They are not worktrees and hold no data (no Dolt store) — just session
+# scratch — but they pile up as clutter. stray-reaper reports stray SESSIONS;
+# this reports stray gc-SCRATCH dirs. Same invariant: a leftover becomes mail
+# to the mayor.
 #
 # Signature (city-agnostic): a root dir with a .gc/ but no .git/ — rig checkouts
 # have .git and are excluded; config/compiled dirs have no .gc/.
@@ -281,7 +295,7 @@ done
 
 [ -z "$found$pruned$kept$live$busy$unverified" ] && exit 0
 
-body="Orphaned gc-scratch directories at the city root — a formula ran gc from the wrong cwd and left a stray .gc/. They hold session scratch, not data."
+body="Orphaned gc-scratch directories at the city root — work_dirs of ephemeral agent sessions, left behind when the session drained. They hold session scratch, not data."
 [ -n "$pruned" ] && body="$body
 
 PRUNED (contained only .gc/):$pruned"

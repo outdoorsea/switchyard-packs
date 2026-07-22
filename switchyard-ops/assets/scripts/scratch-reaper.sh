@@ -11,13 +11,31 @@
 #
 # Report-only by default. SCRATCH_REAPER_PRUNE=1 also removes the ones whose ONLY
 # top-level entry is .gc/ (guaranteed no build/work artifacts); anything with
-# extra content is reported, never deleted.
+# extra content is reported, never deleted. SCRATCH_REAPER_ONLY=<dir> narrows the
+# sweep to a single city-root directory — the form the report hands back, so a
+# human acts on one candidate through the gates instead of a blanket rm -rf.
 set -u
 
 . "$(dirname "$0")/../lib/roster.sh"
 
+# Absolute path to this script, resolved BEFORE the cd below, so the report can
+# hand back a command that runs from anywhere.
+SELF="$0"
+case "$SELF" in
+/*) ;;
+*) SELF="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/$(basename "$0")" ;;
+esac
+
 CITY="$(sy_city)"
 PRUNE="${SCRATCH_REAPER_PRUNE:-0}"
+
+# Optional single-candidate scope. Accepts the bare name the report prints, and
+# tolerates a trailing slash or a full path pasted back.
+ONLY="${SCRATCH_REAPER_ONLY:-}"
+ONLY="${ONLY%/}"
+case "$ONLY" in
+"$CITY"/*) ONLY="${ONLY#"$CITY"/}" ;;
+esac
 
 cd "$CITY" 2>/dev/null || exit 0
 
@@ -92,7 +110,35 @@ sy_live_owner() {
     }'
 }
 
+# sy_prune_dir DIR — remove DIR, but only if EVERY gate still holds at this
+# instant. The scan-time verdict is deliberately NOT trusted here: the session
+# roster is re-read and the shape/contents re-tested immediately before the rm,
+# so a directory that has become a live session's work_dir since the scan is
+# refused, not deleted. Fail closed — an unreadable roster refuses the removal.
+# Prints the outcome: ok | gone | failed | "live <owner>" | "content <entries>" |
+# unverified.
+sy_prune_dir() {
+  _d="$1"
+  [ -d "$_d" ] && [ -d "$_d/.gc" ] || { printf 'gone\n'; return; }
+  if [ -e "$_d/.git" ]; then printf 'content %s\n' '.git'; return; fi
+
+  _fresh="$(sy_session_dirs)" || { printf 'unverified\n'; return; }
+  sessions="$_fresh"                       # later candidates get the fresher roster too
+  _owner="$(sy_live_owner "$_d")"
+  if [ -n "$_owner" ]; then printf 'live %s\n' "$_owner"; return; fi
+
+  _others=$(ls -A "$_d" 2>/dev/null | grep -vxF '.gc')
+  if [ -n "$_others" ]; then
+    printf 'content %s\n' "$(printf '%s' "$_others" | tr '\n' ' ')"
+    return
+  fi
+
+  rm -rf -- "$_d" 2>/dev/null || { printf 'failed\n'; return; }
+  printf 'ok\n'
+}
+
 found=""
+guidance=""
 pruned=""
 kept=""
 live=""
@@ -101,6 +147,7 @@ unverified=""
 for entry in */; do
   d="${entry%/}"
   [ -d "$d" ] || continue
+  [ -n "$ONLY" ] && [ "$d" != "$ONLY" ] && continue
   [ -d "$d/.gc" ] || continue      # gc-scratch present
   [ -e "$d/.git" ] && continue     # rig checkout — never touch
 
@@ -122,11 +169,30 @@ for entry in */; do
   # Is .gc/ the ONLY top-level entry? Then it holds no work/build artifacts.
   others=$(ls -A "$d" 2>/dev/null | grep -vxF '.gc')
   if [ -z "$others" ]; then
-    if [ "$PRUNE" = "1" ] && rm -rf -- "$d" 2>/dev/null; then
-      pruned="$pruned $d"
-    else
-      found="$found $d"
+    if [ "$PRUNE" != "1" ]; then
+      found="$found
+- $d"
+      guidance="$guidance
+  SCRATCH_REAPER_PRUNE=1 SCRATCH_REAPER_ONLY='$d' $SELF"
+      continue
     fi
+    # Every gate is re-evaluated inside sy_prune_dir, immediately before the rm.
+    outcome="$(sy_prune_dir "$d")"
+    case "$outcome" in
+    ok) pruned="$pruned
+- $d" ;;
+    gone) : ;;                     # collected or renamed between scan and prune
+    live\ *) live="$live
+- $d (session: ${outcome#live }; became live after the scan — not removed)" ;;
+    content\ *) kept="$kept
+- $d (also contains: ${outcome#content })" ;;
+    unverified) unverified="$unverified
+- $d" ;;
+    *) found="$found
+- $d"
+      guidance="$guidance
+  SCRATCH_REAPER_PRUNE=1 SCRATCH_REAPER_ONLY='$d' $SELF" ;;
+    esac
   else
     kept="$kept
 - $d (also contains: $(printf '%s' "$others" | tr '\n' ' '))"
@@ -141,8 +207,13 @@ body="Orphaned gc-scratch directories at the city root — a formula ran gc from
 PRUNED (contained only .gc/):$pruned"
 [ -n "$found" ] && body="$body
 
-SAFE TO REMOVE (only .gc/, no artifacts) — set SCRATCH_REAPER_PRUNE=1 to auto-remove, or:
-  rm -rf$found"
+COLLECTABLE AT SCAN TIME (only .gc/, no artifacts):$found
+This verdict is already stale by the time you read it — any of these can become a
+live session's work_dir before you act, so no blanket delete command is offered.
+Remove them one at a time by re-running the reaper, which re-checks every gate
+(rig checkout, open session, contents) against the state at that instant and
+refuses anything that has since come alive:$guidance
+Or sweep every candidate that still qualifies: SCRATCH_REAPER_PRUNE=1 $SELF"
 [ -n "$kept" ] && body="$body
 
 KEPT (have other content — review before removing):$kept"

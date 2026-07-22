@@ -41,6 +41,16 @@ cd "$CITY" 2>/dev/null || exit 0
 sessions=""            # "<work_dir>\t<session>" per line — open session beads only
 sessions_unavailable=""
 
+# A lookup can also fail by NOT RETURNING. `gc session list` reads the city's
+# store, and a wedged store makes it block rather than exit non-zero — so an
+# unbounded `$(gc ...)` hangs the whole sweep, and the directories this gate
+# exists to protect get no verdict, no report, and no mail at all. That is a
+# lookup that "cannot be completed" just as much as a parse failure is, so it
+# must land in the same fail-closed path: bound the call and treat the timeout
+# as unavailable. 30s is far above a healthy list and far below the sweep's
+# cadence; hitting it costs one uncollected directory.
+SESSION_LOOKUP_TIMEOUT="${SCRATCH_REAPER_SESSION_TIMEOUT:-30}"
+
 # sy_session_dirs — emit the tab-separated (work_dir, session) pairs of every
 # session whose bead is NOT closed. Non-zero exit = the lookup failed.
 sy_session_dirs() {
@@ -48,9 +58,14 @@ sy_session_dirs() {
   # --state all + an explicit `closed` filter, so a state this gc spells
   # differently (asleep/suspended/quarantined) can never be read as collectable;
   # fall back to the default listing for a gc without --state.
-  _raw="$(gc session list --json --state all 2>/dev/null)"
+  #
+  # Discard the output of any non-zero probe (`|| _raw=""`): a timeout kills gc
+  # mid-write, and truncated JSON must never be parsed as a partial session
+  # list — half a roster reads as "these sessions don't exist", i.e. as license
+  # to delete them.
+  _raw="$(sy_timeout "$SESSION_LOOKUP_TIMEOUT" gc session list --json --state all 2>/dev/null)" || _raw=""
   if ! printf '%s\n' "$_raw" | jq -e '(.ok != false) and ((.sessions|type) == "array")' >/dev/null 2>&1; then
-    _raw="$(gc session list --json 2>/dev/null)"
+    _raw="$(sy_timeout "$SESSION_LOOKUP_TIMEOUT" gc session list --json 2>/dev/null)" || _raw=""
     printf '%s\n' "$_raw" | jq -e '(.ok != false) and ((.sessions|type) == "array")' >/dev/null 2>&1 || return 1
   fi
   printf '%s\n' "$_raw" | jq -r '

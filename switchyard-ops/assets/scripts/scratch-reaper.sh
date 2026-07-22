@@ -110,13 +110,77 @@ sy_live_owner() {
     }'
 }
 
+# --- process liveness gate (switchyard PRD #175) -----------------------------
+#
+# The session roster answers "who OWNS this directory". This answers a different
+# question — "is anything actually working inside it right now" — and so covers
+# the case the roster cannot: a live process left behind by a session whose bead
+# has already closed.
+#
+# The probe has to be NARROW, and that is the whole difficulty. The first draft
+# ran `lsof +D` and read ANY line of output as in-use. But `gc supervisor` leaks
+# read-only DIR handles across the entire city root, so once it has scanned,
+# every candidate looks busy and the reaper silently collects nothing, for ever.
+# That is not a fixed reaper, only a quieter broken one. Exactly two things count
+# as use:
+#
+#   - a process's working directory is the candidate or something below it (the
+#     cwd / twd / rtd descriptors), or
+#   - a process holds a descriptor on a path STRICTLY DEEPER than the candidate.
+#
+# A bare handle on the candidate's own directory inode is a scan artifact and
+# counts for nothing, however many of them pile up.
+LSOF_TIMEOUT="${SCRATCH_REAPER_LSOF_TIMEOUT:-15}"
+
+# sy_dir_users DIR — read lsof output on stdin; print "<command> (pid N)" for the
+# first process that genuinely uses DIR, and nothing at all when none does.
+#
+# Deliberately split from the lsof call: classification is the part that can be
+# wrong in a way nobody notices, so it must be exercisable against fixture output
+# rather than live process state (scripts/scratch-reaper.test.sh).
+sy_dir_users() {
+  awk -v dir="$1" '
+    $1 == "COMMAND" { next }              # header
+    NF < 9 { next }                       # not a file line
+    {
+      name = $9                           # NAME runs to end of line (paths may hold spaces)
+      for (i = 10; i <= NF; i++) name = name " " $i
+      deeper = (index(name, dir "/") == 1)
+      if (!deeper && name != dir) next
+      # A working directory at or below DIR is real use. Any other descriptor
+      # counts only when it points strictly deeper — a handle on DIR itself is
+      # the leaked read-only scan artifact this gate exists to ignore.
+      if ($4 == "cwd" || $4 == "twd" || $4 == "rtd" || deeper) {
+        printf "%s (pid %s)\n", $1, $2
+        exit
+      }
+    }'
+}
+
+# sy_busy_user DIR — the process working inside DIR, if any.
+#
+# No lsof (it is absent on plenty of hosts) means this probe contributes no
+# signal — NOT that everything is in use. Failing closed here would make the
+# reaper a permanent no-op on those hosts, which is the very failure the narrow
+# classification above exists to prevent; the authoritative ownership gate is the
+# session roster, and that one does fail closed.
+#
+# lsof's exit status is not a failure signal either — it exits non-zero simply
+# because nothing matched — so it is ignored and whatever was printed is parsed.
+sy_busy_user() {
+  command -v lsof >/dev/null 2>&1 || return 0
+  _phys="$(cd "$1" 2>/dev/null && pwd -P)" || return 0
+  [ -n "$_phys" ] || return 0
+  sy_timeout "$LSOF_TIMEOUT" lsof +D "$_phys" 2>/dev/null | sy_dir_users "$_phys"
+}
+
 # sy_prune_dir DIR — remove DIR, but only if EVERY gate still holds at this
 # instant. The scan-time verdict is deliberately NOT trusted here: the session
 # roster is re-read and the shape/contents re-tested immediately before the rm,
 # so a directory that has become a live session's work_dir since the scan is
 # refused, not deleted. Fail closed — an unreadable roster refuses the removal.
-# Prints the outcome: ok | gone | failed | "live <owner>" | "content <entries>" |
-# unverified.
+# Prints the outcome: ok | gone | failed | "live <owner>" | "busy <user>" |
+# "content <entries>" | unverified.
 sy_prune_dir() {
   _d="$1"
   [ -d "$_d" ] && [ -d "$_d/.gc" ] || { printf 'gone\n'; return; }
@@ -126,6 +190,9 @@ sy_prune_dir() {
   sessions="$_fresh"                       # later candidates get the fresher roster too
   _owner="$(sy_live_owner "$_d")"
   if [ -n "$_owner" ]; then printf 'live %s\n' "$_owner"; return; fi
+
+  _user="$(sy_busy_user "$_d")"
+  if [ -n "$_user" ]; then printf 'busy %s\n' "$_user"; return; fi
 
   _others=$(ls -A "$_d" 2>/dev/null | grep -vxF '.gc')
   if [ -n "$_others" ]; then
@@ -142,6 +209,7 @@ guidance=""
 pruned=""
 kept=""
 live=""
+busy=""
 unverified=""
 
 for entry in */; do
@@ -166,6 +234,16 @@ for entry in */; do
     continue
   fi
 
+  # Nor is a directory a process is working inside — even one no session claims.
+  # Checked before the contents test for the same reason: a busy work_dir
+  # usually holds only .gc/ and so looks collectable.
+  busy_user="$(sy_busy_user "$d")"
+  if [ -n "$busy_user" ]; then
+    busy="$busy
+- $d (in use by: $busy_user)"
+    continue
+  fi
+
   # Is .gc/ the ONLY top-level entry? Then it holds no work/build artifacts.
   others=$(ls -A "$d" 2>/dev/null | grep -vxF '.gc')
   if [ -z "$others" ]; then
@@ -184,6 +262,8 @@ for entry in */; do
     gone) : ;;                     # collected or renamed between scan and prune
     live\ *) live="$live
 - $d (session: ${outcome#live }; became live after the scan — not removed)" ;;
+    busy\ *) busy="$busy
+- $d (in use by: ${outcome#busy }; became busy after the scan — not removed)" ;;
     content\ *) kept="$kept
 - $d (also contains: ${outcome#content })" ;;
     unverified) unverified="$unverified
@@ -199,7 +279,7 @@ for entry in */; do
   fi
 done
 
-[ -z "$found$pruned$kept$live$unverified" ] && exit 0
+[ -z "$found$pruned$kept$live$busy$unverified" ] && exit 0
 
 body="Orphaned gc-scratch directories at the city root — a formula ran gc from the wrong cwd and left a stray .gc/. They hold session scratch, not data."
 [ -n "$pruned" ] && body="$body
@@ -220,6 +300,9 @@ KEPT (have other content — review before removing):$kept"
 [ -n "$live" ] && body="$body
 
 SKIPPED (live session — the work_dir of a session whose bead is not closed; never removed):$live"
+[ -n "$busy" ] && body="$body
+
+SKIPPED (in use — a process is working inside; never removed):$busy"
 [ -n "$unverified" ] && body="$body
 
 UNVERIFIED (could not read the session records — treated as possibly live, never removed):$unverified"

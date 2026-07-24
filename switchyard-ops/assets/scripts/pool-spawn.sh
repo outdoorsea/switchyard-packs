@@ -36,13 +36,32 @@
 # whose holder's session is confirmably dead — an abandoned claim — is still
 # assigned, so a genuinely-freed bead is not stranded.
 #
+# IDEMPOTENCY & BOUNDING (crit:87f8482bb54f). Because this order runs on a tight
+# 1-minute cooldown, it re-runs constantly against a moving ledger, so it must be
+# safe to repeat. Three invariants make it so:
+#   - BOUNDED. At most ONE brakeman per rig per cycle, and only while the rig's
+#     LIVE brakeman count is below max_active_sessions — where "live" counts every
+#     start-pending/creating session (POOL_LIVE_STATES), so the worker a previous
+#     cycle just spawned already occupies the slot it filled. Repeated runs
+#     therefore fill a pool up to its max and then stop; they never overshoot it.
+#   - NO SECOND WORKER FOR HELD DEMAND. The demand set already excludes assigned
+#     beads, so a target a prior cycle handed off drops out of the next cycle's
+#     demand entirely. And for the narrow race where a bead is claimed AFTER the
+#     snapshot but BEFORE the write, the target's current holder is re-verified
+#     right before the spawn (`sy_pool_holder_is_live`): a live holder means no
+#     spawn at all this cycle. So demand a live worker already holds never draws a
+#     second worker.
+#   - NO WEDGED ROOTS. The order only `session new`s a worker and direct-assigns
+#     an EXISTING work bead; it mints no molecule root or workflow step, so a
+#     repeated run can leave no wedged in_progress root behind — the gff-56lh
+#     phantom this whole order exists to route around.
+#
 # Still deliberately OUT of this order, left to sibling criteria that build on the
-# same demand set: idempotency/bounding across cycles (crit:87f8482bb54f), the
-# silent-failure mail (crit:90116a548d3b), and the pack.toml manifest listing +
-# end-to-end demonstration (crit:c9141ec577e5). Detection stays a separate,
-# hermetically tested unit: a wrong demand read is only a log line, but a wrong
-# spawn/assign steals a running worker's work, so the classification is pinned
-# before the act.
+# same demand set: the silent-failure mail (crit:90116a548d3b) and the pack.toml
+# manifest listing + end-to-end demonstration (crit:c9141ec577e5). Detection stays
+# a separate, hermetically tested unit: a wrong demand read is only a log line,
+# but a wrong spawn/assign steals a running worker's work, so the classification
+# is pinned before the act.
 #
 # WHAT COUNTS AS CLAIMABLE DEMAND (per rig). A bead is demand a fresh brakeman
 # could actually claim iff ALL hold:
@@ -245,19 +264,37 @@ for rig in $(sy_pool_nonsuspended_rigs); do
     # Spawn-ready: a free WIP slot means no live worker is already holding it, so
     # spawn exactly ONE brakeman and hand it this rig's NEXT demand bead. The
     # assign follows the spawn immediately, inside the start-pending window.
-    # (Bounding this across cycles, and the finer live-assignee guard, are the
-    # sibling criteria — here we make the single hand-off and report its outcome.)
     target="$(printf '%s\n' "$demand" | awk 'NF' | head -n1)"
-    sess="$(sy_pool_spawn_brakeman "$rig")"
-    if [ -z "$sess" ]; then
-      action="spawn FAILED (no session identity captured)"
+
+    # IDEMPOTENCY / BOUNDING (crit:87f8482bb54f). The demand set is a snapshot,
+    # read a moment ago; between that read and this write a PRIOR cycle's spawn —
+    # or a rival worker — may already have claimed this target. Re-verify the
+    # target's CURRENT holder BEFORE spawning (not only before the assign): if a
+    # live worker already holds it, spawn NOTHING. This is the guarantee that
+    # makes repeated runs idempotent — demand a live worker already holds never
+    # draws a second spawn — and keeps the pool bounded: a raced cycle costs zero
+    # idle sessions instead of the earlier spawn-then-refuse. The spawn is also
+    # capped at one per rig per cycle and gated on live < max_active_sessions
+    # (the WIP-slot check above, which counts every start-pending/creating
+    # session), so a spawn from the previous cycle occupies the slot it filled
+    # and the next cycle cannot overshoot the pool's max. The order only ever
+    # `session new`s a worker and direct-assigns an EXISTING work bead — it mints
+    # no molecule root or workflow step, so it can leave no wedged in_progress
+    # root behind (the gff-56lh phantom it exists to route around).
+    if sy_pool_holder_is_live "$rig" "$target" ""; then
+      action="none ($target already held by a live worker — no spawn)"
     else
-      sy_pool_assign_bead "$rig" "$target" "$sess"
-      case $? in
-        0) action="spawned $sess, direct-assigned $target" ;;
-        2) action="spawned $sess, REFUSED to reassign $target (already held by a live worker)" ;;
-        *) action="spawned $sess, but direct-assign of $target FAILED" ;;
-      esac
+      sess="$(sy_pool_spawn_brakeman "$rig")"
+      if [ -z "$sess" ]; then
+        action="spawn FAILED (no session identity captured)"
+      else
+        sy_pool_assign_bead "$rig" "$target" "$sess"
+        case $? in
+          0) action="spawned $sess, direct-assigned $target" ;;
+          2) action="spawned $sess, REFUSED to reassign $target (raced by a live worker)" ;;
+          *) action="spawned $sess, but direct-assign of $target FAILED" ;;
+        esac
+      fi
     fi
   else
     slot="full ($live/$max)"; ready="none (no WIP slot)"

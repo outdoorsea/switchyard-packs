@@ -1,6 +1,7 @@
 # switchyard-ops — the 24-hour heartbeat for any Gas City driven by switchyard.
 #
 # Encodes the continuous-improvement loop as mechanical exec orders:
+#   pool-spawn     — spawn a brakeman for a rig with claimable demand + assign it (1m)
 #   merge-gate     — worker beads carry a merge_strategy before merge (5m)
 #   loop-health    — pinned coordinators alive + status probe honest (30m)
 #   intake-sweep   — nudge coordinators to triage switchyard intake (4h)

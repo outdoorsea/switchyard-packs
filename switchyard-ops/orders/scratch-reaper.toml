@@ -9,11 +9,22 @@
 # invariant: a leftover becomes mail to the mayor.
 #
 # A RUNNING session's work_dir has the same shape, so the script gates every
-# removal on the session records — see its header for the full contract.
+# removal — see its header for the full contract. Two gates, failing opposite
+# ways on purpose: OWNERSHIP (the `gc.work_dir` of a session whose bead is not
+# closed is never offered and never pruned; a lookup that cannot be completed
+# leaves the directory UNVERIFIED rather than collectable) and OCCUPANCY (a
+# process cwd'd at or below the directory, or holding a descriptor strictly
+# deeper, marks it in use — a bare read-only handle on the directory itself does
+# not, or leaked supervisor handles would make the sweep a silent no-op).
 #
 # Report-only by default (safe). SCRATCH_REAPER_PRUNE=1 also removes the ones
 # whose ONLY entry is .gc/ (guaranteed no build/work artifacts); anything with
-# extra content is reported, never deleted.
+# extra content is reported, never deleted. A prune re-evaluates every gate
+# immediately before each rm, so a scan-time verdict is never applied to a
+# directory that has come alive since — which is why the report offers no
+# blanket delete, only a per-candidate re-run (SCRATCH_REAPER_ONLY=<dir>).
+# SCRATCH_REAPER_SESSION_TIMEOUT (30s) and SCRATCH_REAPER_LSOF_TIMEOUT (15s)
+# bound the two probes so a wedged store cannot hang the sweep.
 [order]
 description = "Report (optionally prune) orphaned gc-scratch dirs at the city root"
 trigger = "cooldown"

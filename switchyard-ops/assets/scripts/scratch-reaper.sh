@@ -28,6 +28,12 @@
 # extra content is reported, never deleted. SCRATCH_REAPER_ONLY=<dir> narrows the
 # sweep to a single city-root directory — the form the report hands back, so a
 # human acts on one candidate through the gates instead of a blanket rm -rf.
+#
+# Two further knobs bound the gates, each documented at the gate it belongs to:
+# SCRATCH_REAPER_SESSION_TIMEOUT (30) bounds the session-record lookup and
+# SCRATCH_REAPER_LSOF_TIMEOUT (15) the in-use probe. Exceeding either is a lookup
+# that could not be completed, which is not the same thing as a clean "nobody
+# owns this" — the session lookup therefore fails CLOSED on its bound.
 set -u
 
 . "$(dirname "$0")/../lib/roster.sh"

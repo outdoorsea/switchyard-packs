@@ -166,7 +166,7 @@ failure becomes mail to the mayor within one order cycle.**
 | `stray-reaper` | 6h | Sessions rooted at a stale city path |
 | `config-drift` | 6h | Config-as-code guard (no-ops if the city isn't a git repo) |
 | `events-rotate` | 24h | Cap `.gc/events.jsonl` to a recent tail (gc ships no retention for it) |
-| `scratch-reaper` | 6h | Report/prune orphaned `gc`-scratch dirs left at the city root |
+| `scratch-reaper` | 6h | Report/prune orphaned `gc`-scratch dirs left at the city root — drained sessions' `work_dir`s, gated so a live one is never removed |
 | `disk-watch` | 12h | Mail the mayor when a worktree/backup/`.gc`/event-log path crosses a size threshold |
 
 ### Review before merge
@@ -188,6 +188,54 @@ instead of landing.
 > view` and has no `glab` support, so on a GitLab remote the refinery cannot
 > open the MR. Per its own contract it records a blocked reason and escalates to
 > the mayor rather than merging. Fixing this belongs upstream in gastown.
+
+### Pruning scratch is a safety boundary
+
+`scratch-reaper` is the one order that **deletes** anything, and its candidates
+are not debris. Each is the `work_dir` of an ephemeral agent session, left behind
+when that session drained — an ephemeral session derives its work_dir from its
+scope root, so a city-scoped agent (the dog pool) lands directly in the city
+root. A *running* session's work_dir has the identical shape, a directory holding
+only `.gc/`, so "looks collectable" and "is a live agent" are the same
+observation. Before the gates below existed it listed a running dog's working
+directory under `SAFE TO REMOVE` with a copy-pasteable `rm -rf`, six processes
+cwd'd inside.
+
+So every removal clears three gates, and they fail in deliberately different
+directions:
+
+- **Ownership — the session records, fails closed.** `gc session list` projects
+  each session's `gc.work_dir`; a directory that is (or contains) the work_dir of
+  a session whose bead is not closed is never offered and never pruned, and comes
+  back under `SKIPPED (live session)` naming its owner. The *record* is
+  authoritative rather than process state, because an asleep session holds
+  nothing open yet still owns its directory. When the roster can't be read —
+  unparseable, or the lookup outruns `SCRATCH_REAPER_SESSION_TIMEOUT` (30s)
+  against a wedged store — the directory is reported `UNVERIFIED`, never removed.
+  A lookup that cannot be completed is not a licence to delete.
+- **Occupancy — what is running inside, fails open.** This covers what the roster
+  cannot: a live process left by a session whose bead has already closed. It is
+  deliberately narrow, and that narrowness is the whole design. Only a process
+  cwd'd at or below the directory, or one holding a descriptor on a path strictly
+  *deeper*, counts (bounded by `SCRATCH_REAPER_LSOF_TIMEOUT`, 15s). A bare
+  read-only handle on the directory's own inode does not: `gc supervisor` leaks
+  those across the entire city root, and honouring them would make the reaper
+  collect nothing for ever — a quieter broken reaper, not a fixed one. No `lsof`
+  on the host simply means this probe contributes no signal; the gate that fails
+  closed is the ownership one.
+- **Freshness — re-checked at the instant of removal.** A scan-time verdict is
+  already stale by the time a human reads the mail, so the report offers **no
+  blanket `rm -rf`**. Each candidate comes back as a one-directory re-run
+  (`SCRATCH_REAPER_PRUNE=1 SCRATCH_REAPER_ONLY=<dir> …/scratch-reaper.sh`) that
+  re-reads the roster and re-tests the contents immediately before the `rm` and
+  refuses anything that has come alive since. `SCRATCH_REAPER_PRUNE=1` on its own
+  sweeps every candidate through that same re-check.
+
+That is what makes `SCRATCH_REAPER_PRUNE=1` defensible to turn on. Both halves of
+the contract are pinned by a hermetic self-test — a live session's work_dir
+survives a prune run, *and* genuinely dead scratch is still collected, because a
+gate that stops everything is a reaper that silently does nothing — run in CI as
+the **`scratch-reaper self-test`** job (`bash scripts/scratch-reaper.test.sh`).
 
 ## Workers: the brakeman pool
 

@@ -56,12 +56,24 @@
 #     repeated run can leave no wedged in_progress root behind — the gff-56lh
 #     phantom this whole order exists to route around.
 #
-# Still deliberately OUT of this order, left to sibling criteria that build on the
-# same demand set: the silent-failure mail (crit:90116a548d3b) and the pack.toml
-# manifest listing + end-to-end demonstration (crit:c9141ec577e5). Detection stays
-# a separate, hermetically tested unit: a wrong demand read is only a log line,
-# but a wrong spawn/assign steals a running worker's work, so the classification
-# is pinned before the act.
+# SILENT FAILURE BECOMES MAIL (crit:90116a548d3b). switchyard-ops holds one
+# invariant across every order: a failure the loop cannot self-heal is MAILED to
+# the mayor within the cycle, never left as a mere log line nobody reads. This
+# order replaces the controller's dead sling-claim, so a hand-off that does not
+# happen means work is stalled — exactly the silent stall the invariant exists to
+# surface. Three ways a hand-off fails, all escalated here:
+#   - no session id returned / adhoc identity unresolved (the spawn produced no
+#     owner to assign to),
+#   - the direct-assign was rejected (a spawned worker left with nothing to claim),
+#   - a bead this order direct-assigned a FULL CYCLE AGO is STILL claimable demand
+#     (the hand-off silently did not take — the assignee never stuck, or the
+#     worker died and released it). This last one is cross-cycle by nature, so it
+#     rides a small state file remembering last cycle's hand-offs.
+# A rig with no free WIP slot is NOT a failure — its demand persists because the
+# pool is busy (saturation), so it is never tracked for the still-unclaimed check.
+# Nor is a spawn the idempotency guard declines, or an assign refused because a
+# live worker already holds the target (exit 2): that guard firing is the correct
+# outcome, not a stall, so it escalates nothing.
 #
 # WHAT COUNTS AS CLAIMABLE DEMAND (per rig). A bead is demand a fresh brakeman
 # could actually claim iff ALL hold:
@@ -248,13 +260,35 @@ sy_pool_assign_bead() {
 
 command -v jq >/dev/null 2>&1 || exit 0   # every read below is jq-shaped
 
+# Cross-cycle memory of the beads this order direct-assigned LAST cycle, one
+# `<rig> <bead>` per line. A bead still in the demand set a full cycle after we
+# handed it off means the hand-off silently did not take — the fourth failure
+# mode the immediate spawn/assign checks cannot see. Only successful hand-offs are
+# tracked (a bead on a full-slot rig is busy, not stalled), so a persistently
+# saturated pool never mails.
+ASSIGNED_LAST="$(sy_state_dir)/pool-spawn.assigned-last"
+prev_assigned=""
+[ -f "$ASSIGNED_LAST" ] && prev_assigned="$(cat "$ASSIGNED_LAST" 2>/dev/null)"
+
 report=""
+escalations=""    # per-rig silent failures to mail the mayor this cycle
+assigned_now=""   # `<rig> <bead>` hand-offs made this cycle, for next cycle's check
 for rig in $(sy_pool_nonsuspended_rigs); do
   demand="$(sy_pool_rig_demand "$rig")"
   [ -n "$demand" ] || continue            # silence is the success case
 
   count=$(printf '%s\n' "$demand" | awk 'NF' | wc -l | tr -d ' ')
   ids="$(printf '%s\n' "$demand" | awk 'NF' | tr '\n' ' ' | sed 's/ *$//')"
+
+  # Silent-failure mode 4 — a bead we direct-assigned last cycle is STILL claimable
+  # demand: the hand-off did not take. Check the ids we handed THIS rig against the
+  # current demand set (bead ids are single tokens, so word-splitting is safe).
+  for pb in $(printf '%s\n' "$prev_assigned" | awk -v r="$rig" '$1==r {print $2}'); do
+    case " $ids " in
+      *" $pb "*) escalations="$escalations
+- $rig: bead $pb was direct-assigned last cycle but is STILL claimable demand — the hand-off did not take (unclaimed after a full cycle)." ;;
+    esac
+  done
 
   max="$(sy_pool_brakeman_max "$rig")"; case "$max" in ''|*[!0-9]*) max=0 ;; esac
   live="$(sy_pool_brakeman_live "$rig")"; case "$live" in ''|*[!0-9]*) live=0 ;; esac
@@ -281,18 +315,32 @@ for rig in $(sy_pool_nonsuspended_rigs); do
     # `session new`s a worker and direct-assigns an EXISTING work bead — it mints
     # no molecule root or workflow step, so it can leave no wedged in_progress
     # root behind (the gff-56lh phantom it exists to route around).
+    #
+    # SILENT FAILURE BECOMES MAIL (crit:90116a548d3b). A spawn or assign that
+    # genuinely FAILS records an escalation (mailed once, below). A spawn the
+    # idempotency guard declines — a live worker already holds the target — is
+    # NOT a failure and escalates nothing; nor is an assign refused because the
+    # target was raced by a live worker (exit 2), which is that same guard firing
+    # inside sy_pool_assign_bead. A successful hand-off is remembered in
+    # $assigned_now so the NEXT cycle can catch one that silently did not take.
     if sy_pool_holder_is_live "$rig" "$target" ""; then
       action="none ($target already held by a live worker — no spawn)"
     else
       sess="$(sy_pool_spawn_brakeman "$rig")"
       if [ -z "$sess" ]; then
         action="spawn FAILED (no session identity captured)"
+        escalations="$escalations
+- $rig: brakeman spawn returned no session identity — $count claimable bead(s) left unclaimed (demand: $ids)."
       else
         sy_pool_assign_bead "$rig" "$target" "$sess"
         case $? in
-          0) action="spawned $sess, direct-assigned $target" ;;
+          0) action="spawned $sess, direct-assigned $target"
+             assigned_now="$assigned_now
+$rig $target" ;;
           2) action="spawned $sess, REFUSED to reassign $target (raced by a live worker)" ;;
-          *) action="spawned $sess, but direct-assign of $target FAILED" ;;
+          *) action="spawned $sess, but direct-assign of $target FAILED"
+             escalations="$escalations
+- $rig: spawned $sess but the direct-assign of $target was rejected — the fresh worker has nothing to claim." ;;
         esac
       fi
     fi
@@ -307,12 +355,28 @@ for rig in $(sy_pool_nonsuspended_rigs); do
     action: $action"
 done
 
+# Remember this cycle's hand-offs so the NEXT cycle can catch one that silently did
+# not take. Rewritten every cycle (even to empty) so a bead that WAS claimed drops
+# out of the memory and is never re-flagged.
+mkdir -p "$(dirname "$ASSIGNED_LAST")" 2>/dev/null
+printf '%s\n' "$assigned_now" | awk 'NF' > "$ASSIGNED_LAST" 2>/dev/null
+
 # What this order detected AND did is observed through its own log (gc captures
 # order stdout) — the per-rig `action:` line records each spawn + direct-assign.
-# It still never mails: surfacing a persistently unclaimed or failed hand-off to
-# the mayor is the sibling silent-failure criterion (crit:90116a548d3b).
 if [ -n "$report" ]; then
   printf 'pool-spawn: claimable brakeman demand by rig:%s\n' "$report"
+fi
+
+# Silent-failure-becomes-mail invariant (crit:90116a548d3b): any spawn-or-assign
+# failure this cycle — no session identity, a rejected assign, or a hand-off still
+# unclaimed a full cycle later — is mailed to the mayor, not left as a log line.
+# ONE consolidated mail per cycle (never one per rig) so a wide outage does not
+# flood the mayor's box the way a chronically noisy order would.
+if [ -n "$escalations" ]; then
+  gc mail send mayor \
+    -s "pool-spawn: brakeman spawn/assign failure — demand left unclaimed" \
+    -m "The switchyard-ops pool-spawn order could not hand off claimable brakeman demand this cycle. This order replaces the controller's dead sling-claim, so each line below is stalled work — a rig whose demand a spawn-or-assign failure left unclaimed, which nothing else will pick up until the next cycle clears it or a human intervenes:$escalations" \
+    >/dev/null 2>&1
 fi
 
 exit 0

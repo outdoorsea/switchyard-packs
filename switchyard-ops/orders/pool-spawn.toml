@@ -8,9 +8,12 @@
 # self-blocked molecule root) routed to the rig's worker pool, with a WIP slot
 # free. For each such spawn-ready rig it then spawns exactly one brakeman via
 # `gc session new --no-attach`, captures the adhoc session identity, and
-# direct-assigns that rig's next demand bead to it. The finer live-assignee
-# reassign guard, cross-cycle bounding, and the silent-failure mail are sibling
-# PRD #185 criteria that build on the demand set computed here.
+# direct-assigns that rig's next demand bead to it. Any spawn-or-assign failure —
+# no session identity, a rejected assign, or a bead still unclaimed a full cycle
+# after it was handed off — is mailed to the mayor within the cycle, matching
+# switchyard-ops' silent-failure-becomes-mail invariant. The finer live-assignee
+# reassign guard and cross-cycle bounding are sibling PRD #185 criteria that build
+# on the demand set computed here.
 #
 # Cadence is 1m, not a sweep interval: pool dispatch is a RACE (the whole point
 # is a worker starts within an order cycle), so this runs at the tight end of

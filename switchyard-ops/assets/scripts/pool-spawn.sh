@@ -12,17 +12,23 @@
 # identifying what demand a rig actually has, so a spawn decision is never made
 # on a phantom.
 #
-# SCOPE (detection only). This order ENUMERATES non-suspended rigs and IDENTIFIES
-# each rig's claimable pool demand. It is read-only: it spawns no session,
-# assigns no bead, and mails no one. The remaining halves of PRD #185 —
-# spawning a brakeman via `gc session new --no-attach` and direct-assigning the
-# demand bead (crit:d275220f711a), the live-assignee reassign guard
-# (crit:65a9b77b2d30), idempotency/bounding (crit:87f8482bb54f), the
-# silent-failure mail (crit:90116a548d3b), and the pack.toml manifest listing +
-# end-to-end demonstration (crit:c9141ec577e5) — are their own criteria/beads
-# and BUILD ON the demand set this order computes. Keeping detection a separate,
-# testable unit is deliberate: a wrong demand read here is a log line, but a
-# wrong spawn/assign steals a running worker's work.
+# SCOPE (detect, then spawn + direct-assign). This order ENUMERATES non-suspended
+# rigs and IDENTIFIES each rig's claimable pool demand, and — for a rig that is
+# spawn-ready (demand plus a free WIP slot, so no live worker is already holding
+# that slot) — it SPAWNS exactly one brakeman via `gc session new --no-attach`,
+# captures the resulting adhoc session identity, and direct-assigns that rig's
+# next demand bead to it (crit:d275220f711a), all within the start-pending window:
+# the `--no-attach` spawn returns with the session start-pending, and the assign
+# follows immediately in the same order cycle. Exactly one brakeman per rig per
+# cycle — the singular hand-off the controller's dead sling-claim would have made.
+#
+# Still deliberately OUT of this half, left to sibling criteria that build on the
+# same demand set: the finer live-assignee reassign guard (crit:65a9b77b2d30),
+# idempotency/bounding across cycles (crit:87f8482bb54f), the silent-failure mail
+# (crit:90116a548d3b), and the pack.toml manifest listing + end-to-end
+# demonstration (crit:c9141ec577e5). Detection stays a separate, hermetically
+# tested unit: a wrong demand read is only a log line, but a wrong spawn/assign
+# steals a running worker's work, so the classification is pinned before the act.
 #
 # WHAT COUNTS AS CLAIMABLE DEMAND (per rig). A bead is demand a fresh brakeman
 # could actually claim iff ALL hold:
@@ -119,7 +125,41 @@ sy_pool_brakeman_live() {
     | awk 'NF' | head -n1
 }
 
-# --- main: enumerate rigs, identify claimable demand -------------------------
+# POOL_SESSION_ID_JQ — pull a session identity out of whatever `gc session new`
+# prints. gc builds differ (some emit a bare session object, some a
+# `{"session":{...}}` envelope), so try the common identity fields; a non-JSON
+# answer just yields nothing here and the shell falls back to a plain-text scan.
+POOL_SESSION_ID_JQ='
+  (if type=="object" then (.session // .) else empty end)
+  | (.qualified_name // .name // .session_name // .id // .session_id // "")'
+
+# sy_pool_spawn_brakeman RIG — spawn ONE adhoc brakeman for RIG and echo its
+# session identity (empty when the identity cannot be captured). Uses the exact
+# invocation loop-health already relies on (`gc session new <agent> --no-attach`,
+# no extra flags, so an unknown-flag build can't silently turn the spawn into a
+# no-op) and reads the identity back from its stdout. An adhoc session is named
+# for its pool (`<rig>/switchyard-ops.brakeman-adhoc-<suffix>`, the scratch-reaper
+# convention), so the plain-text fallback accepts only a token that begins with
+# `<rig>/` — never `[]`, a usage line, or human prose.
+sy_pool_spawn_brakeman() {
+  _out="$(gc session new "$1/switchyard-ops.brakeman" --no-attach 2>/dev/null)"
+  _id="$(printf '%s' "$_out" | jq -r "$POOL_SESSION_ID_JQ" 2>/dev/null | awk 'NF' | head -n1)"
+  if [ -z "$_id" ]; then
+    _id="$(printf '%s\n' "$_out" | tr ' \t' '\n\n' | awk -v r="$1/" 'index($0,r)==1 {print; exit}')"
+  fi
+  printf '%s' "$_id"
+}
+
+# sy_pool_assign_bead RIG BEAD SESSION — direct-assign BEAD to SESSION, the
+# hand-off gastown's dead sling-claim would have made. `gc bd list` from the city
+# root sees only the town ledger, so the write names its rig explicitly (the same
+# rule merge-gate follows). Returns the write's status so the caller can report a
+# failed assign (a spawned worker left with nothing to do).
+sy_pool_assign_bead() {
+  gc bd update --rig "$1" "$2" --assignee "$3" >/dev/null 2>&1
+}
+
+# --- main: enumerate rigs, identify claimable demand, spawn + assign ----------
 
 command -v jq >/dev/null 2>&1 || exit 0   # every read below is jq-shaped
 
@@ -136,18 +176,35 @@ for rig in $(sy_pool_nonsuspended_rigs); do
 
   if [ "$max" -gt "$live" ]; then
     slot="free ($live/$max)"; ready="$ids"
+    # Spawn-ready: a free WIP slot means no live worker is already holding it, so
+    # spawn exactly ONE brakeman and hand it this rig's NEXT demand bead. The
+    # assign follows the spawn immediately, inside the start-pending window.
+    # (Bounding this across cycles, and the finer live-assignee guard, are the
+    # sibling criteria — here we make the single hand-off and report its outcome.)
+    target="$(printf '%s\n' "$demand" | awk 'NF' | head -n1)"
+    sess="$(sy_pool_spawn_brakeman "$rig")"
+    if [ -z "$sess" ]; then
+      action="spawn FAILED (no session identity captured)"
+    elif sy_pool_assign_bead "$rig" "$target" "$sess"; then
+      action="spawned $sess, direct-assigned $target"
+    else
+      action="spawned $sess, but direct-assign of $target FAILED"
+    fi
   else
     slot="full ($live/$max)"; ready="none (no WIP slot)"
+    action="none (no WIP slot)"
   fi
 
   report="$report
 - $rig: $count claimable bead(s), WIP slot $slot; spawn-ready: $ready
-    demand: $ids"
+    demand: $ids
+    action: $action"
 done
 
-# Detection is observed through the order's own log (gc captures order stdout);
-# it never mails — surfacing persistent unclaimed demand to the mayor is the
-# sibling silent-failure criterion (crit:90116a548d3b).
+# What this order detected AND did is observed through its own log (gc captures
+# order stdout) — the per-rig `action:` line records each spawn + direct-assign.
+# It still never mails: surfacing a persistently unclaimed or failed hand-off to
+# the mayor is the sibling silent-failure criterion (crit:90116a548d3b).
 if [ -n "$report" ]; then
   printf 'pool-spawn: claimable brakeman demand by rig:%s\n' "$report"
 fi

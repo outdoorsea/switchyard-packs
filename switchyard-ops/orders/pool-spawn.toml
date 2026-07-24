@@ -2,20 +2,22 @@
 #
 # The controller's dispatch has been dead for days because the machinery that
 # spots demand and spawns a worker lives in the unsupported gc binary. This
-# order gives switchyard-ops dispatch independence by doing that job itself. Its
-# FIRST half — this file — enumerates every non-suspended rig and identifies the
-# pool demand a fresh brakeman could actually claim: an open, unassigned, real
-# work bead (not a self-blocked molecule root) routed to the rig's worker pool,
-# with a WIP slot free. It is read-only — spawning, direct-assign, the
-# live-worker guard, and the silent-failure mail are sibling PRD #185 criteria
-# that build on the demand set computed here.
+# order gives switchyard-ops dispatch independence by doing that job itself. It
+# enumerates every non-suspended rig and identifies the pool demand a fresh
+# brakeman could actually claim: an open, unassigned, real work bead (not a
+# self-blocked molecule root) routed to the rig's worker pool, with a WIP slot
+# free. For each such spawn-ready rig it then spawns exactly one brakeman via
+# `gc session new --no-attach`, captures the adhoc session identity, and
+# direct-assigns that rig's next demand bead to it. The finer live-assignee
+# reassign guard, cross-cycle bounding, and the silent-failure mail are sibling
+# PRD #185 criteria that build on the demand set computed here.
 #
 # Cadence is 1m, not a sweep interval: pool dispatch is a RACE (the whole point
 # is a worker starts within an order cycle), so this runs at the tight end of
 # the PRD's 1-2 minute window, like merge-gate's 5m race rather than the 6h
 # reapers.
 [order]
-description = "Identify each non-suspended rig's claimable brakeman pool demand (open, unassigned, real work, WIP slot free)"
+description = "Spawn one brakeman per non-suspended rig with claimable pool demand and a free WIP slot, then direct-assign it the demand bead (open, unassigned, real work)"
 trigger = "cooldown"
 interval = "1m"
 exec = "$PACK_DIR/assets/scripts/pool-spawn.sh"

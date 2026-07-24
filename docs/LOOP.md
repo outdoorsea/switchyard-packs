@@ -52,6 +52,7 @@ executes → escalate to mayor on anomaly. No agent exists merely to run a clock
 
 | Order | Trigger | What the dog does |
 |---|---|---|
+| `pool-spawn` | 1m | Spawn a brakeman for each rig with claimable pool demand and a free WIP slot, and direct-assign it the demand bead |
 | `loop-health` | 30m | Verify every pinned session has a live process **and** the status probe answers; wake what's down; escalate if the probe itself lies |
 | `intake-sweep` | 4h | Nudge each coordinator to triage its project's intake and dispatched epics |
 | `nightly-retro` | 24h | Nudge the retro agent to draft daily reports and propose improvements |
@@ -60,6 +61,25 @@ executes → escalate to mayor on anomaly. No agent exists merely to run a clock
 
 Governing invariant: **every silent failure becomes mail to the mayor within one
 order cycle.**
+
+Those are the orders that carry the loop itself; the pack ships several more
+housekeeping sweeps. [`../README.md`](../README.md#what-switchyard-ops-gives-you)
+has the full manifest.
+
+## Why `pool-spawn` exists
+
+Observed failure: dispatch died for days. Beads were slung and correctly routed
+to a rig's worker pool, and no worker ever started — gc's controller owns the
+spawn-and-claim half, and three defects there (a self-blocking molecule root, a
+`scale_check` that will not spawn, config-routed beads nothing can claim) each
+fail *silently*. A full queue beside an empty pool looks exactly like an idle
+city.
+
+So `pool-spawn` stops waiting on the controller and does that job in the pack: it
+reads each rig's genuinely claimable demand, spawns one brakeman, and hands the
+bead to it directly. Its cadence is 1m rather than a sweep interval because
+dispatch is a **race** — the point is that a worker starts within an order cycle —
+which puts it beside `merge-gate`'s 5m rather than the 6h reapers.
 
 ## Why `loop-health` exists
 

@@ -85,6 +85,16 @@ trim the two big legs 6→3 and collapse the 3+3 rounds to 1–2.
 These orders run mechanical `exec` scripts with **no LLM**; leaving them frequent
 is correct:
 
+- `pool-spawn` (1 min) — the pack's most frequent order at 1440 runs/day. The
+  order body is itself zero-LLM: a handful of `gc rig`/`agent`/`bd`/`session
+  list` reads, a `jq` classification, then a `gc session new` and a `gc bd
+  update`. Note the asymmetry with the rest of this list, though — what it spawns
+  *is* a paid worker. What keeps that honest is that it spawns one only when a
+  rig has demand a worker could actually claim **and** a free WIP slot, so the
+  spend tracks real queued work and is capped by the pool's
+  `max_active_sessions`. Do not stretch the cadence to save tokens: it buys
+  nothing (an idle city spawns nothing at 1m either) and costs the guarantee that
+  a slung bead gets a worker within an order cycle.
 - `merge-gate` (5 min) — stamps `merge_strategy`, mails the mayor. 288 runs/day,
   zero LLM; the tight cadence is a deliberate race-win against the refinery.
 - `config-drift`, `stray-reaper` (6 h) — diff/detect + mail only.

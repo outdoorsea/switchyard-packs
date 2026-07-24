@@ -17,8 +17,8 @@ gastown evolve upstream, adaptations live in three small layers.
 └──────────────▲───────────────┬──────────────────────────────────┘
      MCP + webhooks            │ webhooks → switchyard intake
 ┌──────────────┴───────────────▼──────────────────────────────────┐
-│ LAYER 3  switchyard-ops (this repo): loop-health, intake-sweep,  │
-│          nightly-retro, stray-reaper, config-drift               │
+│ LAYER 3  switchyard-ops (this repo): pool-spawn, loop-health,    │
+│          intake-sweep, nightly-retro, stray-reaper, config-drift │
 │ LAYER 2  switchyard-mcp overlay (this repo): MCP into every rig  │
 │ LAYER 1  gastown pack (pinned sha): per-rig delivery crews +     │
 │          city governance (mayor / deacon / boot / dogs)          │
@@ -54,8 +54,13 @@ This repo names no agent and no rig. It describes positions; a city fills them.
 | **witness** | always (session recycle) | Progress monitor: stuck beads, orphaned work, lease expiry |
 
 **Scaling rule: coordinators are pinned, workers are elastic.** A rig with no
-work costs one idle coordinator; a rig under load fans polecats to its cap. A
+work costs one idle coordinator; a rig under load fans workers out to its cap. A
 suspended rig keeps its config and costs zero.
+
+That fan-out is Layer 3's, not the controller's: gc's `scale_check` cannot be
+relied on to spawn, so the `pool-spawn` order reads each rig's claimable demand
+itself and starts a worker for it — bounded by the pool's `max_active_sessions`,
+so elastic still means capped.
 
 `switchyard-ops` discovers coordinators automatically — anything with
 `pool.min >= 1` that is not suspended. There is no roster to maintain.

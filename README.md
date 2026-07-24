@@ -153,11 +153,12 @@ source = "/path/to/switchyard/packs/switchyard-ops"
 
 ## What `switchyard-ops` gives you
 
-Eight mechanical orders, run by the dog pool, under one invariant: **every silent
+Ten mechanical orders, run by the dog pool, under one invariant: **every silent
 failure becomes mail to the mayor within one order cycle.**
 
 | Order | Every | Purpose |
 |---|---|---|
+| `pool-spawn` | 1m | Spawn one brakeman per rig with claimable pool demand and a free WIP slot, then direct-assign it the demand bead |
 | `merge-gate` | 5m | Worker beads carry a `merge_strategy` before the refinery sees them |
 | `loop-health` | 30m | Pinned coordinators alive; escalate when the status probe lies |
 | `intake-sweep` | 4h | Nudge coordinators to triage their switchyard project |
@@ -201,6 +202,35 @@ gc sling YOUR_RIG/switchyard-ops.brakeman ex-1234
 Set `default_sling_targets` on the rig and a bare `gc sling ex-1234` lands in the
 pool, so dispatch never has to name an agent.
 
+### Nobody has to spawn the worker
+
+Slinging a bead routes it; it does not start anyone. That second half rides gc's
+controller (`scale_check` + sling-claim), and three defects there kill dispatch
+*silently* — a molecule root that self-blocks reads as demand nothing can claim
+(gff-56lh), a `scale_check` that will not spawn (gff-g8kr), and config-routed
+beads nothing can claim (gff-fd33). A rig's queue then sits full while its pool
+sits empty, with no error anywhere.
+
+The `pool-spawn` order does that job itself instead of waiting on the controller.
+Every minute it enumerates the non-suspended rigs and, for each one holding
+demand a fresh brakeman could actually claim — open, routed to the pool,
+unassigned, real work rather than a self-blocked root — with a free WIP slot, it
+spawns exactly one brakeman via `gc session new --no-attach` and direct-assigns
+that bead to the new session's adhoc identity, inside the start-pending window.
+So a slung bead gets a worker within an order cycle, with no manual `gc session
+new` and no dependence on the controller.
+
+It is safe to run on a 1-minute cooldown because it is bounded and idempotent: at
+most one brakeman per rig per cycle, never past the pool's `max_active_sessions`
+(a session that is merely `start-pending` already occupies its slot), and it
+re-verifies the target bead's current holder in the instant before the assign —
+refusing whenever that holder's session is live, so it can never steal work from a
+running worker. It mints no molecule root or workflow step, so a repeated run
+leaves no wedged `in_progress` root behind. A spawn or assign that genuinely fails
+— no session identity, a rejected assign, or a bead still unclaimed a full cycle
+after hand-off — mails the mayor, per the pack invariant. A full pool is
+saturation, not failure, and escalates nothing.
+
 ### One required rig setting
 
 ```toml
@@ -226,7 +256,9 @@ The name identifies a *session*, not a specialty. Every brakeman claims from the
 same queue. Keep at least `max_active_sessions` names in the pool.
 
 The pool sits at `min_active_sessions = 0`: an idle worker is pure token burn,
-and claims are cheap. It scales up on demand and drains back to nothing.
+and claims are cheap. It scales up on demand and drains back to nothing — the
+scale-up being `pool-spawn`'s job, since gc's own `scale_check` cannot be relied
+on to do it (see [Nobody has to spawn the worker](#nobody-has-to-spawn-the-worker)).
 
 **A brakeman runs gastown's `mol-polecat-work`, unchanged.** That formula is
 agent-agnostic — it claims via `gc hook --claim`, scopes its worktree to the

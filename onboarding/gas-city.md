@@ -152,6 +152,12 @@ to `city.toml` (witness `max_session_age`, deacon/witness `idle_timeout`), then
    `set_scope` → `get_project_briefing` → triage `list_intake_queue`.
 3. Dispatch a bead to the pool: `gc sling <rig>/switchyard-ops.brakeman <bead-id>`
    (or bare `gc sling <bead-id>` — `default_sling_targets` routes it).
+4. Wait one minute, then `gc session list`. The `pool-spawn` order should have
+   started a brakeman and assigned it that bead — no manual `gc session new`.
+   Nothing there after a couple of cycles means the bead is not *claimable*
+   demand (already assigned, or a self-blocked molecule root rather than the work
+   bead), or the pool is at `max_active_sessions`; a genuine spawn-or-assign
+   failure mails the mayor, so check the mayor's inbox too.
 
 **Done.** The city now runs the 24-hour loop from
 [`../docs/LOOP.md`](../docs/LOOP.md). Keep it honest with

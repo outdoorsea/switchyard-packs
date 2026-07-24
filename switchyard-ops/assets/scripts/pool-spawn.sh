@@ -12,23 +12,37 @@
 # identifying what demand a rig actually has, so a spawn decision is never made
 # on a phantom.
 #
-# SCOPE (detect, then spawn + direct-assign). This order ENUMERATES non-suspended
-# rigs and IDENTIFIES each rig's claimable pool demand, and — for a rig that is
-# spawn-ready (demand plus a free WIP slot, so no live worker is already holding
-# that slot) — it SPAWNS exactly one brakeman via `gc session new --no-attach`,
-# captures the resulting adhoc session identity, and direct-assigns that rig's
-# next demand bead to it (crit:d275220f711a), all within the start-pending window:
-# the `--no-attach` spawn returns with the session start-pending, and the assign
-# follows immediately in the same order cycle. Exactly one brakeman per rig per
-# cycle — the singular hand-off the controller's dead sling-claim would have made.
+# SCOPE (detect, then spawn + direct-assign, guarded). This order ENUMERATES
+# non-suspended rigs and IDENTIFIES each rig's claimable pool demand, and — for a
+# rig that is spawn-ready (demand plus a free WIP slot, so no live worker is
+# already holding that slot) — it SPAWNS exactly one brakeman via `gc session new
+# --no-attach`, captures the resulting adhoc session identity, and direct-assigns
+# that rig's next demand bead to it (crit:d275220f711a), all within the
+# start-pending window: the `--no-attach` spawn returns with the session
+# start-pending, and the assign follows immediately in the same order cycle.
+# Exactly one brakeman per rig per cycle — the singular hand-off the controller's
+# dead sling-claim would have made.
 #
-# Still deliberately OUT of this half, left to sibling criteria that build on the
-# same demand set: the finer live-assignee reassign guard (crit:65a9b77b2d30),
-# idempotency/bounding across cycles (crit:87f8482bb54f), the silent-failure mail
-# (crit:90116a548d3b), and the pack.toml manifest listing + end-to-end
-# demonstration (crit:c9141ec577e5). Detection stays a separate, hermetically
-# tested unit: a wrong demand read is only a log line, but a wrong spawn/assign
-# steals a running worker's work, so the classification is pinned before the act.
+# THE REASSIGN GUARD (crit:65a9b77b2d30). The demand set is a snapshot, read a
+# spawn ago; a rival worker can claim a demand bead in the interval between that
+# read and this write. So the direct-assign RE-VERIFIES the target bead's CURRENT
+# holder in the instant before the write (`sy_pool_holder_is_live`, folded into
+# `sy_pool_assign_bead` so no caller can bypass it) and REFUSES the reassign when
+# the bead is already held by an assignee whose session is live — active,
+# start-pending, creating, or draining (the shared POOL_LIVE_STATES). The order
+# can therefore never steal work out from under a running worker. The re-verify
+# fails CLOSED on an unverifiable holder (a session roster it cannot read is
+# treated as live, refusing rather than stealing), while an UNASSIGNED bead or one
+# whose holder's session is confirmably dead — an abandoned claim — is still
+# assigned, so a genuinely-freed bead is not stranded.
+#
+# Still deliberately OUT of this order, left to sibling criteria that build on the
+# same demand set: idempotency/bounding across cycles (crit:87f8482bb54f), the
+# silent-failure mail (crit:90116a548d3b), and the pack.toml manifest listing +
+# end-to-end demonstration (crit:c9141ec577e5). Detection stays a separate,
+# hermetically tested unit: a wrong demand read is only a log line, but a wrong
+# spawn/assign steals a running worker's work, so the classification is pinned
+# before the act.
 #
 # WHAT COUNTS AS CLAIMABLE DEMAND (per rig). A bead is demand a fresh brakeman
 # could actually claim iff ALL hold:
@@ -150,12 +164,64 @@ sy_pool_spawn_brakeman() {
   printf '%s' "$_id"
 }
 
+# sy_pool_assignee_live ASSIGNEE — succeeds (exit 0, "hands off") when ASSIGNEE
+# names a gc session in a live state, fails (exit 1, "not live") only when the
+# session roster is readable AND shows no live session for ASSIGNEE. The liveness
+# half of the reassign guard: a live holder is a running worker whose bead must
+# not be stolen; a dead/absent holder is an abandoned claim whose bead is free
+# again. Matches ASSIGNEE against every session-identity field gc builds vary over
+# (as sy_pool_spawn_brakeman does), and counts ONLY the shared POOL_LIVE_STATES as
+# live. Fails CLOSED: an empty ASSIGNEE aside, an unreadable/malformed session
+# roster cannot CONFIRM the holder is dead, so it is treated as live and the
+# reassign is refused — never stolen on an unverifiable roster.
+sy_pool_assignee_live() {
+  [ -n "$1" ] || return 1
+  _raw="$(gc session list --json --state all 2>/dev/null)"
+  [ -n "$_raw" ] || return 0                       # can't read the roster → refuse
+  _states_json="$(printf '%s' "$POOL_LIVE_STATES" | jq -Rc 'split(" ")')"
+  _n="$(printf '%s' "$_raw" | jq -r --arg a "$1" --argjson live "$_states_json" '
+    [ (.sessions // [])[]
+      | select( ((.agent // "") == $a) or ((.agent_name // "") == $a)
+                or ((.qualified_name // "") == $a) or ((.name // "") == $a)
+                or ((.id // "") == $a) or ((.session_id // "") == $a) )
+      | select( (.state // "") as $st | ($live | index($st)) != null )
+    ] | length' 2>/dev/null)"
+  case "$_n" in ''|*[!0-9]*) return 0 ;; esac       # malformed count → refuse
+  [ "$_n" -gt 0 ]
+}
+
+# sy_pool_holder_is_live RIG BEAD SELF — the reassign guard's verdict, re-read in
+# the instant BEFORE the assign write. Succeeds (exit 0, "hands off") when BEAD is
+# already held by a live worker or by a holder that cannot be verified dead; fails
+# (exit 1, "clear to assign") only when BEAD is confirmably free — unassigned,
+# held by SELF, or held by a session confirmed not-live. The holder is re-read
+# from the CURRENT ledger (`gc bd list` with no status filter, so an in-progress
+# claim is seen, not only an open one), never trusting the demand snapshot taken a
+# spawn ago. Fail direction is deliberate: an unreadable holder re-read degrades
+# to snapshot-trust (returns "clear" — the same behaviour as no guard, no worse),
+# while an unverifiable *liveness* fails closed inside sy_pool_assignee_live.
+sy_pool_holder_is_live() {
+  _raw="$(gc bd list --rig "$1" --json 2>/dev/null)"
+  printf '%s' "$_raw" | jq -e . >/dev/null 2>&1 || return 1   # unreadable → snapshot-trust
+  _holder="$(printf '%s' "$_raw" | jq -r --arg id "$2" '
+    (if type=="array" then . else (.beads // []) end)
+    | .[] | select((.id // "") == $id) | (.assignee // "")' 2>/dev/null | awk 'NF' | head -n1)"
+  [ -n "$_holder" ] || return 1        # unassigned → clear to assign
+  [ "$_holder" = "$3" ] && return 1    # already ours → not a steal
+  sy_pool_assignee_live "$_holder"     # a real other holder → live? then hands off
+}
+
 # sy_pool_assign_bead RIG BEAD SESSION — direct-assign BEAD to SESSION, the
-# hand-off gastown's dead sling-claim would have made. `gc bd list` from the city
-# root sees only the town ledger, so the write names its rig explicitly (the same
-# rule merge-gate follows). Returns the write's status so the caller can report a
-# failed assign (a spawned worker left with nothing to do).
+# hand-off gastown's dead sling-claim would have made, GUARDED by the reassign
+# re-verify above. `gc bd list`/`update` from the city root see only the town
+# ledger, so the write names its rig explicitly (the same rule merge-gate
+# follows). Return codes let the caller report the outcome honestly:
+#   0 — assigned; 2 — REFUSED (bead held by a live/unverifiable worker, so the
+#   order stood down rather than steal it); other — the write itself failed.
 sy_pool_assign_bead() {
+  if sy_pool_holder_is_live "$1" "$2" "$3"; then
+    return 2
+  fi
   gc bd update --rig "$1" "$2" --assignee "$3" >/dev/null 2>&1
 }
 
@@ -185,10 +251,13 @@ for rig in $(sy_pool_nonsuspended_rigs); do
     sess="$(sy_pool_spawn_brakeman "$rig")"
     if [ -z "$sess" ]; then
       action="spawn FAILED (no session identity captured)"
-    elif sy_pool_assign_bead "$rig" "$target" "$sess"; then
-      action="spawned $sess, direct-assigned $target"
     else
-      action="spawned $sess, but direct-assign of $target FAILED"
+      sy_pool_assign_bead "$rig" "$target" "$sess"
+      case $? in
+        0) action="spawned $sess, direct-assigned $target" ;;
+        2) action="spawned $sess, REFUSED to reassign $target (already held by a live worker)" ;;
+        *) action="spawned $sess, but direct-assign of $target FAILED" ;;
+      esac
     fi
   else
     slot="full ($live/$max)"; ready="none (no WIP slot)"

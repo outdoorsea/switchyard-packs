@@ -1,0 +1,21 @@
+# Keep a judging-validator alive for each rig that drives a switchyard project,
+# so the awaiting-validation backlog drains continuously (switchyard PRD #177).
+#
+# A criterion that declares no `verify_command` can never be reached by the
+# automated validator lane — only by a reasoned, cited judgment from an agent that
+# did not build or author it. That is the judge (agents/judge). It is
+# min_active_sessions=0, so nothing keeps it alive; this order spawns one per
+# rig-with-a-coordinator when none is running. The session reads switchyard's own
+# validation queue over the MCP and exits IDLE when there is nothing to judge, so
+# a spawn on an empty backlog costs one cheap read, not a spin.
+#
+# Cadence is 30m: unlike pool dispatch this is not a race — a criterion that has
+# waited days is not made worse by waiting minutes more — but tighter than the 4h
+# intake sweep, because finished-but-unvalidated work blocks PRD completion and
+# should not sit a whole afternoon. Judgment lives in the session
+# (agents/judge/prompt.template.md); this order only decides WHETHER to start one.
+[order]
+description = "Spawn one judging-validator per rig with a switchyard coordinator when none is live; it drains the awaiting-validation backlog with cited judgment verdicts"
+trigger = "cooldown"
+interval = "30m"
+exec = "$PACK_DIR/assets/scripts/lane-ensure.sh judge judging-validator"

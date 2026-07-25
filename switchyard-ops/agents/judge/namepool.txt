@@ -1,0 +1,20 @@
+# Railway inspection & measurement occupations — themed session names for the
+# judge pool. Kin to brakeman/namepool.txt, but drawn from the roles that CHECK
+# rather than build: the yard's inspectors and gaugers.
+#
+# `gc` draws one name per concurrent session, so this pool must hold at least
+# max_active_sessions entries (judge runs one). Keep them single-word and
+# lowercase — a name is a session id, not a specialty. A judge named `gauger` and
+# one named `inspector` judge from the same queue with the same rules.
+inspector
+examiner
+gauger
+checker
+surveyor
+assessor
+weighman
+tallyman
+timekeeper
+tester
+marker
+telltale

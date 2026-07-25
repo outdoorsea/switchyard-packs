@@ -1,0 +1,21 @@
+# Keep an answerer alive for each rig that drives a switchyard project, so open
+# human→agent PRD questions are answered within minutes instead of at the 4h
+# intake sweep (switchyard PRD #34 / #171).
+#
+# The answerer (agents/answerer) claims the next open question, answers what it
+# can settle from the rig's code and history, and recommends on the rest. It is
+# min_active_sessions=0; this order spawns one per rig-with-a-coordinator when none
+# is running, via the shared lane-ensure spawner. The session reads
+# `list_open_questions` over the MCP and exits IDLE when the queue is empty, so a
+# spawn on no questions costs one cheap read.
+#
+# Cadence is 20m: questions want responsiveness, but this is a POLL — once the
+# `watch` event bridge lands (companion `watch`: SSE → gc wake), an answerer can
+# instead be woken the instant a question opens, and this poll becomes the safety
+# net rather than the primary trigger. The coordinator's own intake sweep still
+# answers questions at 4h; this just makes the common, repo-answerable case fast.
+[order]
+description = "Spawn one answerer per rig with a switchyard coordinator when none is live; it answers open PRD questions from code/history and recommends on human decisions"
+trigger = "cooldown"
+interval = "20m"
+exec = "$PACK_DIR/assets/scripts/lane-ensure.sh answerer answerer"

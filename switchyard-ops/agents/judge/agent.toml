@@ -1,0 +1,62 @@
+# judge — the switchyard judging-validator lane, as a Gas City agent.
+#
+# A judge claims a DELIVERED acceptance criterion that declares no
+# `verify_command` — one no automated validator can ever re-run — reads the
+# criterion together with the diff that delivered it, and records a
+# `validate_criterion` verdict with `judgment` provenance and citations. It is
+# the standing owner of switchyard's awaiting-validation backlog: the reasoned
+# second lane that PRD #177 specced, run as a session whose OWN model does the
+# reasoning (the north-star: the server does deterministic checks only; every
+# judgment is an external connected agent).
+#
+#   gc session new <rig>/switchyard-ops.judge --no-attach
+#
+# ...which is exactly what the `judge-sweep` order does on a cadence. You do not
+# sling work to a judge: its queue is switchyard's, read over the switchyard MCP,
+# not the gc bead ledger.
+#
+# WHY A SEPARATE AGENT, NOT A COORDINATOR NUDGE. Two server rules make judging a
+# distinct identity's job, not the coordinator's:
+#   1. Separation of duties — `validate_criterion` refuses (409) a verdict from
+#      the agent that WORKED the criterion (the satisfying bead's claimed_by).
+#   2. Author bar (PRD #177 P0) — it refuses a `judgment` verdict from the agent
+#      that AUTHORED the criterion. The coordinator authors and approves the
+#      project's PRDs, so a coordinator-run judgment is refused at the door.
+# The judge therefore registers under its OWN ref (`<rig>/switchyard-ops.judge`)
+# and never builds, authors, or approves anything. That is what lets its verdicts
+# stand.
+#
+# scope = "rig": like the brakeman pool, the judge materializes where the pack is
+# imported per rig, and judges THAT rig's switchyard project (via the rig's
+# switchyard-mcp overlay scope). A city import yields the orders; a rig import
+# yields the workers and the judge.
+scope = "rig"
+
+# fresh: each judging pass starts clean. A judgment is a self-contained read of a
+# criterion + its diff; resuming a finished pass replays nothing useful and burns
+# the window.
+wake_mode = "fresh"
+
+# The judge is READ-ONLY except for the verdict it posts over MCP. It never cuts a
+# branch or commits, so its cwd is a plain scratch dir, not a build worktree — it
+# reads delivered code with `gh pr diff <N>` and `git -C <rig-root> show
+# <sha>:<path>`, neither of which touches a working tree.
+work_dir = ".gc/worktrees/{{.Rig}}/judge/{{.AgentBase}}"
+
+nudge = "Run one judging pass now: read your prompt, drain what judge-reachable criteria you can with cited verdicts, then exit."
+
+idle_timeout = "30m"
+
+# min 0 / max 1: judging is serial and idempotent-per-criterion, but two judges
+# racing the same PR is wasted spend and pointless contention (the second write
+# just loses). One judge per rig drains the backlog in bounded passes; widen only
+# if the backlog dwarfs the drain rate, and only after confirming two judges never
+# both post `done` on one criterion. The pool scales to zero between passes; the
+# judge-sweep order spawns a fresh one when backlog remains. namepool.txt must hold
+# at least max_active_sessions names.
+min_active_sessions = 0
+max_active_sessions = 1
+
+# A judge is not slung gc beads and runs no gastown formula — its work list is
+# switchyard's validation queue, reached over the switchyard MCP. So no
+# default_sling_formula and no pre_start worktree setup: the prompt IS the method.

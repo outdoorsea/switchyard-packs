@@ -1,0 +1,17 @@
+# Railway communication & dispatch occupations — themed session names for the
+# answerer pool. Kin to brakeman (workers) and judge (inspectors), drawn from the
+# roles that RELAY word: the dispatchers, operators, and telegraphers.
+#
+# `gc` draws one name per concurrent session, so this pool must hold at least
+# max_active_sessions entries (answerer runs one). Single-word, lowercase — a name
+# is a session id, not a specialty.
+dispatcher
+operator
+signalman
+telegrapher
+leverman
+towerman
+clerk
+caller
+crier
+runner

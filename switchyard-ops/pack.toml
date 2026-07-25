@@ -3,6 +3,8 @@
 # Encodes the continuous-improvement loop as mechanical exec orders:
 #   pool-spawn     — spawn a brakeman for a rig with claimable demand + assign it (1m)
 #   merge-gate     — worker beads carry a merge_strategy before merge (5m)
+#   judge-sweep    — keep a judging-validator draining the awaiting-validation backlog (30m)
+#   answer-sweep   — keep an answerer clearing open PRD questions (20m)
 #   loop-health    — pinned coordinators alive + status probe honest (30m)
 #   intake-sweep   — nudge coordinators to triage switchyard intake (4h)
 #   nightly-retro  — nudge the retro agent to draft daily reports (24h)
@@ -15,9 +17,49 @@
 # Governing invariant: every silent failure becomes mail to the mayor within
 # one order cycle.
 #
-# ...and ships one agent:
-#   brakeman       — the worker pool. This is what you sling beads to. Sessions
-#                    are named after railway occupations (see its namepool.txt).
+# ...and ships three agents — the switchyard product-cycle lanes that run as a
+# session's OWN reasoning (the north star: the server does deterministic checks
+# only; every judgment/answer is an external connected agent). Each is scope=rig,
+# min=0, and is started on demand by a sweep order above; none is slung gc beads —
+# their queue is switchyard's, read over the switchyard MCP inside the session:
+#   brakeman       — the worker/BUILDER pool. This is what you sling beads to.
+#                    Runs gastown's mol-polecat-work and hands off to the refinery.
+#   judge          — the judging-VALIDATOR lane (PRD #177). Records reasoned,
+#                    CITED verdicts on delivered criteria that declare no
+#                    verify_command — the ones no automated validator can reach.
+#                    A SEPARATE identity is mandatory, not stylistic: the server
+#                    refuses a judgment verdict from the criterion's builder (SoD)
+#                    OR its author, and the coordinator authors the PRDs — so only
+#                    a non-authoring judge can validate them. Started by judge-sweep.
+#   answerer       — the ANSWERER lane (PRD #34/#171). Answers open human→agent PRD
+#                    questions from the repo's code + history, recommends on the
+#                    ones that are really human decisions. Latency upgrade over the
+#                    coordinator's 4h intake sweep. Started by answer-sweep.
+# Sessions in each pool are named after railway occupations (see each namepool.txt:
+# brakeman = trades, judge = inspectors, answerer = dispatchers).
+#
+# LANES NOT YET SHIPPED AS AGENTS (documented so the gap is a decision, not an
+# oversight — the companion defines these lanes: work, answer, validate, judge,
+# triage, dedup, covered-by, watch):
+#   triager     — issue auto-triage. NOT a separate agent: the coordinator is
+#                 allowed to triage and intake-sweep already nudges it. A dedicated
+#                 triager would only duplicate it (triage is "recommend, human
+#                 decides").
+#   validate    — the automated (contract) validator: re-runs a criterion's
+#                 verify_command. Purely mechanical, so it belongs to the
+#                 switchyard-companion `validate` daemon, not an LLM session — and
+#                 today it has nothing to do (contract_bearing coverage is ~0; no
+#                 criterion declares a runnable command). Wire the companion daemon
+#                 if/when contract coverage rises; do not add an LLM agent for it.
+#   watch       — the event bridge (companion `watch`: switchyard SSE → gc session
+#                 wake). The high-value missing piece, but a DAEMON/order, not an
+#                 agent: it would let judge/answer/triage be woken the instant a
+#                 criterion is delivered or a question opens, turning the 20-30m
+#                 polls above into a safety net. Ship as its own order once the
+#                 wake wiring is exercised end to end (it can spam wakes if wrong).
+#   dedup /     — issue duplicate-merge proposals / covered-by-existing-PRD
+#   covered-by    linkage. Coordinator-adjacent, low urgency; companion daemons
+#                 (`dedup`) exist. Add only if the issue backlog warrants it.
 #
 # IMPORT AT CITY SCOPE ONLY — `[imports.switchyard-ops]` in pack.toml.
 # One city import yields BOTH the orders and a brakeman pool in every rig: gc

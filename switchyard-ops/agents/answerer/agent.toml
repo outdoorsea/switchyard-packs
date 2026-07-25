@@ -1,0 +1,42 @@
+# answerer — the switchyard answer-queue lane, as a Gas City agent.
+#
+# An answerer claims the next OPEN human→agent PRD question, answers what it can
+# from the rig's code and history, and closes it — or, for a question that is
+# really a human's decision, recommends an answer and leaves it. It is the
+# responsiveness upgrade over the 4h intake-sweep: an open question reaches a
+# session in minutes instead of at the next coordinator sweep.
+#
+#   gc session new <rig>/switchyard-ops.answerer --no-attach
+#
+# ...which is what the `answer-sweep` order does when a rig has open questions.
+# Like the judge, you do not sling work to an answerer — its queue is switchyard's,
+# read over the MCP (`list_open_questions` / `questions/claim`), not the gc bead
+# ledger.
+#
+# RELATION TO THE COORDINATOR. The coordinator is ALSO allowed to answer questions
+# (intake-sweep tells it to). The answerer does not replace that — it makes the
+# common case (a question answerable straight from the code) fast, and leaves the
+# genuine human decisions for the coordinator's triage block and the human. It
+# claims per-question (`questions/claim`), so it never races the coordinator onto
+# the same question. Unlike the judge, there is no author/SoD bar here — answering
+# is not validating — so a separate identity is a convenience (latency + a clean
+# answerer ref on the record), not a requirement.
+scope = "rig"
+
+# fresh: each pass answers from the current code and history; there is no state to
+# carry between questions.
+wake_mode = "fresh"
+
+# Read-only except for the answers it posts over MCP. It reads the rig's code and
+# git history to ground an answer; it never edits, branches, or commits.
+work_dir = ".gc/worktrees/{{.Rig}}/answerer/{{.AgentBase}}"
+
+nudge = "Run one answer pass now: claim open PRD questions you can answer from the code/history, answer them, recommend on the rest, then exit."
+
+idle_timeout = "30m"
+
+# min 0 / max 1: per-question claims already prevent two answerers from colliding,
+# but one is enough for the volume and keeps spend predictable. Widen only if
+# questions pile up faster than one session drains them.
+min_active_sessions = 0
+max_active_sessions = 1

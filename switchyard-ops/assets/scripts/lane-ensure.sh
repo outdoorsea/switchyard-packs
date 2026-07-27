@@ -66,16 +66,56 @@ lane_live_count() {
 lane_spawn() {
   _out="$(gc session new "$1/$QUALIFIED" --no-attach 2>/dev/null)"
   _id="$(printf '%s' "$_out" | jq -r "$LANE_SESSION_ID_JQ" 2>/dev/null | awk 'NF' | head -n1)"
+  # Plain-text fallback 1 — this gc build answers with a human sentence:
+  #   Session gff-wisp-1zvxzd created from template "<rig>/<agent>" (reconciler …)
+  # so the SESSION ID is field 2. Prefer it: it is the actual identity, whereas
+  # the rig-token fallback below can only ever recover the TEMPLATE name.
   if [ -z "$_id" ]; then
-    _id="$(printf '%s\n' "$_out" | tr ' \t' '\n\n' | awk -v r="$1/" 'index($0,r)==1 {print; exit}')"
+    _id="$(printf '%s\n' "$_out" | awk '/^[Ss]ession [^ ]+ created/{print $2; exit}')"
+  fi
+  # Plain-text fallback 2 — any token naming the rig. Surrounding punctuation is
+  # stripped FIRST: the template name arrives quoted ("<rig>/<agent>"), so the
+  # leading double quote put the rig at index 2 and `index($0,r)==1` never
+  # matched. Every spawn therefore looked identity-less and mailed the mayor a
+  # false silent-failure alert even when the session had started fine.
+  if [ -z "$_id" ]; then
+    _id="$(printf '%s\n' "$_out" | tr ' \t' '\n\n' \
+      | sed 's/^[^A-Za-z0-9_]*//; s/[^A-Za-z0-9_/.-]*$//' \
+      | awk -v r="$1/" 'index($0,r)==1 {print; exit}')"
   fi
   printf '%s' "$_id"
 }
 
-# The rigs to cover are exactly those with a switchyard coordinator (a coordinator
-# ⇒ a switchyard project is driven there ⇒ it has a queue for this lane). Derive
-# the rig from each coordinator's qualified name and dedupe.
-rigs="$(sy_coordinators | sed 's#/.*$##' | awk 'NF' | sort -u)"
+# The rigs to cover are exactly those where THIS LANE'S OWN AGENT is defined —
+# the rig has the switchyard-ops pack imported for this lane, which is what "this
+# rig drives a switchyard project and therefore has a queue here" actually means.
+#
+# It deliberately NO LONGER derives from sy_coordinators. That set is
+# `pool.min >= 1`, a LIVENESS-PINNING signal, and this code was reusing it as a
+# HAS-A-QUEUE signal. The two diverge, and the divergence was silent and total:
+# switchyard's own rig runs its conductor on demand (`pool.min: 0`), so it was
+# absent from every judge and answer sweep ever run, while carrying the largest
+# validation backlog in the city (34 unvalidated criteria, oldest 24 days). The
+# sweep reported success throughout, because a rig that is never in `rigs` is
+# never checked and so can never fail. A rig may legitimately have a lane queue
+# with no pinned coordinator; having the lane's agent is the honest test.
+lane_rigs() {
+  gc agent list --json 2>/dev/null \
+    | jq -r --arg q "$QUALIFIED" '(if type=="array" then . else (.agents // []) end)
+             | .[]
+             | select((.suspended // false) | not)
+             | .qualified_name
+             | select(endswith("/" + $q))
+             | rtrimstr("/" + $q)' 2>/dev/null \
+    | awk 'NF' | sort -u
+}
+rigs="$(lane_rigs)"
+
+# Fall back to the old coordinator derivation when the agent probe yields nothing
+# (an older gc build, or one whose `agent list` lacks --json). Covering the rigs
+# we can still name beats silently covering none — which is the exact failure
+# this whole change exists to end.
+[ -n "$rigs" ] || rigs="$(sy_coordinators | sed 's#/.*$##' | awk 'NF' | sort -u)"
 
 # No coordinators is a legitimate state (all rigs suspended, or a fresh city).
 [ -n "$rigs" ] || exit 0

@@ -1,0 +1,30 @@
+# Railway survey & permanent-way occupations — themed session names for the
+# refactor-scout pool. Kin to brakeman (workers), judge (inspectors), answerer
+# (dispatchers), token-auditor (accountants), and security-scout (the watch),
+# drawn from the roles that decided where the LINE ITSELF should run and kept the
+# roadbed sound: surveyors, gradients, and permanent-way crews.
+#
+# `gc` draws one name per concurrent session, so this pool must hold at least
+# max_active_sessions entries (refactor-scout runs one). Keep them single-word and
+# lowercase — a name is a session id, not a specialty. A scout named `surveyor`
+# and one named `roadmaster` rank candidates with the same evidence bar.
+surveyor
+roadmaster
+gradient
+platelayer
+tracklayer
+alignment
+levelman
+chainman
+gandydancer
+permanentway
+ballast
+sleeper
+rodman
+transitman
+locater
+tamper
+packer
+lengthman
+gaugeman
+bridgewright

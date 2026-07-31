@@ -13,6 +13,12 @@
 #   events-rotate  — cap .gc/events.jsonl to a recent tail (24h; gc has no retention)
 #   scratch-reaper — report/prune orphaned gc-scratch dirs at the city root (6h)
 #   disk-watch     — mail the mayor when a path crosses a size threshold (12h)
+#   token-spike-watch — mail the mayor when a day's token usage exceeds the median
+#                    of prior days by a factor (6h; MECHANICAL, zero LLM)
+#   security-scan  — start one security-scout per rig, if its provider is
+#                    configured (12h)
+#   token-audit    — start the city token auditor (7d)
+#   refactor-scan  — start one refactor-scout per rig (7d)
 #
 # Governing invariant: every silent failure becomes mail to the mayor within
 # one order cycle.
@@ -35,6 +41,38 @@
 #                    questions from the repo's code + history, recommends on the
 #                    ones that are really human decisions. Latency upgrade over the
 #                    coordinator's 4h intake sweep. Started by answer-sweep.
+#   security-scout — the SECURITY-REVIEW lane, run on an INDEPENDENT PROVIDER
+#                    (kimi) so it does not share the blind spots of the model it
+#                    reviews. Scans the diff since its last pass, files findings
+#                    into switchyard, and is the ONLY lane allowed to change code
+#                    on its own initiative — high severity only, on a branch, as a
+#                    PR, NEVER merged. Started by security-scan, which refuses to
+#                    spawn until the provider is actually usable (an unconfigured
+#                    provider would otherwise be a silent spawn-fail loop).
+#   refactor-scout — the REFACTOR-PROPOSAL lane. Ranks structural problems by
+#                    evidence (churn, defect clustering, coupling, DRIFTED
+#                    duplication) and files at most 3 proposals per pass. Writes
+#                    NO code: a refactor's value depends on the team agreeing it
+#                    is the right shape, so a human decides and the normal worker
+#                    pool builds it. Started by refactor-scan.
+#   token-auditor  — the SPEND-REVIEW lane, and the only CITY-SCOPED agent here
+#                    (spend is a city property, and the useful comparisons are
+#                    cross-rig). Attributes .gc/usage.jsonl to agents and rigs via
+#                    assets/scripts/token-report.sh, then files findings that
+#                    clear a four-part evidence bar. Reports, never tunes: a wrong
+#                    [[patches.agent]] name makes `gc config show` exit 1 and
+#                    rejects the WHOLE city config. Started by token-audit.
+#
+# TOKEN WORK — WHO OWNS WHICH AXIS. There are two distinct token costs, and
+# conflating them duplicates work already in flight:
+#   * the switchyard API/MCP RESPONSE SURFACE (per-row duplication, static prose,
+#     unbounded list reads) is switchyard PRD #281, priority 1, executing.
+#   * GAS CITY WAKE/RESPAWN COST and per-agent spend attribution is this pack's
+#     (docs/TOKEN-HARDENING.md + token-auditor). PRD #281 lists both of these as
+#     explicitly out_of_scope, so they are nobody else's job.
+# Measured here: 681,270 cache-read tokens against 20 input and 8,213 output —
+# ~99% of spend is RE-READING CONTEXT, not generating text. Optimising output
+# length is optimising the wrong term by orders of magnitude.
 # Sessions in each pool are named after railway occupations (see each namepool.txt:
 # brakeman = trades, judge = inspectors, answerer = dispatchers).
 #

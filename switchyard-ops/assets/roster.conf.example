@@ -1,7 +1,19 @@
 # roster.conf — CITY-LOCAL config for switchyard-ops. NOT versioned in this repo.
 #
 # Install to:  $GC_PACK_STATE_DIR/roster.conf
-#              (typically <city>/.gc/runtime/packs/switchyard-ops/roster.conf)
+#              i.e. <city>/.gc/runtime/packs/switchyard-ops/roster.conf
+#
+# That `packs/` segment is load-bearing. Every order resolves this file through
+# GC_PACK_STATE_DIR, which gc sets to <city>/.gc/runtime/packs/<pack-name>; a
+# roster.conf one directory up (<city>/.gc/runtime/switchyard-ops/) is read by
+# nothing. To confirm you picked the right directory, look for the marker files
+# the orders themselves write — nightly-retro.unconfigured, pool-spawn.assigned-
+# last, loop-health.missing-last. roster.conf belongs beside those.
+#
+# Installing it anywhere else fails SILENTLY and identically to not installing
+# it at all: sy_load_conf sources nothing, the roster comes back empty, and
+# intake-sweep nudges no coordinator and exits 0. There is no error and no
+# alarm — the dispatch lane simply goes quiet.
 #
 # Everything here is OPTIONAL. With no roster.conf at all, switchyard-ops
 # derives its roster from `gc agent list --json`: every agent with

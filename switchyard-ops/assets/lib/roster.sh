@@ -75,9 +75,21 @@ sy_city_name() { basename "$(sy_city)"; }
 
 # gc gives every pack a per-city, per-pack state dir. Fall back to the city's
 # runtime dir when a caller is invoked outside an order (e.g. a manual test).
+#
+# The fallback MUST mirror what gc actually sets GC_PACK_STATE_DIR to, which is
+# <city>/.gc/runtime/packs/<pack-name> — note the `packs/` segment. gc's own
+# core packs spell the same fallback (".../runtime/packs/core"). An earlier
+# version of this function omitted `packs/`, which was invisible in an order
+# (GC_PACK_STATE_DIR is set there, so the fallback never ran) but silently
+# diverged for anything invoked by hand: a roster.conf installed by following a
+# manual run's idea of the state dir landed one directory up from where every
+# order looks, and sy_load_conf then read NOTHING with no error. That failure is
+# indistinguishable from having no roster.conf at all — an empty roster means
+# intake-sweep nudges nobody and exits 0, so the whole dispatch lane goes quiet
+# without a single alarm. Keep these two paths identical.
 sy_state_dir() {
   if [ -n "${GC_PACK_STATE_DIR:-}" ]; then printf '%s' "$GC_PACK_STATE_DIR"
-  else printf '%s/.gc/runtime/switchyard-ops' "$(sy_city)"; fi
+  else printf '%s/.gc/runtime/packs/switchyard-ops' "$(sy_city)"; fi
 }
 
 sy_load_conf() {

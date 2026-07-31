@@ -1,0 +1,72 @@
+# security-scout — the security-review lane, run on a SECOND opinion model.
+#
+# Reads a rig's code for security defects, files what it finds into switchyard as
+# issues (and recommends a PRD when a cluster warrants one), and fixes only the
+# high-severity findings itself — on a branch, as a PR, never merged by the agent.
+#
+#   gc session new <rig>/switchyard-ops.security-scout --no-attach
+#
+# ...which is what the `security-scan` order does on a cadence.
+#
+# WHY A DIFFERENT PROVIDER. Every other lane in this city reasons with the same
+# model family, so they share its blind spots — including in review, where a
+# model is being asked to catch the class of mistake it would itself make. Running
+# security review on an independent model buys genuine disagreement. This is the
+# same reasoning the core `mol-review-quorum` formula encodes by giving each
+# reviewer lane its own provider and model.
+#
+# ⚠ PROVIDER PREREQUISITES — this agent CANNOT RUN until all three hold:
+#   1. the `kimi` CLI is on PATH,
+#   2. `KIMI_API_KEY` is set in the session environment, and
+#   3. city.toml registers the provider:
+#        [providers.kimi]
+#        base = "builtin:kimi"
+#        args = ["--model", "kimi-k2.6"]
+#
+# `builtin:kimi` resolves at config load and the `core` pack ships a kimi
+# SessionStart overlay, so the wiring is real — but CONFIG ACCEPTANCE IS NOT
+# RUNTIME PROOF, and no kimi-backed session has yet run in this city. The
+# `security-scan` order checks all three and stays silent when they are unmet, so
+# an unconfigured city gets no spawn loop and no nagging mail.
+#
+# To run this lane on the default provider instead (useful to exercise the
+# prompt before kimi is wired), patch the provider off in city.toml:
+#   [[patches.agent]]
+#     dir = "<rig>"
+#     name = "switchyard-ops.security-scout"
+#     provider = "claude"
+# ...accepting that you lose the independent-model property that is the whole
+# point of the lane.
+#
+# NOTE ON MODEL SELECTION: the model is chosen by the PROVIDER's `args`/`env` in
+# city.toml, NOT here. `model` is not a valid agent.toml key — gc silently drops
+# it (verified by round-trip against gc 1.4.0), so a `model = "..."` line here
+# would look correct and do nothing. See packs/docs/GAS-CITY-MECHANICS.md.
+provider = "kimi"
+
+# scope = "rig": security review is per-repository. The lane materializes in each
+# rig that imports the pack and reviews THAT rig's code against THAT rig's
+# switchyard project.
+scope = "rig"
+
+# fresh: each scan is a self-contained read of a diff or a subsystem. Resuming
+# replays a completed review and re-bills its whole context.
+wake_mode = "fresh"
+
+# Needs a real worktree: the high-severity path cuts a branch and commits a fix.
+# Read-only scanning would not need one, but the lane does both and a single
+# work_dir keeps the fix in the same tree that found the defect.
+work_dir = ".gc/worktrees/{{.Rig}}/security-scout/{{.AgentBase}}"
+
+nudge = "Run one security pass now: read your prompt, scan your assigned scope, file findings, open PRs for high-severity only, then exit."
+
+idle_timeout = "30m"
+
+# min 0 / max 1: two scouts on one repo duplicate every finding and can race to
+# open two PRs for the same defect. The pool scales to zero between scans.
+min_active_sessions = 0
+max_active_sessions = 1
+
+# A security pass that runs long is usually stuck, and a stuck session holding a
+# worktree blocks the next scan. Force-recycle.
+max_session_age = "3h"

@@ -1,0 +1,23 @@
+# Start one security-scout per rig, on an independent model, when its provider
+# is configured.
+#
+# The scout reviews the diff since its last pass, files findings into switchyard,
+# and opens PRs for high-severity findings only — never merging. Judgment and the
+# evidence bar live in agents/security-scout/prompt.template.md; this order only
+# decides WHETHER to start one, and refuses to start a spawn-fail loop when the
+# lane's provider is not yet usable.
+#
+# WHY 12h. Security review wants to be close behind the code that lands without
+# re-reading the same diff repeatedly. Twice a day means a defect merged in the
+# morning is reviewed the same day, while a quiet rig (empty diff) costs one
+# cheap read before the session exits IDLE. Tighter buys little: the scout scopes
+# to the diff since last pass, so running it 4x more often mostly produces 4x
+# more empty passes.
+#
+# NOT a substitute for review on the PR itself — this is the standing sweep that
+# catches what merged without one.
+[order]
+description = "Start one security-scout per rig twice daily (independent model); it files findings into switchyard and opens PRs for high-severity only"
+trigger = "cooldown"
+interval = "12h"
+exec = "$PACK_DIR/assets/scripts/security-scan.sh"

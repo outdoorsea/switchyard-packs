@@ -1,0 +1,41 @@
+# token-auditor — the spend-review lane.
+#
+# Reads what the city ACTUALLY spent (.gc/usage.jsonl, joined to agents and rigs
+# by assets/scripts/token-report.sh), decides which spend was avoidable, and
+# files the finding into switchyard. It does not tune anything itself: its output
+# is a filed, citable finding, not an edit to city.toml.
+#
+#   gc session new switchyard-ops.token-auditor --no-attach
+#
+# ...which is what the `token-audit` order does on a cadence.
+#
+# SCOPE = CITY, NOT RIG. Token spend is a city-wide property: the same agent
+# definition runs in every rig, and the interesting comparisons are cross-rig
+# ("faultline's worker costs 4x meety-local's for the same lane"). A rig-scoped
+# auditor would see one slice and could not make that comparison — and would
+# multiply its own cost by the rig count to produce a worse answer.
+scope = "city"
+
+# fresh: an audit pass is a self-contained read of a usage window. Resuming a
+# finished audit replays a report that has already been filed and re-bills the
+# whole prior context to do it. This agent exists to reduce token spend; a
+# resume-mode auditor would be the single most embarrassing line in its own report.
+wake_mode = "fresh"
+
+# Read-only over the city plus MCP writes to switchyard. It never cuts a branch
+# or edits config, so a plain scratch dir is right — no build worktree.
+work_dir = ".gc/agents/{{.AgentBase}}"
+
+nudge = "Run one token audit pass now: read your prompt, produce the report, file only findings that clear the evidence bar, then exit."
+
+idle_timeout = "30m"
+
+# min 0 / max 1: auditing is serial and idempotent per window. Two auditors on
+# one window duplicate every finding and race to file the same one twice. The
+# pool scales to zero between passes; the order spawns a fresh one.
+min_active_sessions = 0
+max_active_sessions = 1
+
+# Force-recycle even if a pass somehow runs long. An auditor that sat awake
+# accumulating context would itself become the spike it is meant to detect.
+max_session_age = "2h"

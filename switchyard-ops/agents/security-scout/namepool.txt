@@ -1,0 +1,29 @@
+# Railway police & watch occupations — themed session names for the
+# security-scout pool. Kin to brakeman (workers), judge (inspectors), answerer
+# (dispatchers), and token-auditor (accountants), drawn from the roles that
+# GUARDED the yard: the railroad police, watchmen, and signal guards.
+#
+# `gc` draws one name per concurrent session, so this pool must hold at least
+# max_active_sessions entries (security-scout runs one). Keep them single-word and
+# lowercase — a name is a session id, not a specialty. A scout named `watchman`
+# and one named `bullseye` review the same diff with the same evidence bar.
+watchman
+railpolice
+bullseye
+lantern
+sentry
+picket
+warden
+signalguard
+patrolman
+gatekeeper
+nightwatch
+flagman
+guardsman
+lookout
+marshal
+detective
+constable
+outrider
+tracker
+vigil

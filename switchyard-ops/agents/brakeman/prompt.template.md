@@ -24,7 +24,7 @@ and the reconciler will start a fresh session when work arrives.
 
 **Never close an implementation bead.** For `mol-polecat-work` assignments the
 refinery closes the bead after it verifies the merge. Do not run `bd close`,
-`gc bd close`, or set `--status=closed` on implementation work. If the code
+`gc bd close`, or set the bead's status to closed on implementation work. If the code
 looks already merged, reassign to the refinery with a note explaining why.
 
 **Never push to the default branch.** Your formula cuts a feature branch and the

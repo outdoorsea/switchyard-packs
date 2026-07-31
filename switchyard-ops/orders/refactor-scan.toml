@@ -1,0 +1,21 @@
+# Start one refactor-scout per rig on a slow cadence.
+#
+# The scout ranks structural problems by evidence (churn, defect clustering,
+# coupling, drifted duplication) and files at most three proposals per pass into
+# switchyard. It writes no code — a human decides, and the normal worker pool
+# builds what is accepted.
+#
+# WHY 7 DAYS. A codebase's structural shape changes on the timescale of merged
+# features, not hours. The scout's own evidence is a 6-month git window, which
+# barely moves day to day — so a daily scan would re-derive the same ranking and
+# re-file the same three candidates against a repo nobody has restructured. Weekly
+# is also roughly the rate a team can actually absorb refactor proposals: filing
+# faster than they can be decided just grows a backlog that gets skimmed.
+#
+# Deliberately out of phase with security-scan (12h): security findings are
+# defects wanting fast turnaround, refactors are judgments wanting deliberation.
+[order]
+description = "Start one refactor-scout per rig weekly; it files evidence-ranked refactor proposals into switchyard and writes no code"
+trigger = "cooldown"
+interval = "168h"
+exec = "$PACK_DIR/assets/scripts/lane-ensure.sh refactor-scout 'refactor scout'"

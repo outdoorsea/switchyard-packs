@@ -1,0 +1,25 @@
+# Spawn the city's token auditor on a slow cadence.
+#
+# Unlike token-spike-watch (mechanical, catches sudden jumps), this starts a
+# SESSION whose own model reads the usage report, attributes spend to agents and
+# rigs, and files findings into switchyard. It costs real tokens, so its cadence
+# is deliberately slow.
+#
+# WHY 7 DAYS. The auditor's findings are about CONFIGURATION — wake cadence,
+# prompt size, pool ceilings, idle timeouts. Those change when a human changes
+# them, not hourly, so a daily audit would re-derive the same findings and file
+# the same items against a city nobody has touched. A week is also the shortest
+# window that makes the strongest class of finding legible: cost-per-closed-bead
+# ratios need enough closed beads to be a ratio rather than an anecdote.
+#
+# The spike watch is what covers the fast axis. If a spike lands, the mayor gets
+# mail within 6h and can wake an auditor immediately:
+#   gc session new switchyard-ops.token-auditor --no-attach
+#
+# The session exits IDLE when it has nothing to file, so a pass on a steady city
+# costs one cheap report read, not a spin.
+[order]
+description = "Start the city token auditor weekly; it attributes spend to agents/rigs and files findings into switchyard"
+trigger = "cooldown"
+interval = "168h"
+exec = "$PACK_DIR/assets/scripts/city-lane-ensure.sh token-auditor 'token auditor'"

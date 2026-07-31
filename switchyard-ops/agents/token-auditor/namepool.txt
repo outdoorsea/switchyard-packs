@@ -1,0 +1,29 @@
+# Railway accounting & weighing occupations — themed session names for the
+# token-auditor pool. Kin to brakeman (workers), judge (inspectors), and answerer
+# (dispatchers), drawn from the roles that COUNT: the yard's tallymen, weighers,
+# and rate clerks who priced a car before it moved.
+#
+# `gc` draws one name per concurrent session, so this pool must hold at least
+# max_active_sessions entries (token-auditor runs one). Keep them single-word and
+# lowercase — a name is a session id, not a specialty. An auditor named `weigher`
+# and one named `tallyman` audit the same usage sink with the same rules.
+weighmaster
+tallyman
+rateclerk
+carchecker
+weigher
+scaleman
+billclerk
+auditor
+reckoner
+tabulator
+ledgerman
+costclerk
+demurrage
+waybiller
+checkclerk
+abstractor
+gauger
+counter
+assessor
+comptroller

@@ -1,0 +1,23 @@
+# Turn a token-usage spike into mayor mail (the loop invariant).
+#
+# ZERO LLM COST. This order runs token-report.sh --spikes, which is jq over
+# .gc/usage.jsonl plus one `gc bd list` — no session, no model call. It is in the
+# same class as merge-gate and config-drift: leaving it frequent is correct, and
+# stretching its cadence to "save tokens" saves exactly nothing.
+#
+# It compares the newest day against the MEDIAN of prior days, not the mean: one
+# earlier spike would inflate a mean and mask the next one. Under three days of
+# history it reports no-baseline and stays silent rather than inventing one.
+#
+# Cadence 6h: a spike is worth knowing about the same day, but not four times an
+# hour — the mail is rate-limited to once per 24h anyway (same marker gate as
+# disk-watch), so a tighter cadence would only re-read the sink.
+#
+# Thresholds are env-tunable via roster.conf:
+#   TOKEN_REPORT_SPIKE_FACTOR  day-over-median multiple that counts (default 3)
+#   TOKEN_REPORT_SPIKE_FLOOR   ignore days under N tokens (default 200000)
+[order]
+description = "Mail the mayor when a day's token usage exceeds the median of prior days by the configured factor; mechanical, no LLM"
+trigger = "cooldown"
+interval = "6h"
+exec = "$PACK_DIR/assets/scripts/token-report.sh --spikes"

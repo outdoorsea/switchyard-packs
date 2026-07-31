@@ -1,0 +1,41 @@
+# refactor-scout — the high-impact-refactor lane.
+#
+# Reads a rig's code for structural problems worth paying to fix, ranks them by
+# impact against evidence (churn, defect history, how often agents trip over the
+# same thing), and files the top few into switchyard. It writes no code.
+#
+#   gc session new <rig>/switchyard-ops.refactor-scout --no-attach
+#
+# ...which is what the `refactor-scan` order does on a cadence.
+#
+# WHY IT DOESN'T REFACTOR. A refactor is a large, low-urgency, high-blast-radius
+# change whose value depends entirely on whether the team agrees it is the right
+# shape. An agent that both proposes and executes one produces a large diff
+# nobody asked for, competing with the work in flight. So this lane's output is a
+# RANKED, EVIDENCED PROPOSAL; a human decides, and the normal worker pool builds
+# it as ordinary dispatched work. That also keeps it out of the security-scout's
+# lane, which is the only lane permitted to change code on its own initiative —
+# and only for high-severity defects.
+#
+# CONTRAST WITH THE SECURITY SCOUT. Security findings are defects: objectively
+# wrong, urgent, and fixable in isolation. Refactors are judgments about shape:
+# reasonable engineers disagree, and the cost of being wrong is a large diff and
+# a stalled queue. Same scanning posture, opposite autonomy.
+scope = "rig"
+
+# fresh: a scan is a self-contained read of the codebase's current shape.
+wake_mode = "fresh"
+
+# Read-only. It reads code and history and files findings over MCP; it never cuts
+# a branch, so a plain scratch dir is right rather than a build worktree.
+work_dir = ".gc/worktrees/{{.Rig}}/refactor-scout/{{.AgentBase}}"
+
+nudge = "Run one refactor scan now: read your prompt, rank candidates by evidence, file only what clears the bar, then exit."
+
+idle_timeout = "30m"
+
+# min 0 / max 1: two scouts would file the same candidates twice.
+min_active_sessions = 0
+max_active_sessions = 1
+
+max_session_age = "3h"

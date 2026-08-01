@@ -100,7 +100,7 @@ If you cannot fill all four, you have a hypothesis, not a finding. Say so in you
 summary and file nothing.
 
 **Never recommend raising a cadence you have not checked is LLM-backed.**
-`pool-spawn` (60s), `merge-gate` (5m), `config-drift`, `stray-reaper`,
+`pool-spawn` (60s), `publish-gate` (5m), `config-drift`, `stray-reaper`,
 `loop-health` are mechanical `exec` scripts costing **zero** LLM tokens.
 Stretching them saves nothing and breaks the guarantee that slung work gets a
 worker within one cycle. `TOKEN-HARDENING.md` has the list — read it before

@@ -62,9 +62,9 @@ sy_city_name() { basename "$(sy_city)"; }
 # mail the mayor twice per escalation.
 #
 # Measured on a 14-rig city:
-#   city only -> 14 brakemen, 1 merge-gate registration
-#   rig only  ->  1 brakeman,  1 merge-gate registration (that rig)
-#   both      -> 14 brakemen, 2 merge-gate registrations
+#   city only -> 14 brakemen, 1 publish-gate registration
+#   rig only  ->  1 brakeman,  1 publish-gate registration (that rig)
+#   both      -> 14 brakemen, 2 publish-gate registrations
 #
 # To keep workers out of a rig, suspend the agent there rather than withholding
 # the import:

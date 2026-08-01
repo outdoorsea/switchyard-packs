@@ -79,7 +79,7 @@
 # could actually claim iff ALL hold:
 #   - it is OPEN,
 #   - it is routed to the rig's worker pool (`gc.routed_to` ends `.brakeman`,
-#     the same selector merge-gate trusts),
+#     the same selector publish-gate trusts),
 #   - it is UNASSIGNED (no `.assignee` — an assigned bead is already someone's),
 #   - it is REAL WORK, the work bead itself and not a self-blocked molecule root:
 #     a directly-slung work bead carries no `gc.kind` (workflow roots/steps all
@@ -107,7 +107,7 @@ POOL_SUFFIX=".brakeman"
 POOL_LIVE_STATES="active start-pending start_pending creating draining"
 
 # sy_pool_nonsuspended_rigs — the name of every rig gc is not suspending, one per
-# line. Mirrors merge-gate's rig enumeration, minus suspended rigs (checked two
+# line. Mirrors publish-gate's rig enumeration, minus suspended rigs (checked two
 # ways so a differently-spelled suspend signal still excludes; excluding an
 # active rig only under-reports, which is the safe direction for detection).
 sy_pool_nonsuspended_rigs() {
@@ -138,7 +138,7 @@ POOL_DEMAND_JQ='
 
 # sy_pool_rig_demand RIG — ids of RIG's claimable brakeman demand, one per line.
 # `gc bd list` from the city root sees only the town ledger, so the rig is named
-# explicitly (the same rule merge-gate follows).
+# explicitly (the same rule publish-gate follows).
 sy_pool_rig_demand() {
   gc bd list --rig "$1" --status open --json 2>/dev/null \
     | jq -r "$POOL_DEMAND_JQ" 2>/dev/null \
@@ -245,7 +245,7 @@ sy_pool_holder_is_live() {
 # sy_pool_assign_bead RIG BEAD SESSION — direct-assign BEAD to SESSION, the
 # hand-off gastown's dead sling-claim would have made, GUARDED by the reassign
 # re-verify above. `gc bd list`/`update` from the city root see only the town
-# ledger, so the write names its rig explicitly (the same rule merge-gate
+# ledger, so the write names its rig explicitly (the same rule publish-gate
 # follows). Return codes let the caller report the outcome honestly:
 #   0 — assigned; 2 — REFUSED (bead held by a live/unverifiable worker, so the
 #   order stood down rather than steal it); other — the write itself failed.

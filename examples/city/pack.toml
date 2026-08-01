@@ -5,7 +5,7 @@
 #
 # Layering (see packs/docs/OPERATING-MODEL.md):
 #   Layer 0  gc core .......... sessions, rigs, mail, beads, orders, wisps
-#   Layer 1  gastown .......... the coding-platform pack (pinned, unforked)
+#   Layer 1  gascity .......... the build-methodology pack (pinned, unforked)
 #   Layer 2  switchyard-mcp ... overlay: switchyard MCP into every rig's crew
 #   Layer 3  switchyard-ops ... this city's own heartbeat (timed orders)
 
@@ -15,10 +15,12 @@ version = ""
 schema = 2
 
 [imports]
-  # --- Layer 1: the coding platform. Pin a sha; never fork. -----------------
-  [imports.gastown]
-    source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
-    version = "sha:<pin-a-gastown-commit>"
+  # --- Layer 1: the build methodology. Pin a sha; never fork. ----------------
+  # Bound as `gc`, which is the binding gascity's own formulas and its roles
+  # sub-pack expect. `gc init --template gascity` writes exactly this.
+  [imports.gc]
+    source = "https://github.com/gastownhall/gascity-packs/tree/main/gascity"
+    version = "sha:<pin-a-gascity-packs-commit>"
 
   # --- gc builtins -----------------------------------------------------------
   [imports.core]
@@ -39,6 +41,19 @@ schema = 2
     version = "sha:<pin-a-mirror-commit>"
 
 # Layer 2 (switchyard-mcp) is imported PER RIG, not city-wide — see city.toml.
+
+# The mayor is CITY-LOCAL, not from a pack.
+#
+# Under gastown the mayor arrived as a pack agent with a [[named_session]]
+# already declared. gascity ships no always-on crew at all — it is a methodology
+# pack, not a session-topology one — so `gc init` writes an `agents/mayor/` into
+# the city itself and you declare its session here. Without this block nothing
+# is resident, and every `gc mail send mayor` in switchyard-ops' orders (the
+# pack's entire escalation path) silently goes nowhere: those calls are all
+# `>/dev/null 2>&1`, so a missing mayor produces no error, just silence.
+[[named_session]]
+  template = "mayor"
+  mode = "always"
 
 # Optional: user tmux bindings. gc's tmux server ignores ~/.tmux.conf, and the
 # default WheelUpPane breaks scroll-through to full-screen TUIs. Drop

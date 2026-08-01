@@ -1,0 +1,86 @@
+description = """
+One switchyard work item, built and published as a pull request.
+
+This is what a brakeman runs. It is the gascity-native replacement for
+gastown's `mol-polecat-work`: same job — claim one bead, build it in a scoped
+worktree, get it in front of a reviewer — but there is no refinery to hand off
+to, so the worker opens its own PR and then closes its own source anchor.
+
+Launch inputs:
+- input_convoy: {{convoy_id}}
+- context_path: {{context_path}} (empty means no extra context bundle)
+- implementation_target: {{implementation_target}}
+- summary_path: {{summary_path}} (empty means use the default item summary path)
+
+WHY THIS FORMULA EXISTS AT ALL, rather than pointing brakeman at gascity's
+`do-work`:
+
+  `do-work` is `prepare-worktree -> implement -> close-source-anchor`. It never
+  pushes. Pushing and PR-opening live in gascity's separate `publish` formula,
+  whose `push` and `open_pr` vars BOTH default to "false". A brakeman on bare
+  `do-work` would build the change, close its own bead, and leave the branch on
+  local disk — and every switchyard surface would read that bead as delivered.
+  Silent, and indistinguishable from success.
+
+  So this formula inserts a publish step BEFORE the close and makes
+  `close-source-anchor` depend on it. A bead cannot reach closed without a
+  pushed branch and an open PR. That ordering is the whole point of the file;
+  do not relax it.
+
+It does NOT `expand` gascity's `publish` formula. That formula declares
+`[[steps]]` rather than a `[template]`, so it is a workflow, not an expansion —
+`loadResolvedExpansionFormula` refuses a non-expansion target, and it also
+requires a `final_report` this per-item lane never produces. gascity's own
+`build-basic` publishes the same way this does: an inline step targeted at
+`gc.publisher`.
+"""
+formula = "sy-item-work"
+version = 1
+contract = "graph.v2"
+extends = ["implementation-base"]
+target_required = true
+
+[vars]
+[vars.context_path]
+description = "Optional context bundle path."
+default = ""
+
+[vars.implementation_target]
+description = "Role target for implementation work."
+default = "gc.implementation-worker"
+
+[vars.summary_path]
+description = "Optional per-item summary path."
+default = ""
+
+[vars.base_branch]
+description = "Branch the PR targets, and the branch the worktree was cut from."
+default = "main"
+
+# prepare-worktree and implement are inherited from `implementation-base`
+# unchanged, including implement's build-artifact-valid.sh check. Their
+# description_file references stay gascity-relative: the parser resolves
+# description_file against the DEFINING formula's own directory, not the
+# child's, so inheriting a step does not drag its prose into this pack.
+
+[[steps]]
+id = "publish"
+title = "Push the branch and open a pull request"
+needs = ["implement"]
+metadata = { "gc.run_target" = "gc.publisher" }
+description_file = "../assets/workflows/sy-item-work/publish.md"
+
+[steps.retry]
+max_attempts = 3
+on_exhausted = "hard_fail"
+
+# RESTATED IN FULL, not patched. `extends` merges steps by id with WHOLE-STEP
+# replacement (formula/parser.go mergeSteps: `result[idx] = cs`), not a
+# field-level merge — declaring only `needs` here would silently drop the
+# parent's `gc.run_target` and its prose, leaving an untargeted step.
+[[steps]]
+id = "close-source-anchor"
+title = "Close owned source anchor"
+needs = ["publish"]
+metadata = { "gc.run_target" = "gc.run-operator" }
+description_file = "../assets/workflows/sy-item-work/close-source-anchor.md"

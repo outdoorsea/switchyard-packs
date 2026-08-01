@@ -10,7 +10,8 @@ the MCP tool surface, and the orders that use them, together.
 ```
 packs/onboarding/         first-run: pick your surface, connect it, drive switchyard
 packs/switchyard-ops/     Layer 3 — the city's 24-hour heartbeat (timed orders)
-                                  + brakeman, the worker pool you sling to
+                                  + brakeman (workers), answerer, judge
+                                  + sy-item-work, the build+publish formula
 packs/switchyard-mcp/     Layer 2 — overlay: switchyard MCP into a rig's crew
 packs/examples/city/      a reference pack.toml + city.toml to copy
 packs/docs/OPERATING-MODEL.md   roles, layering, token economy, gotchas
@@ -29,9 +30,9 @@ For the Gas City design of record, read
 
 ## Roles at a glance
 
-Work flows in one loop: **switchyard → companion → coordinator → worker →
-refinery → back to switchyard.** The switchyard cloud is the backlog authority;
-everything else is a role in the local Gas City.
+Work flows in one loop: **switchyard → companion → coordinator → worker → pull
+request → human merge → back to switchyard.** The switchyard cloud is the backlog
+authority; everything else is a role in the local Gas City.
 
 ```mermaid
 flowchart TB
@@ -42,24 +43,22 @@ flowchart TB
     subgraph RIG["per rig × N"]
       comp["companion<br/>daemon · no LLM"]
       coord["coordinator<br/>compass/magnet/… · pinned"]
-      pool["brakeman / polecat<br/>worker pool · ≤2"]
-      ref["refinery<br/>on-demand"]
-      wit["witness<br/>always-on"]
+      pool["brakeman<br/>worker pool · ≤2"]
+      roles["gascity roles<br/>implementation-worker · publisher"]
     end
-    subgraph CREW["city crew · gastown"]
-      mayor["mayor"]
-      deacon["deacon"]
-      boot["boot"]
-      dog["dog pool"]
+    subgraph CREW["city crew"]
+      mayor["mayor<br/>city-local"]
+      dog["dog pool · bd pack"]
     end
   end
+  human["human reviewer"]
   PRD -->|sync approved work| comp
   comp -->|mint local beads + notify| coord
   coord -->|sling| pool
-  pool -->|branch| ref
-  ref -->|merged PR| comp
+  pool -->|runs sy-item-work via| roles
+  roles -->|push + open PR| human
+  human -->|merges| comp
   comp -->|report progress| PRD
-  wit -.->|watch stuck / orphans| pool
 ```
 
 | Role | Layer | LLM? | Lifecycle | Job |
@@ -67,17 +66,22 @@ flowchart TB
 | **switchyard** | cloud | — | — | PRDs, epics, the claim pool — the source of truth |
 | **companion** | per-rig bridge | no | daemon | sync approved PRDs → local beads; report progress up |
 | **coordinator** (compass/magnet/…) | per-rig | yes | **pinned** | triage the rig's switchyard project; sling work to the pool |
-| **brakeman** / **polecat** | per-rig | yes | on-demand pool (≤2) | claim a bead → build in a scoped worktree → hand off |
-| **refinery** | per-rig | yes | on-demand | review + merge (opens the MR/PR per `merge_strategy`) |
-| **witness** | per-rig | yes | **always-on** | watch for stuck beads, orphaned work, lease expiry |
-| **mayor** | city | yes | always-on | human interface + city-level coordination |
-| **deacon** | city | yes | always-on | patrol: health, queue starvation, maintenance |
-| **boot** | city | yes | watchdog | controller freeze-detector |
-| **dog** | city | yes | on-demand pool | mechanical maintenance (stale-DB sweeps, GC) |
+| **brakeman** | per-rig | yes | on-demand pool (≤2) | claim a bead → build in a scoped worktree → push → open a PR |
+| **answerer** | per-rig | yes | on-demand | drain open PRD questions |
+| **judge** | per-rig | yes | on-demand | drain the awaiting-validation backlog |
+| gascity **roles** | per-rig | yes | stateless targets | `gc.implementation-worker`, `gc.publisher`, `gc.run-operator` — what a formula step dispatches to |
+| **mayor** | city | yes | always-on | human interface, city coordination, **every escalation lands here** |
+| **dog** | city | yes | on-demand pool | mechanical formula orders (stale-DB sweeps, GC) — from the `bd` pack |
 
-The **always-on** tiers (witness × rigs, mayor, deacon) dominate a *quiet*
-city's cost — they wake to find no work. Keeping that cheap is the whole subject
-of [`docs/TOKEN-HARDENING.md`](docs/TOKEN-HARDENING.md).
+**Nothing merges on its own.** A brakeman opens a pull request and stops; a human
+merges it. There is no refinery in a gascity city.
+
+**There is also no always-on watcher.** gastown's `witness`, `deacon` and `boot`
+have no gascity equivalent, so a quiet city is much cheaper to run — and nothing
+is watching for stuck beads or expired leases. That trade is spelled out in
+[`docs/OPERATING-MODEL.md`](docs/OPERATING-MODEL.md#what-you-give-up); the
+remaining idle cost (the mayor, plus one coordinator per rig) is the subject of
+[`docs/TOKEN-HARDENING.md`](docs/TOKEN-HARDENING.md).
 
 ## Packs vs. the Claude Code plugin
 
@@ -153,13 +157,14 @@ source = "/path/to/switchyard/packs/switchyard-ops"
 
 ## What `switchyard-ops` gives you
 
-Ten mechanical orders, run by the dog pool, under one invariant: **every silent
-failure becomes mail to the mayor within one order cycle.**
+Twelve mechanical orders, run directly by the controller as `exec` scripts (no
+dog pool needed — that is only for *formula* orders), under one invariant:
+**every silent failure becomes mail to the mayor within one order cycle.**
 
 | Order | Every | Purpose |
 |---|---|---|
 | `pool-spawn` | 1m | Spawn one brakeman per rig with claimable pool demand and a free WIP slot, then direct-assign it the demand bead |
-| `merge-gate` | 5m | Worker beads carry a `merge_strategy` before the refinery sees them |
+| `publish-gate` | 5m | Report worker beads that reached *closed* carrying no pull request |
 | `loop-health` | 30m | Pinned coordinators alive; escalate when the status probe lies |
 | `intake-sweep` | 4h | Nudge coordinators to triage their switchyard project |
 | `nightly-retro` | 24h | Daily reports + improvement candidates |
@@ -169,25 +174,36 @@ failure becomes mail to the mayor within one order cycle.**
 | `scratch-reaper` | 6h | Report/prune orphaned `gc`-scratch dirs left at the city root — drained sessions' `work_dir`s, gated so a live one is never removed |
 | `disk-watch` | 12h | Mail the mayor when a worktree/backup/`.gc`/event-log path crosses a size threshold |
 
-### Review before merge
+### Published before closed
 
-gastown's refinery reads `metadata.merge_strategy` off the **work bead** and
-defaults to **`direct`** — it lands the agent's commit on your default branch,
-unreviewed. `gc sling --merge` does *not* set that: it is a `gc convoy create`
-flag and a silent no-op on a bead route.
+Review before merge used to be the hard part: gastown's refinery defaulted to
+`direct` and would land an agent's unreviewed commit on your default branch, so
+`merge-gate` existed to stamp `merge_strategy=mr` on every routed bead.
 
-So `merge-gate` stamps every open bead routed to a `*.brakeman` pool with
-`merge_strategy=mr` (override via `MERGE_STRATEGY` in `roster.conf`). gastown
-decides *how* work merges; this pack decides *that it must be reviewed*.
+That risk is gone. Nothing merges by itself here — a brakeman opens a pull
+request and stops. But the risk it was *really* covering, work reaching "done"
+without a human ever seeing it, did not disappear. It moved.
 
-It is a backstop, not a guarantee — stamp the bead where it is minted if you
-can, and **protect your default branch** so an un-stamped bead fails loudly
-instead of landing.
+gascity's worker lane closes its own bead, and its push/PR leg lives in a
+separate formula whose `push` and `open_pr` vars **both default to `"false"`**.
+So the new way work goes missing is: built, bead closed, branch never pushed —
+and every switchyard surface reads it as delivered. Two things guard that:
 
-> **GitLab rigs:** gastown's `mr` mode shells out to `gh pr create` / `gh pr
-> view` and has no `glab` support, so on a GitLab remote the refinery cannot
-> open the MR. Per its own contract it records a blocked reason and escalates to
-> the mayor rather than merging. Fixing this belongs upstream in gastown.
+1. **`sy-item-work` sequences `close-source-anchor` after `publish`**, and its
+   close step refuses to run without a `pr_url` on the bead.
+2. **`publish-gate`** reports any closed `*.brakeman` bead with no `pr_url`,
+   because (1) is prose an agent can talk itself past.
+
+`publish-gate` takes no configuration — `MERGE_STRATEGY` in `roster.conf` is now
+inert and should be deleted when migrating. As before this is a backstop, not a
+guarantee: **protect your default branch** so a worker that tries to push
+straight to it fails loudly.
+
+> **GitLab rigs work here.** The old refinery's `mr` mode shelled out to `gh`
+> only, so a GitLab remote could not be handed off to at all. `sy-item-work`'s
+> publish step resolves the forge from `git remote get-url origin` and uses `gh`
+> or `glab` accordingly; an unrecognised host escalates to the mayor rather than
+> closing the bead.
 
 ### Pruning scratch is a safety boundary
 
@@ -239,9 +255,9 @@ the **`scratch-reaper self-test`** job (`bash scripts/scratch-reaper.test.sh`).
 
 ## Workers: the brakeman pool
 
-`switchyard-ops` ships one agent, `brakeman` — an elastic pool that claims a
-routed bead, builds it in a bead-scoped worktree, and hands the branch to
-gastown's refinery. It is the thing you sling work to:
+`brakeman` is an elastic pool that claims a routed bead, builds it in a
+bead-scoped worktree, pushes the branch and opens a pull request for it. It is
+the thing you sling work to:
 
 ```sh
 gc sling YOUR_RIG/switchyard-ops.brakeman ex-1234
@@ -279,23 +295,25 @@ leaves no wedged `in_progress` root behind. A spawn or assign that genuinely fai
 after hand-off — mails the mayor, per the pack invariant. A full pool is
 saturation, not failure, and escalates nothing.
 
-### One required rig setting
+### No rig setting is required any more
+
+If you are migrating a rig, **delete this line**:
 
 ```toml
 [[rigs]]
-  formula_vars = { binding_prefix = "gastown." }
+  formula_vars = { binding_prefix = "gastown." }   # ← now inert; remove it
 ```
 
-Without it the handoff **strands your bead, silently**. `{{binding_prefix}}` in
-gastown's `mol-polecat-work` resolves to the import binding of the pack that
-*cooked* the formula — `switchyard-ops` — so the submit step hands off to
-`YOUR_RIG/switchyard-ops.refinery`, which nobody ships. The worker pushes its
-branch, assigns to nobody, and the bead sits open with no reviewer. Pinning the
-var renders `gastown.refinery`. gastown's own polecat already resolves to that
-value, so the override changes nothing for it.
+It was mandatory under the gastown lane. `{{binding_prefix}}` in
+`mol-polecat-work` resolved to the import binding of the pack that *cooked* the
+formula — `switchyard-ops` — so the submit step handed off to
+`YOUR_RIG/switchyard-ops.refinery`, an agent nobody ships: the worker pushed its
+branch, assigned to nobody, and the bead sat open with no reviewer. Silently.
+(Found the hard way — a shadow run got as far as a pushed `polecat/<bead>`
+branch before the handoff evaporated.)
 
-Verified the hard way: a shadow run got as far as a pushed `polecat/<bead>`
-branch before the handoff evaporated.
+There is no refinery and no handoff now; the worker opens its own PR. So the
+landmine is gone rather than relocated, and the setting does nothing.
 
 Concurrent sessions draw names from
 [`agents/brakeman/namepool.txt`](switchyard-ops/agents/brakeman/namepool.txt) —
@@ -308,13 +326,31 @@ and claims are cheap. It scales up on demand and drains back to nothing — the
 scale-up being `pool-spawn`'s job, since gc's own `scale_check` cannot be relied
 on to do it (see [Nobody has to spawn the worker](#nobody-has-to-spawn-the-worker)).
 
-**A brakeman runs gastown's `mol-polecat-work`, unchanged.** That formula is
-agent-agnostic — it claims via `gc hook --claim`, scopes its worktree to the
-bead rather than the agent, and hands off to the refinery. Nothing in it
-requires the claimant to be called `polecat`. The one place the old name
-survives is the feature branch it cuts, `polecat/<bead-id>`, and that string is
-a wire contract the refinery validates on handoff. Renaming it would mean owning
-the handoff step forever. The agent is ours; the method stays gastown's.
+**A brakeman runs this pack's own `sy-item-work`.** It extends gascity's
+`implementation-base` — inheriting `prepare-worktree`, `implement` and its
+artifact check unchanged — and adds one step of its own:
+
+```
+prepare-worktree → implement → publish → close-source-anchor
+```
+
+We ship a formula rather than pointing brakeman at gascity's `do-work` for one
+reason: `do-work` never pushes. Its terminal step closes the bead, and push/PR
+live in gascity's separate `publish` formula, whose `push` and `open_pr` vars
+both default to `"false"`. A worker on bare `do-work` would build the change,
+close its bead, and leave the branch on local disk. So the publish step is
+inserted *before* the close and the close depends on it — a bead cannot reach
+closed without a pushed branch and an open PR.
+
+Two consequences worth internalising if you know the gastown lane:
+
+- **The worker closes its own bead now.** There is no refinery to do it. The old
+  "never close an implementation bead" rule is inverted, not relaxed.
+- **The branch name is no longer a wire contract.** `polecat/<bead-id>` mattered
+  because the refinery validated it on handoff. Nothing validates it now, so the
+  publish step just requires *some* per-item branch that is not the base branch.
+
+The agent is ours, and now so is the method.
 
 ## No roster to maintain
 
@@ -343,9 +379,65 @@ decide *what* they do.
 
 ## Requirements
 
-- `gc` (Gas City), `jq`, `tmux`
+- `gc` (Gas City), `jq`, `tmux`, `python3`
+- the **gascity** pack imported (city scope) and **gascity/roles** per rig
+- `gh` and/or `glab` on `PATH`, authenticated for each rig's forge — the worker
+  opens its own pull request, so a rig whose forge CLI is missing cannot publish
 - `switchyard-mcp` on `PATH`, authenticated via `switchyard-mcp login`
 
 The overlay ships **no token**. The MCP server resolves it from
 `$SWITCHYARD_API_TOKEN` or a `chmod 600` machine-local token file. Never put a
 token in `overlay/.claude/settings.json`.
+
+### Install gascity's build-artifact validator — nothing does it for you
+
+`sy-item-work` inherits gascity's `implement` step, which carries a hard
+`mode = "exec"` check on `.gc/scripts/checks/build-artifact-valid.sh` with
+`max_attempts = 3`. **That file is not installed by `gc import install`, by
+`gc rig add`, or by the supervisor reconcile.** `.gc/scripts` is a *projection of
+the city's own `.gc/scripts` directory* into each agent worktree, not a
+pack-asset installer (the `ResolveScripts` shim that once did this was removed),
+and gascity's README documents no install step. Miss it and every implement step
+fails its check three times — on work that may well have been fine.
+
+Install it into **each rig root**, not the city root. gascity's role agents
+(`gc.run-operator`, `gc.implementation-worker`, `gc.publisher`) declare no
+`work_dir`, so they execute with their cwd at the **rig root** — and the check
+path is relative, so that is where it resolves. gc projects `.gc/settings.json`
+into that directory but **not** `.gc/scripts`, so a city-root copy is never
+consulted. Preserve the layout: `validate_build_artifact.py` resolves schemas as
+`parents[2]/schemas/build`, so one directory off fails as "schema not found",
+which reads like a formula bug rather than a copy error.
+
+```sh
+# Locate the gascity pack cache the city ACTUALLY resolves. Derive it from the
+# formula search paths rather than guessing at ~/.gc/cache: that directory is
+# keyed by a hash of the source URL, so several gascity copies can coexist at the
+# same commit and only one is the one your rig loads.
+# (There is no `gc pack list --json` — that command declares no JSON support.)
+GASCITY=$(dirname "$(gc formula show implementation-base --rig <rig> --json \
+  | jq -r '.search_paths[] | select(endswith("/gascity/formulas"))')")
+
+RIG=/path/to/rig-checkout
+mkdir -p "$RIG/.gc/scripts/checks" "$RIG/schemas"
+cp "$GASCITY"/assets/scripts/checks/*.sh "$RIG/.gc/scripts/checks/"
+cp "$GASCITY"/assets/scripts/*.py        "$RIG/.gc/scripts/"
+chmod +x "$RIG/.gc/scripts/checks/"*.sh
+cp -R "$GASCITY/schemas/build" "$RIG/schemas/"
+
+# Keep the runtime out of the product repo's history — a worker running
+# `git add -A` would otherwise commit it.
+printf '\n.gc/\nschemas/build/\n' >> "$RIG/.gitignore"
+```
+
+Verify from the rig root — the cwd the check actually runs in — rather than
+assuming the copy worked:
+
+```sh
+cd "$RIG"
+printf -- '---\nschema: gc.build.implementation-summary.v1\n---\n' > /tmp/a.md
+python3 .gc/scripts/validate_build_artifact.py \
+  --schema gc.build.implementation-summary.v1 --path /tmp/a.md
+# want: "front matter missing required fields: [...]"  (schema LOADED, content bad)
+# not:  anything mentioning the schema itself being missing
+```

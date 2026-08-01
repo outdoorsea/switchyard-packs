@@ -20,7 +20,7 @@ Everything else is agent work.
 | **Demand sensors** (product feedback, votes) | Sense: human demand → switchyard intake |
 | **Error sensors** (Sentry-compatible ingest) | Sense: production pain → threshold → bead → fix → auto-resolve |
 | **switchyard** | Decide + dispatch: intake → triage → pitch → PRD → human approval → epics/beads → claim pool → validation → reports |
-| **Gas City** | Act: coordinators route, polecats build in worktrees, refinery merges, witness monitors |
+| **Gas City** | Act: coordinators route, brakemen build in worktrees and open PRs |
 | **Review gate** | Deterministic scanners + LLM triage as an MR gate |
 | **Knowledge store** | Learn: decisions, incidents, lessons; linked to PRDs |
 
@@ -36,7 +36,7 @@ The loop is event-driven where possible; the clock entries are the
 | Every wake cycle | Coordinator: check mail, reconcile with switchyard, triage epics, set priorities, sling work | coordinator (per rig) | — |
 | Morning (~30 min) | Triage queue: route ideas to pitches, categorize issues, answer PRD questions, approve/park PRDs | **human** | **the** decision gate |
 | All day | Claim pool drains: workers claim beads, heartbeat, complete; a *different* agent validates criteria | workers | separation of duties |
-| On merge | Review gate: CI + advisory review; refinery merges; PR attaches to the PRD | refinery | advisory → hard gate later |
+| On PR | Review gate: CI + review on the worker's pull request; a human merges; PR attaches to the PRD | **human** | the merge gate is a person |
 | Nightly | Retro: aggregate completions, validations, intake, error spikes → daily report + improvement candidates back into intake | retro agent | candidates human-triaged |
 | Nightly | Maintenance orders: backup, compact, stale-db sweep, branch prune, digest | dog pool | escalate to mayor on anomaly |
 | Weekly | Human retro on the retros: adjust priorities, approve knowledge promotions, tune thresholds | **human** | — |
@@ -79,7 +79,7 @@ So `pool-spawn` stops waiting on the controller and does that job in the pack: i
 reads each rig's genuinely claimable demand, spawns one brakeman, and hands the
 bead to it directly. Its cadence is 1m rather than a sweep interval because
 dispatch is a **race** — the point is that a worker starts within an order cycle —
-which puts it beside `merge-gate`'s 5m rather than the 6h reapers.
+which puts it beside `publish-gate`'s 5m rather than the 6h reapers.
 
 ## Why `loop-health` exists
 

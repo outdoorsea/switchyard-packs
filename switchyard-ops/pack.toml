@@ -2,7 +2,7 @@
 #
 # Encodes the continuous-improvement loop as mechanical exec orders:
 #   pool-spawn     — spawn a brakeman for a rig with claimable demand + assign it (1m)
-#   merge-gate     — worker beads carry a merge_strategy before merge (5m)
+#   publish-gate   — report worker beads closed with no pull request (5m)
 #   judge-sweep    — keep a judging-validator draining the awaiting-validation backlog (30m)
 #   answer-sweep   — keep an answerer clearing open PRD questions (20m)
 #   loop-health    — pinned coordinators alive + status probe honest (30m)
@@ -29,7 +29,9 @@
 # min=0, and is started on demand by a sweep order above; none is slung gc beads —
 # their queue is switchyard's, read over the switchyard MCP inside the session:
 #   brakeman       — the worker/BUILDER pool. This is what you sling beads to.
-#                    Runs gastown's mol-polecat-work and hands off to the refinery.
+#                    Runs this pack's own sy-item-work (formulas/), which extends
+#                    gascity's implementation-base and adds the publish leg:
+#                    build, push, open a PR, then close. Nothing merges for it.
 #   judge          — the judging-VALIDATOR lane (PRD #177). Records reasoned,
 #                    CITED verdicts on delivered criteria that declare no
 #                    verify_command — the ones no automated validator can reach.
@@ -85,10 +87,30 @@
 #                 decides").
 #   validate    — the automated (contract) validator: re-runs a criterion's
 #                 verify_command. Purely mechanical, so it belongs to the
-#                 switchyard-companion `validate` daemon, not an LLM session — and
-#                 today it has nothing to do (contract_bearing coverage is ~0; no
-#                 criterion declares a runnable command). Wire the companion daemon
-#                 if/when contract coverage rises; do not add an LLM agent for it.
+#                 switchyard-companion `validate` daemon, not an LLM session.
+#                 ⚠ ITS STATED PRECONDITION IS NOW MET. This entry used to say
+#                 "today it has nothing to do (contract_bearing coverage is ~0)"
+#                 and deferred wiring the daemon until coverage rose. It has:
+#                 groundspeak/forge PRD #287 dispatched 17 criteria of which
+#                 ~100% declare a runnable `go test ./... -run Test...` command
+#                 (measured 2026-07-31). That backlog is reachable by NEITHER
+#                 shipped lane — `judge` deliberately takes only criteria with NO
+#                 command, so it declines every one of these, and no companion
+#                 runs. A fully contract-bearing PRD is therefore the WORST case
+#                 for acceptance today, not the best: nothing can sign it off.
+#                 Wire `switchyard-companion validate`; still do not add an LLM
+#                 agent for it. ⚠ WHEN YOU DO: `validate_main_branch` must name
+#                 the branch the criteria actually LAND on. The lane validates
+#                 "against merged main" and defaults to `main`; under a
+#                 one-integration-branch-per-PRD policy the code sits on
+#                 prd-<N>-<slug> until the whole PRD merges, so the default runs
+#                 every contract against a tree without the code — and a `fail`
+#                 verdict RESETS the criterion for re-work. It would undo
+#                 delivered work while reporting success. Point it at the
+#                 integration branch, give it a DEDICATED clean clone (the
+#                 freshness gate refuses a dirty tree, and a rig checkout is
+#                 dirty by construction), and leave validate_skip_repo_check
+#                 false — an automated `done` is terminal.
 #   watch       — the event bridge (companion `watch`: switchyard SSE → gc session
 #                 wake). The high-value missing piece, but a DAEMON/order, not an
 #                 agent: it would let judge/answer/triage be woken the instant a
@@ -113,9 +135,18 @@
 # the retro — lives in a city-local, un-versioned $GC_PACK_STATE_DIR/roster.conf.
 # See assets/roster.conf.example.
 #
-# Requires: jq, tmux, gastown (brakeman runs its mol-polecat-work formula and
-# hands off to its refinery), and — for the sweeps to be useful — the
+# Requires: jq, tmux, and the gascity pack (sy-item-work extends its
+# implementation-base and dispatches to its gc.implementation-worker /
+# gc.publisher / gc.run-operator role targets — import gascity/roles per rig).
+# A `gh` or `glab` on PATH, authenticated for the rig's forge, since the worker
+# opens its own pull request. And — for the sweeps to be useful — the
 # switchyard-mcp overlay in any rig whose coordinator should drive switchyard.
+#
+# Requires a RESIDENT MAYOR. gascity ships no always-on crew, so `gc init` writes
+# a city-local agents/mayor/ and you declare its [[named_session]] yourself. Every
+# escalation in this pack is `gc mail send mayor`, and all of those calls redirect
+# to /dev/null — with no mayor the entire escalation path fails silently, which
+# defeats the pack's one governing invariant.
 #
 # Import city-wide:
 #   [imports.switchyard-ops]

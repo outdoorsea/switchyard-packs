@@ -1,0 +1,23 @@
+# Report work that reached "closed" without ever being published.
+#
+# Replaces `merge-gate`. That order stamped `merge_strategy=mr` so gastown's
+# refinery could not land an unreviewed commit on the default branch. A gascity
+# city has no refinery and merges nothing on its own, so there is no strategy to
+# stamp — but the risk merge-gate really covered did not disappear, it moved.
+#
+# gascity's worker closes its own source anchor, and its push/PR leg is a
+# separate formula defaulting to push=false, open_pr=false. So the way work now
+# goes missing is: built, bead closed, branch never pushed — and it reads as
+# delivered everywhere. `sy-item-work` sequences close after publish and refuses
+# to close without a pr_url; this order is the backstop for when that prose
+# guard is ignored.
+#
+# Cadence matches merge-gate's 5m rather than a 6h sweep. It is not a race the
+# way merge-gate was (nothing is about to merge), but a worker that closes
+# without publishing is losing delivered work right now, and the sooner a human
+# sees it the more likely the branch still exists somewhere.
+[order]
+description = "Report closed worker beads carrying no pull request, so silently unpublished work reaches the mayor"
+trigger = "cooldown"
+interval = "5m"
+exec = "$PACK_DIR/assets/scripts/publish-gate.sh"

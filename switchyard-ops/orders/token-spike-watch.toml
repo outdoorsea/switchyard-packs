@@ -2,7 +2,7 @@
 #
 # ZERO LLM COST. This order runs token-report.sh --spikes, which is jq over
 # .gc/usage.jsonl plus one `gc bd list` — no session, no model call. It is in the
-# same class as merge-gate and config-drift: leaving it frequent is correct, and
+# same class as publish-gate and config-drift: leaving it frequent is correct, and
 # stretching its cadence to "save tokens" saves exactly nothing.
 #
 # It compares the newest day against the MEDIAN of prior days, not the mean: one

@@ -61,12 +61,16 @@ are in place, so pass `--no-start` and start it deliberately in Step 5. Init sti
 brings up the city's managed-local **Dolt** store either way:
 
 ```sh
-gc init --no-start --template gastown --default-provider claude ~/gc-<name>
+gc init --no-start --template gascity --default-provider claude ~/gc-<name>
 cd ~/gc-<name>
 ```
 
-The `gastown` template already imports `bd`, `core`, and `gastown`, so Step 4 adds
-only `switchyard-ops` + `switchyard-mcp` — not gastown again.
+The `gascity` template already imports `bd`, `core`, and `gascity` (bound as
+`gc`, with `gascity/roles` as the default rig import), so Step 4 adds only
+`switchyard-ops` + `switchyard-mcp`.
+
+`gascity` is also `gc init`'s default template, so a bare `gc init` gets you the
+same thing.
 
 **Checkpoint:** scaffold exists, Dolt is up, town not yet started.
 ```sh
@@ -85,7 +89,7 @@ A rig is a **local checkout of the product's git repo**. Clone the product first
 # 1. register the product as a rig
 gc rig add /path/to/product-repo --name <rig> --prefix <p>
 
-# 2. confirm the template's imports (bd, core, gastown already present)
+# 2. confirm the template's imports (bd, core, gascity already present)
 gc import list
 
 # 3. switchyard heartbeat + brakeman pool — city-scope, ONCE:
@@ -97,12 +101,32 @@ gc import add https://github.com/outdoorsea/switchyard-packs/tree/main/switchyar
 gc import install && gc import check
 ```
 
-Then add the **two required switchyard-ops settings** to your rig's block in
-`city.toml` — copy them verbatim from the reference
+Then add the **one required switchyard-ops setting** to your rig's block in
+`city.toml` — copy it verbatim from the reference
 [`examples/city/city.toml`](../examples/city/README.md) — and `gc reload`:
-- `formula_vars = { binding_prefix = "gastown." }` — without it the worker handoff
-  **silently strands beads**
 - `default_sling_targets = ["<rig>/switchyard-ops.brakeman"]`
+
+(If you are following an older guide: there is no `formula_vars = {
+binding_prefix = ... }` any more. It pinned the refinery handoff target, and
+there is no refinery — the worker opens its own PR.)
+
+Then install gascity's build-artifact validator into the **rig root** — **nothing
+does this for you**, and without it every implement step fails its exec check
+three times. It goes at the rig root, not the city root, because gascity's role
+agents run with their cwd there (see the root README, "Install gascity's
+build-artifact validator"):
+
+```sh
+GASCITY=$(dirname "$(gc formula show implementation-base --rig <rig> --json \
+  | jq -r '.search_paths[] | select(endswith("/gascity/formulas"))')")
+RIG=/path/to/rig-checkout
+mkdir -p "$RIG/.gc/scripts/checks" "$RIG/schemas"
+cp "$GASCITY"/assets/scripts/checks/*.sh "$RIG/.gc/scripts/checks/"
+cp "$GASCITY"/assets/scripts/*.py        "$RIG/.gc/scripts/"
+chmod +x "$RIG/.gc/scripts/checks/"*.sh
+cp -R "$GASCITY/schemas/build" "$RIG/schemas/"
+printf '\n.gc/\nschemas/build/\n' >> "$RIG/.gitignore"
+```
 
 **Import `switchyard-ops` at city scope only** — a second `--rig` import
 double-registers every order (root README's scope table).
@@ -125,7 +149,7 @@ gc start              # start the controller + reconcile agents up
 
 ```sh
 gc dolt health                         # Server: running … healthy
-gc agent list | grep -E 'brakeman|witness|refinery|mayor'   # crew present
+gc agent list | grep -E 'brakeman|answerer|judge|mayor'   # crew present
 gc doctor                              # expect green; order-firing warnings settle after a tick
 ```
 `gc import install` does **not** materialize formulas — the supervisor does, a
@@ -138,8 +162,9 @@ tick later. If `gc bd formula list` looks short right after install, wait a cycl
 
 New crew defaults wake often and re-bill their prompt each time. Apply the
 `[[patches.agent]]` blocks from [`../docs/TOKEN-HARDENING.md`](../docs/TOKEN-HARDENING.md)
-to `city.toml` (witness `max_session_age`, deacon/witness `idle_timeout`), then
-`gc reload`. Verify with `gc config show | grep -A12 'name = "witness"'`.
+to `city.toml` (coordinator `idle_timeout`, `brakeman` `max_active_sessions`),
+then `gc reload`. Verify with
+`gc config show | grep -A12 'name = "brakeman"'`.
 
 ## Step 8 — Connect to switchyard + first work  **(HUMAN)**
 

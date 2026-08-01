@@ -17,9 +17,26 @@ provider = "claude"
   [providers.claude]
     base = "builtin:claude"
 
-# --- One rig per product. Each imports gastown (refinery + witness), the -----
-# --- switchyard-mcp overlay (so its coordinator can drive switchyard), and ---
-# --- switchyard-ops again at rig scope (so it gets brakeman workers). --------
+  # REQUIRED, even if you never authenticate kimi.
+  #
+  # switchyard-ops' security-scout names this provider deliberately — it reviews
+  # code on a model that does not share the blind spots of the one that wrote it.
+  # A referenced-but-absent provider does NOT degrade gracefully: it rejects the
+  # WHOLE city config, so `gc agent list`, `gc order list` and `gc config show`
+  # all fail with "provider catalog is missing referenced providers", not just
+  # that one agent.
+  #
+  # Declaring it is not the same as configuring it. The security-scan order
+  # refuses to spawn until the provider is genuinely usable, so an
+  # unauthenticated kimi leaves that lane dormant rather than in a silent
+  # spawn-fail loop. `gc doctor --fix` adds this stanza for you (but rewrites
+  # this file and drops comments).
+  [providers.kimi]
+    base = "builtin:kimi"
+
+# --- One rig per product. Each imports gascity's roles (the build-lane role ---
+# --- targets its formulas dispatch to) and the switchyard-mcp overlay (so ----
+# --- its coordinator can drive switchyard). ---------------------------------
 [[rigs]]
 name = "example-rig"
 prefix = "ex"
@@ -31,19 +48,24 @@ default_branch = "main"
 # would be parsed as belonging to that subtable.)
 default_sling_targets = ["example-rig/switchyard-ops.brakeman"]
 
-# REQUIRED when brakeman is in play. {{binding_prefix}} in gastown's
-# mol-polecat-work is the binding of the pack that COOKED the formula — which is
-# switchyard-ops, not gastown. Left alone, the submit step hands work off to
-# "example-rig/switchyard-ops.refinery", an agent nobody ships, and the bead is
-# stranded open with its branch pushed and no reviewer. Pinning it renders
-# "gastown.refinery". gastown's own polecat resolves to the same value, so this
-# is a no-op for it.
-formula_vars = { binding_prefix = "gastown." }
+# NO formula_vars ARE REQUIRED HERE.
+#
+# If you are migrating a rig off the gastown lane, DELETE its
+# `formula_vars = { binding_prefix = "gastown." }` line. That setting existed
+# because gastown's mol-polecat-work rendered its refinery handoff target from
+# the binding of the pack that COOKED the formula (switchyard-ops), producing a
+# handoff to an agent nobody ships — silently stranding the bead. There is no
+# refinery and no handoff in a gascity city: the worker opens its own PR. The
+# setting is now inert, and leaving it in place is misleading rather than
+# harmful.
 
   [rigs.imports]
-    [rigs.imports.gastown]
-      source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
-      version = "sha:<pin-a-gastown-commit>"
+    # gascity's role agents (gc.implementation-worker, gc.publisher,
+    # gc.run-operator, ...) — the targets sy-item-work's steps dispatch to.
+    # Bound as `gc` to match the binding its formulas expect.
+    [rigs.imports.gc]
+      source = "https://github.com/gastownhall/gascity-packs/tree/main/gascity/roles"
+      version = "sha:<pin-a-gascity-packs-commit>"
     [rigs.imports.switchyard-mcp]
       source = "https://github.com/outdoorsea/switchyard-packs/tree/main/switchyard-mcp"
       version = "sha:<pin-a-mirror-commit>"
@@ -69,23 +91,39 @@ formula_vars = { binding_prefix = "gastown." }
 #   min_active_sessions = 1
 #   max_active_sessions = 1
 
+# --- Session settings worth setting on day one ------------------------------
+# The defaults are tuned for a small repo and bite hard on a large one.
+#
+# setup_timeout bounds pre_start — which is `git worktree add` over your whole
+# rig. Its 10s default kills every pool spawn on a repo of any size, and the
+# failure reads as "pre_start[0]: context deadline exceeded" rather than as a
+# timeout you can tune. Setting setup_max_timeout switches it to activity-aware:
+# setup_timeout then bounds output SILENCE and setup_max_timeout bounds total
+# runtime.
+[session]
+  startup_timeout  = "300s"   # default 60s; a cold start herd overruns it
+  setup_timeout    = "120s"   # default 10s
+  setup_max_timeout = "10m"
+
 # --- Token hardening (recommended; see docs/TOKEN-HARDENING.md) -------------
-# gastown crew are wake_mode="fresh", so every respawn/wake re-bills the full
-# prompt as input tokens — an idle city mostly pays for pinned agents waking to
-# find no work. Two safe cuts for a builtin:claude (NON-Bedrock) city:
+# A gascity city has far less always-on surface than a gastown one — there is no
+# deacon, boot, or per-rig witness waking on a heartbeat to find no work — so the
+# idle bill is dominated by whatever YOU pin: the mayor, plus one coordinator per
+# rig.
 #
-#   deacon: hourly idle heartbeat -> every 4h
+# Coordinators are the tier worth pinning and the tier worth watching. Pin them
+# min=1/max=1 so switchyard-ops discovers them automatically, then give the
+# mechanical ones a cheap model:
+#
 # [[patches.agent]]
-#   name = "gastown.deacon"
-#   idle_timeout = "4h"
+#   name = "example-rig/coordinator"
+#   min_active_sessions = 1
+#   max_active_sessions = 1
+#   idle_timeout = "168h"
 #
-#   witness: rig-scoped, always-on. Its default max_session_age="5h" is a
-#   Bedrock STS cred-cache workaround (forces a full ~13KB-prompt respawn every
-#   5h); off Bedrock it just burns tokens. Relax it, per rig (no def-level
-#   fan-out — one entry per rig, fully-qualified name):
-# [[patches.agent]]
-#   name = "example-rig/gastown.witness"
-#   idle_timeout    = "3h"    # was 1h
-#   max_session_age = "24h"   # was 5h; on Bedrock use "7h30m" instead of removing
+# Note the cost/attention trade this pack cannot make for you: the always-on
+# patrol tier gastown provided (witness, deacon) is genuinely absent here.
+# That is cheaper, and it also means nothing is watching for stuck beads or
+# expired leases. See docs/OPERATING-MODEL.md, "What you give up".
 #
-# Verify a patch landed:  gc config show | grep -A12 'name = "witness"'
+# Verify a patch landed:  gc config show | grep -A12 'name = "coordinator"'

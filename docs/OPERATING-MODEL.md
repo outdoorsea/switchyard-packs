@@ -5,10 +5,10 @@
 ## Design stance
 
 Gas City is a generic agent runtime — sessions, rigs, packs, orders, formulas,
-mail, beads. Everything opinionated arrives as a **pack**. The gastown pack is
-the "coding platform" plugin; it stays **pinned and unforked**, extended only
+mail, beads. Everything opinionated arrives as a **pack**. The gascity pack is
+the build-methodology plugin; it stays **pinned and unforked**, extended only
 through local packs and overlays. That keeps a city upgradeable: `gc` and
-gastown evolve upstream, adaptations live in three small layers.
+gascity evolve upstream, adaptations live in three small layers.
 
 ```
 ┌─ Cloud control plane (not in the city) ─────────────────────────┐
@@ -19,39 +19,72 @@ gastown evolve upstream, adaptations live in three small layers.
 ┌──────────────┴───────────────▼──────────────────────────────────┐
 │ LAYER 3  switchyard-ops (this repo): pool-spawn, loop-health,    │
 │          intake-sweep, nightly-retro, stray-reaper, config-drift │
+│          + brakeman / answerer / judge, and sy-item-work         │
 │ LAYER 2  switchyard-mcp overlay (this repo): MCP into every rig  │
-│ LAYER 1  gastown pack (pinned sha): per-rig delivery crews +     │
-│          city governance (mayor / deacon / boot / dogs)          │
+│ LAYER 1  gascity pack (pinned sha): the build workflow graph —   │
+│          formulas, role targets, artifact schemas                │
 │ LAYER 0  gc core: sessions, rigs, mail, beads, orders, wisps     │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
-**Adapting to another domain** = swap the Layer-1 pack (gastown → a support-desk
+**Adapting to another domain** = swap the Layer-1 pack (gascity → a support-desk
 pack, a data-pipeline pack…) and point the Layer-2 overlay at that domain's
-control plane. Layers 0 and 3 don't change. That is the whole portability
+control plane. Layers 0 and 3 mostly don't change. That is the portability
 argument for keeping ops logic in packs instead of hand-edited agent homes.
+
+"Mostly" is doing real work in that sentence, and the gastown → gascity swap is
+what proved it. Layer 3 *did* change, in one place: the worker lane. A Layer-1
+pack owns how work gets from a bead to a reviewable branch, and that contract
+differs enough between packs that Layer 3 cannot be blind to it — see
+**The worker lane** below. Budget for that when swapping Layer 1; everything
+else here really is portable.
+
+### gascity and gastown are not versions of each other
+
+They occupy the same slot but solve different halves, and both ship actively.
+gastown is an **orchestration** pack: always-on crew (mayor, deacon, boot),
+per-rig delivery cells (polecat, refinery, witness), patrol formulas, a dog
+pool. gascity is a **methodology** pack: a graph of build formulas, stateless
+role targets they dispatch to, artifact schemas — and no session topology at
+all.
+
+So this is not an upgrade path, and moving between them is not a rename. Read
+**What you give up** before treating it as one.
 
 ## Roles, not names
 
 This repo names no agent and no rig. It describes positions; a city fills them.
 
-### City-wide governance (one each, from gastown)
+### City-wide governance
 
-| Role | Mode | Job |
-|---|---|---|
-| **mayor** | always | Cross-rig coordinator; receives every escalation; owns the digest |
-| **deacon** | always | Patrol loop: agent health, orphan cleanup, periodic formula dispatch |
-| **boot** | always | Watchdog for the watchers — liveness of panes, not of beads |
-| **dog** pool | on-demand | Mechanical orders: backups, sweeps, digests |
+| Role | From | Mode | Job |
+|---|---|---|---|
+| **mayor** | city-local (`gc init`) | always | Cross-rig coordinator; receives every escalation; owns the digest |
+| **dog** pool | the `bd` pack | on-demand | Mechanical formula orders: backups, Dolt sweeps, digests |
+
+The mayor is **not** from a pack here. gascity ships no always-on crew, so
+`gc init` writes an `agents/mayor/` into the city and you declare its
+`[[named_session]]` yourself. This is load-bearing: every escalation in this
+pack is `gc mail send mayor`, and all 14 call sites redirect to `/dev/null`, so
+a city with no resident mayor loses its entire escalation path **silently**.
+
+Note the dog pool comes from `bd` (the Dolt beads provider), not from the
+methodology pack — so it survives a Layer-1 swap. It is only needed for
+*formula* orders; all ten of this pack's own orders are `exec` scripts the
+controller runs directly.
 
 ### Per product rig (the delivery cell)
 
-| Role | Mode | Job |
-|---|---|---|
-| **coordinator** | pinned, `min=1` | The rig's brain: reconcile with switchyard, triage epics, set priorities, sling beads, answer PRD questions |
-| **polecat** ×2–4 | on-demand | Workers: claim bead → worktree → build → MR/PR → hand off |
-| **refinery** | on-demand | Merge queue: land approved MRs, keep main green |
-| **witness** | always (session recycle) | Progress monitor: stuck beads, orphaned work, lease expiry |
+| Role | From | Mode | Job |
+|---|---|---|---|
+| **coordinator** | city-local | pinned, `min=1` | The rig's brain: reconcile with switchyard, triage epics, set priorities, sling beads |
+| **brakeman** ×2–4 | switchyard-ops | on-demand | Workers: claim bead → worktree → build → push → open PR |
+| **answerer** | switchyard-ops | on-demand | Drains open PRD questions |
+| **judge** | switchyard-ops | on-demand | Drains the awaiting-validation backlog |
+| gascity **role targets** | gascity `roles` | stateless | `gc.implementation-worker`, `gc.publisher`, `gc.run-operator` — what the formula's steps dispatch *to* |
+
+gascity's roles are not sessions you scale; they are targets a formula step
+names. The pool you size is `brakeman`.
 
 **Scaling rule: coordinators are pinned, workers are elastic.** A rig with no
 work costs one idle coordinator; a rig under load fans workers out to its cap. A
@@ -75,11 +108,71 @@ alive by waking the alias, and `config-drift` mails the mayor if anything
 re-pins them. This cost a real incident to learn; it is encoded here so it costs
 nobody else one.
 
+## The worker lane
+
+This is the one place Layer 3 knows something about Layer 1, so it is worth
+stating plainly rather than leaving in a formula comment.
+
+A brakeman runs **`sy-item-work`** (this pack's formula), which extends
+gascity's `implementation-base` and adds a publish step:
+
+```
+prepare-worktree → implement → publish → close-source-anchor
+```
+
+Two things about that order are deliberate.
+
+**The worker closes its own bead.** Under gastown it was forbidden to — the
+refinery closed it after verifying the merge. There is no refinery here, so
+"never close your own bead" would deadlock every item. If you are porting an
+agent prompt across, this is the rule that inverts.
+
+**`close-source-anchor` depends on `publish`, and that is not stylistic.**
+gascity's own `do-work` is `prepare-worktree → implement → close-source-anchor`:
+it never pushes. Push and PR-opening live in gascity's separate `publish`
+formula, whose `push` and `open_pr` vars **both default to `"false"`**. A worker
+on bare `do-work` therefore builds the change, closes its bead, and leaves the
+branch on local disk — and every switchyard surface reads that bead as
+delivered. Sequencing the close behind the publish is what makes "closed" imply
+"a human can see it".
+
+`sy-item-work` does *not* `expand` gascity's `publish` formula, because it
+cannot: that formula declares `[[steps]]` rather than a `[template]`, so it is a
+workflow rather than an expansion, and it requires a `final_report` this
+per-item lane never produces. It publishes the way gascity's own `build-basic`
+does — an inline step targeted at `gc.publisher`.
+
+The mechanical backstop for all of this is the `publish-gate` order, which
+reports any closed worker bead carrying no `pr_url`. It replaced `merge-gate`,
+whose job (stop work reaching "done" unreviewed) was the same; only the way work
+can go missing moved.
+
+## What you give up
+
+Moving from gastown to gascity is a real trade, not a cleanup. gascity ships no
+session topology, so these go away and **nothing in this pack replaces them**:
+
+| Gone | What it did | Consequence |
+|---|---|---|
+| **witness** (per rig, always-on) | Watched for stuck beads, orphaned work, lease expiry | Nothing notices a bead that stalls mid-build |
+| **deacon** (city, always-on) | Patrol loop: agent health, orphan cleanup | No periodic health sweep beyond `loop-health`'s coordinator check |
+| **boot** (city, watchdog) | Liveness of panes — the watcher of watchers | A frozen controller is noticed later |
+| **refinery** (per rig) | Merge queue; kept `main` green | Nothing merges automatically; every PR waits on a human |
+
+The last row is mostly a feature — this pack always wanted review before merge,
+and `merge-gate` existed to force it. The first three are a genuine loss of
+supervision, and the honest summary is that a gascity city is cheaper to idle
+and less self-healing.
+
+Decide deliberately whether you accept that. `loop-health` still verifies pinned
+coordinators are alive and that the status probe is not lying, so the city
+notices *dead* agents; it does not notice *stuck work*.
+
 ## What deliberately does not exist
 
 - **No "manager of managers"** between the mayor and the coordinators.
   Switchyard **is** the backlog authority; adding a local one forks truth.
-- **No always-on workers.** An idle polecat is pure burn; claims are cheap.
+- **No always-on workers.** An idle worker is pure burn; claims are cheap.
 - **No agent whose only job is a cron.** That is an **order** on the dog pool.
 - **No local backlog that shadows switchyard.** Claim the bead, mint the local
   bead from the claim, let completion flow back.

@@ -53,10 +53,12 @@
 # COORDINATORS="<rig>/<coordinator> <rig>/<coordinator>"
 
 # ---------------------------------------------------------------------------
-# MERGE_STRATEGY — what merge-gate stamps on beads routed to a worker pool.
-# Unset => "mr": the refinery opens a merge/pull request instead of landing the
-# commit itself. Set "direct" only if you genuinely want agents committing to
-# your default branch unreviewed (gastown's own default, and the reason this
-# order exists).
+# MERGE_STRATEGY is GONE, and setting it now does nothing.
 #
-# MERGE_STRATEGY="mr"
+# It configured the retired `merge-gate` order, which stamped a merge strategy
+# so gastown's refinery would open a PR rather than committing straight to the
+# default branch. A gascity city has no refinery and merges nothing on its own —
+# the worker opens the PR and a human merges it — so there is no strategy to
+# choose. `publish-gate` replaces that order and takes no configuration.
+#
+# Delete any MERGE_STRATEGY line when migrating a city off the gastown lane.

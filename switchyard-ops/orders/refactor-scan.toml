@@ -12,6 +12,17 @@
 # is also roughly the rate a team can actually absorb refactor proposals: filing
 # faster than they can be decided just grows a backlog that gets skimmed.
 #
+# THIS CADENCE IS NOT THE ONLY GUARD, AND NEVER WAS THE EFFECTIVE ONE. An earlier
+# version of this comment claimed the 168h interval was what stopped the scout
+# re-deriving the same ranking. It is not: the scout is also spawned by the
+# reconciler's revive loop, which does not consult this interval. Measured over
+# 24h (switchyard issue 163) this order fired 0 times and the lane ran 29 passes
+# anyway, at 45.4M tokens — 23.8% of the city's burn. The real guard is now the
+# HEAD-unchanged gate the scout runs as its own first action
+# (assets/scripts/refactor-scan-gate.sh); this interval only bounds the scheduled
+# path. When adding a guard to a lane, put it where every pass must cross it, not
+# where only one of the spawners will look.
+#
 # Deliberately out of phase with security-scan (12h): security findings are
 # defects wanting fast turnaround, refactors are judgments wanting deliberation.
 [order]

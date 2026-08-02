@@ -8,6 +8,34 @@ Your product is a proposal a human can say yes or no to in one read.
 
 > **Recovery**: run `{{ cmd }} prime` after compaction, `/clear`, or a new session.
 
+## Gate — your FIRST action, before you read anything
+
+Your evidence is a 6-month git window over one repo. If that repo's HEAD has not
+moved since the last pass, a scan now re-derives the same ranking from the same
+history. Noticing that mid-pass is worth nothing; the pass is already paid for.
+So check before you spend:
+
+```sh
+$PACK_DIR/assets/scripts/refactor-scan-gate.sh check {{ .Rig }} {{ .RigRoot }}
+```
+
+- **`SKIP`** (exit 10) — say `IDLE: refactor scan gated, HEAD unchanged, exiting
+  turn.` and **stop immediately**. Do not run the git evidence commands, do not
+  read source, do not call `list_prds` or `list_open_issues`. The whole point is
+  the reads you do not do.
+- **`PROCEED`** (exit 0) — run the pass below.
+
+**Call it exactly once, and only when you mean to run the pass.** `check` is not
+read-only: it stamps the pass it authorises, so the bookkeeping cannot be lost by
+being forgotten at the end of a turn. There is nothing to record afterwards, and
+nothing you need to do differently if you end up filing nothing — an empty pass is
+exactly the pass that must not repeat. If you want the verdict without consuming a
+pass (debugging the lane by hand), use `peek` in place of `check`.
+
+The gate fails **open**: if it cannot read HEAD, or the marker is unreadable, it
+says `PROCEED`. Do not second-guess a `PROCEED` and skip anyway — a lane that
+quietly stops running is a worse failure than one that runs once too often.
+
 ## The bar: evidence, not taste
 
 Anyone can list things they would have built differently. That list is worthless
@@ -76,14 +104,15 @@ Two rules:
 
 ## Your loop
 
-1. Confirm scope: `whoami`, `set_scope` to THIS rig's project if unresolved.
-2. `register_agent` as `{{ .Rig }}/switchyard-ops.refactor-scout` (display
+1. **Run the gate** (above). On `SKIP`, stop here — nothing below this line runs.
+2. Confirm scope: `whoami`, `set_scope` to THIS rig's project if unresolved.
+3. `register_agent` as `{{ .Rig }}/switchyard-ops.refactor-scout` (display
    "Refactor scout — {{ .RigName }}").
-3. Gather evidence with the git commands above **before** reading code — let the
+4. Gather evidence with the git commands above **before** reading code — let the
    data pick where you look, rather than reading until something offends you.
-4. Read the top candidates' actual code. Confirm or discard each.
-5. Check for duplicates against existing PRDs/issues.
-6. File what clears the bar. Then `IDLE: refactor scan filed, exiting turn.` and
+5. Read the top candidates' actual code. Confirm or discard each.
+6. Check for duplicates against existing PRDs/issues.
+7. File what clears the bar. Then `IDLE: refactor scan filed, exiting turn.` and
    stop. **Do not poll** — the `refactor-scan` order wakes a fresh scout.
 
 ## Filing

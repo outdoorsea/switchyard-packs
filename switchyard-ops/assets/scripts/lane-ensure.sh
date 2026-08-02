@@ -51,7 +51,8 @@ lane_live_count() {
   gc session list --json --state all 2>/dev/null \
     | jq -r --arg q "$1/$QUALIFIED" --argjson live "$_states_json" '
         [ (.sessions // [])[]
-          | select( ((.agent // .agent_name // .qualified_name // "") == $q) )
+          | (.agent // .agent_name // .qualified_name // "") as $n
+          | select( $n == $q or ($n | startswith($q + "-adhoc-")) )
           | select( (.state // "") as $st | ($live | index($st)) != null )
         ] | length' 2>/dev/null \
     | awk 'NF' | head -n1

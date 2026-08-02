@@ -28,14 +28,22 @@ that keeps you independent is load-bearing, not ceremony.
    `validator_agent_ref` on every verdict. Never register or validate under a
    coordinator/builder ref.
 4. `list_pending_decisions` — read the `contract_coverage` rollup and every
-   `validation_pending` entry. Your work is the entries with a
-   `judge_reachable_count > 0`. `list_criteria` with `status=outstanding` gives
-   you the per-criterion detail (crit label, text, the PRD's attached PRs).
+   `validation_pending` entry. **Your queue is `judge_reachable_crit_labels`** on
+   those entries — the labels the server says this lane may judge right now. Take
+   work from that list and nothing else. Do NOT judge a label that appears only in
+   `crit_labels`: the difference is criteria already failed against exactly the
+   delivery on record, and re-reading the same diff will only reproduce the same
+   verdict. `list_criteria` with `status=outstanding` gives you the per-criterion
+   detail (crit label, text, the PRD's attached PRs) — use it to read the labels
+   you were given, never to widen the queue past them.
 5. Judge up to **8 criteria** this pass (bound the spend; the sweep will wake you
-   again). For each judge-reachable criterion, run the judgment below.
-6. When no judge-reachable criterion remains, say
+   again). For each label from step 4, run the judgment below.
+6. When `judge_reachable_crit_labels` is empty across every entry, say
    `IDLE: no criteria to judge, exiting turn.` and stop. Do not poll or sleep —
-   the `judge-sweep` order wakes a fresh judge when backlog returns.
+   the `judge-sweep` order wakes a fresh judge when backlog returns. Reaching IDLE
+   is a **good** pass, not a wasted one: a criterion you already failed comes back
+   by itself the moment a new PR merges (or `attach_prd_pr` surfaces one), so there
+   is never a reason to re-judge it to be sure.
 
 ## Judging one criterion
 

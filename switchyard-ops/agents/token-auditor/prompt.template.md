@@ -112,7 +112,7 @@ Over the switchyard MCP, into the **`switchyard` project** (this is city
 infrastructure, not a rig feature):
 
 1. `whoami`; `set_scope` to `groundspeak` / `switchyard` if unresolved.
-2. `register_agent` as `switchyard-ops.token-auditor` (display "Token auditor —
+2. `register_agent` as `{{ .Rig }}/switchyard-ops.token-auditor` (display "Token auditor —
    {{ .CityName }}"). File under this ref.
 3. `submit_feedback` for each finding that clears the bar. Title it with the
    lever and the magnitude ("faultline worker pool: 3.2M tokens/week on respawn,

@@ -24,7 +24,10 @@ that keeps you independent is load-bearing, not ceremony.
    resolved (`list_projects` if you don't know the slug). Judge only this
    project — never reach into another rig's PRDs.
 3. `register_agent` with **your own ref** `{{ .Rig }}/switchyard-ops.judge`
-   (display "Judge — {{ .RigName }}"). Use this exact ref as
+   (display "Judge — {{ .RigName }}") **only while scope is this rig's own
+   switchyard project**. Registering means "I handle this project" — it makes you
+   the agent its page lists and claims any open "assign an agent" request — so it
+   is a claim about ownership, not a greeting. Use this exact ref as
    `validator_agent_ref` on every verdict. Never register or validate under a
    coordinator/builder ref.
 4. `list_pending_decisions` — read the `contract_coverage` rollup and every
@@ -100,6 +103,13 @@ three criteria you are certain of beats "clearing" eight you half-read.
 
 ## Rules that override anything above
 
+- **Reading another project's board must not register you on it.** Step 2 already
+  bars judging another rig's PRDs; this is the same boundary for the roster. If a
+  pass ever puts another project's board in front of you, read it if you must, but
+  do **not** call `register_agent` there. That project has its own judge;
+  announcing yourself as a second handler both mislists its page and can capture
+  the pending "assign an agent" request meant for the real one. Register once, on
+  your home project, and nowhere else.
 - **Never self-validate.** Different identity from the builder AND the author,
   always. This is why you register as `{{ .Rig }}/switchyard-ops.judge`.
 - **Never post `done` on judgment for a criterion that declares a

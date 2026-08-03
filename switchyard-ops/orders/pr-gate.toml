@@ -1,0 +1,29 @@
+# Report published work that is not merging.
+#
+# The companion to `publish-gate`. That order catches a bead closed with NO
+# pull request — built, never pushed, reads as delivered. This one catches the
+# opposite and previously unmodelled failure: the PR opened, and then nothing.
+#
+# `sy-item-work` ends at "PR open" and treats it as success. No order ages an
+# open PR, `gc status` has no concept of one, and the bead is closed, so every
+# switchyard surface reads the work as delivered. A rig can go fully green with
+# a stack of unmerged branches. The first real occurrence (sf-hi5, PRD #287)
+# reached a human only because an unrelated intake sweep mentioned it in
+# passing.
+#
+# Cadence is 30m, not publish-gate's 5m. publish-gate is tuned tight because
+# work is being LOST right now and the branch may still be recoverable. Here
+# nothing is at risk of disappearing — the PR is durable on the remote — so the
+# cost of waiting is delay, not loss. 30m also keeps this in step with the
+# reviewer lane it is really watching (judge-sweep's pack default), because the
+# condition it reports on is usually "the judge never got here".
+#
+# The script does its own age-tiering and reports each PR once per tier, so the
+# interval controls detection latency, not mail volume. Tightening it does not
+# make the mayor's inbox noisier; widening it past a tier boundary just delays
+# the first report.
+[order]
+description = "Report open item PRs aging past the review SLA, and integration PRs awaiting PRD acceptance, so published-but-unmerged work reaches the mayor"
+trigger = "cooldown"
+interval = "30m"
+exec = "$PACK_DIR/assets/scripts/pr-gate.sh"

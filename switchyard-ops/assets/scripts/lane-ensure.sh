@@ -46,6 +46,18 @@ LANE_SESSION_ID_JQ='
 # readable roster showing none is the only case that spawns; an unreadable or
 # non-numeric answer yields nothing (treated as "cannot confirm absent" → no
 # spawn), never a false zero that would stack a second session.
+#
+# The identity test must accept the ADHOC name, not just the template name. A
+# session started by lane_spawn is rostered as `<rig>/<agent>-adhoc-<hash>`
+# (that is what `gc session list --json` reports in .agent_name), never the bare
+# `<rig>/<agent>`. The original `== $q` therefore matched NOTHING, counted 0
+# every cycle, and spawned an extra session every sweep forever: 18 live judges
+# at a 1h sweep and 3 answerers at a 6h sweep — a leak rate that tracked the
+# cooldown exactly, because the guard never once fired. This is the fail-OPEN
+# case the "cannot confirm absent" rule above does not cover: that rule guards an
+# UNREADABLE roster, but a confidently-wrong ZERO passes straight through it.
+# Suffix is matched as the literal `-adhoc-` rather than a bare prefix so a lane
+# named `judge` can never absorb one named `judgement`.
 lane_live_count() {
   _states_json="$(printf '%s' "$LANE_LIVE_STATES" | jq -Rc 'split(" ")')"
   gc session list --json --state all 2>/dev/null \

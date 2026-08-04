@@ -30,10 +30,18 @@
 # SECOND session that fights the alias. Such agents stay pool.min=0, and
 # loop-health keeps them alive by waking the alias instead.
 #
-# Format: rig/agent[:tmux-prefix]
-#   Liveness is checked against gc's tmux server by pane-name prefix. Sessions
-#   are normally named <agent-base>-<wisp-id>; give an explicit prefix when a
-#   manual session uses a different name (e.g. "s-<wisp-id>" -> prefix "s").
+# Format: rig/agent
+#   Liveness is resolved through `gc session list --json`, joining on the
+#   session's `.template` (the agent's qualified name). Give the agent name and
+#   nothing else — gc is asked what it named the session.
+#
+#   The legacy ":tmux-prefix" suffix is still ACCEPTED and IGNORED. It used to
+#   name a tmux pane-name prefix to grep for, which never matched anything: gc
+#   does not name a pane after the agent's base name (agent
+#   `<rig>/gastown.witness` runs in a pane called `<rig>--gastown__witness`), so
+#   every agent read dead on every cycle and loop-health mailed the mayor every
+#   30m about a healthy city. There is no longer a prefix to override; drop the
+#   suffix when you next touch this file.
 #
 # config-drift ASSERTS these are not min=1, and mails the mayor if they are.
 #

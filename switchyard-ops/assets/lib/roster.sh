@@ -125,6 +125,58 @@ sy_coordinators() {
   else sy_roster | sed 's/:.*$//'; fi
 }
 
+# sy_live_session_for AGENT — echo the SESSION ALIAS of one live session running
+# AGENT.
+#
+# CONTRACT, and the point of having one: "none live" and "the lookup broke" are
+# different answers and must not share an exit code.
+#   rc=0, alias on stdout : that session is live
+#   rc=0, empty stdout    : roster read fine, AGENT has no live session
+#   rc=2                  : roster could not be read or parsed — UNKNOWN
+#
+# An earlier version returned empty at rc=0 for both, which is the very
+# conflation this function exists to remove: the caller then reports "no live
+# session, go spawn one" when the truth is "`gc session list` failed and nobody
+# knows", sending an operator to fix the wrong thing. `2>/dev/null` stays on both
+# stages so orders keep quiet, which leaves the exit STATUS as the only channel
+# able to carry the difference — so it has to be honest.
+#
+# WHY THIS EXISTS. `gc session nudge` resolves a SESSION id-or-alias; the roster
+# holds AGENT QUALIFIED NAMES. Those are different namespaces, and every spawned
+# session carries an instance suffix — the agent `switchyard/switchyard-ops.answerer`
+# runs as session `switchyard/switchyard-ops.answerer-adhoc-81606b05c1`. Passing the
+# bare agent name therefore fails to resolve (`nudge` exits 1; `peek` reports
+# "session not found" AT rc=0), so callers that only counted successes could not
+# tell EVERY-NUDGE-FAILED from IDLE-CITY. Resolve the alias here, once, and let
+# callers distinguish the two.
+#
+# `.template` is the unsuffixed agent name and is the honest join key — the same
+# predicate lane-ensure, city-lane-ensure and pool-spawn use. The agent_name
+# clauses are a fallback for builds that might omit it. Returns `.alias`, which
+# is what `gc session nudge` resolves. Prefers the most recently active session
+# so a nudge lands on the warmest pane.
+# Each stage is run and checked separately rather than as one pipeline: a shell
+# pipeline reports only the LAST command's status, so `gc ... | jq ... | awk`
+# would mask a failure in either of the first two behind awk's cheerful 0.
+sy_live_session_for() {
+  _sls_raw="$(gc session list --json --state all 2>/dev/null)" || return 2
+  [ -n "$_sls_raw" ] || return 2
+  _sls_out="$(printf '%s\n' "$_sls_raw" | jq -r --arg q "$1" '
+        [ (.sessions // [])[]
+          | select(((.closed // false) | not))
+          | (.agent // .agent_name // .qualified_name // "") as $n
+          | select( (.template // "") == $q
+                    or $n == $q
+                    or ($n | startswith($q + "-adhoc-")) )
+          | select((.state // "") == "active")
+        ]
+        | sort_by(.last_active // "")
+        | reverse
+        | (.[0].alias // .[0].name // .[0].id // "")' 2>/dev/null)" || return 2
+  printf '%s\n' "$_sls_out" | awk 'NF' | head -n1
+  return 0
+}
+
 # entry "rig/agent:prefix" -> "rig/agent"
 sy_agent_of() { printf '%s' "${1%%:*}"; }
 

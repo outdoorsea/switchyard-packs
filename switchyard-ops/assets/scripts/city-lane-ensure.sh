@@ -44,12 +44,28 @@ LANE_SESSION_ID_JQ='
 # spawn), never a false zero that would stack a second session on top of a live
 # one. Failing closed here is deliberate: a duplicate auditor double-files every
 # finding, which is worse than a skipped cycle.
+#
+# JOIN ON .template, exactly as lane-ensure.sh and pool-spawn.sh do. A spawned
+# session's agent_name carries an instance suffix — `switchyard-ops.judge-adhoc-
+# 1788c6f978` — while $q is the bare qualified name, so the original `== $q`
+# matched NOTHING and returned a confident 0 no matter how many sessions were
+# live. That is the fail-OPEN case the "cannot confirm absent" rule above does
+# not cover: it guards an UNREADABLE roster, but a confidently-wrong ZERO sails
+# straight through, and every sweep then spawns another session, forever.
+#
+# This is the CITY-scoped variant and it was the site everyone missed: the same
+# defect was fixed in the rig-scoped counter and in the pool counter while this
+# copy was left comparing a bare name. Three copies of one predicate is the real
+# defect; until they are unified, fix them together.
 lane_live_count() {
   _states_json="$(printf '%s' "$LANE_LIVE_STATES" | jq -Rc 'split(" ")')"
   gc session list --json --state all 2>/dev/null \
     | jq -r --arg q "$QUALIFIED" --argjson live "$_states_json" '
         [ (.sessions // [])[]
-          | select( ((.agent // .agent_name // .qualified_name // "") == $q) )
+          | (.agent // .agent_name // .qualified_name // "") as $n
+          | select( (.template // "") == $q
+                    or $n == $q
+                    or ($n | startswith($q + "-adhoc-")) )
           | select( (.state // "") as $st | ($live | index($st)) != null )
         ] | length' 2>/dev/null \
     | awk 'NF' | head -n1

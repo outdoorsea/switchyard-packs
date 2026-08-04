@@ -58,13 +58,37 @@ LANE_SESSION_ID_JQ='
 # UNREADABLE roster, but a confidently-wrong ZERO passes straight through it.
 # Suffix is matched as the literal `-adhoc-` rather than a bare prefix so a lane
 # named `judge` can never absorb one named `judgement`.
+#
+# Left the same leak running longer on this city: measured 2026-07-30, 0 reported
+# against 20 live judges, which is what drove 139 registered sessions and 111
+# concurrent `claude` processes on one credential — the 429 storm.
+#
+# `.template` is tested FIRST, because it is the field that actually answers the
+# question. `gc session list --json` (schema_version 1) reports it on every row
+# and it holds the UNSUFFIXED agent name, so matching it needs no knowledge of
+# how gc spells an instance suffix and keeps working if that spelling changes
+# again:
+#   template=<rig>/switchyard-ops.judge   agent_name=<rig>/…judge-adhoc-ae51b3d1
+#   template=bd.dog                       agent_name=bd.dog-1
+# The agent_name clauses below are a fallback for builds that might omit it.
+#
+# The second line is why an earlier local fix's extra `sub("-[0-9]+$")` strip is
+# NOT carried here: `.template` already resolves the numeric suffix correctly, so
+# the strip bought nothing and cost precision — it collapsed a legitimately
+# distinct lane named `worker-2` onto `worker`, counting a different lane as live
+# and suppressing a spawn that should have happened.
+#
+# All three clauses fail CLOSED in the same direction: an extra match raises the
+# count, which suppresses a spawn. That is the safe side of this particular bug.
 lane_live_count() {
   _states_json="$(printf '%s' "$LANE_LIVE_STATES" | jq -Rc 'split(" ")')"
   gc session list --json --state all 2>/dev/null \
     | jq -r --arg q "$1/$QUALIFIED" --argjson live "$_states_json" '
         [ (.sessions // [])[]
           | (.agent // .agent_name // .qualified_name // "") as $n
-          | select( $n == $q or ($n | startswith($q + "-adhoc-")) )
+          | select( (.template // "") == $q
+                    or $n == $q
+                    or ($n | startswith($q + "-adhoc-")) )
           | select( (.state // "") as $st | ($live | index($st)) != null )
         ] | length' 2>/dev/null \
     | awk 'NF' | head -n1

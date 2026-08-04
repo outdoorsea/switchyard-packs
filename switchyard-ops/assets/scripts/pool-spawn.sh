@@ -160,11 +160,28 @@ sy_pool_brakeman_max() {
 # sy_pool_brakeman_live RIG — count of RIG's brakeman sessions in a live state.
 # The live-state set is passed in as a jq array so the shell constant above is
 # the single source of truth.
+#
+# JOIN ON .template. For a POOL this is not merely the more robust key, it is the
+# ONLY one that can ever match. Pool sessions are named from namepool.txt —
+# `<rig>/switchyard-ops.fireman`, `.switchman`, `.shunter` — and that file
+# deliberately does NOT contain `brakeman`, so a pool member's `agent_name` never
+# contains the agent's own name in any form. No comparison against $q, exact or
+# suffix-stripped or prefix-matched, can succeed. `gc session list --json`
+# (schema_version 1) reports `template` on every row and it holds the unsuffixed
+# agent name, so it is the honest join key here and everywhere else:
+#   template=<rig>/switchyard-ops.brakeman   agent_name=<rig>/switchyard-ops.fireman
+#   template=bd.dog                          agent_name=bd.dog-1
+# The agent_name clauses are kept only as a fallback for gc builds that might
+# omit .template. Note the second line above: .template also resolves the numeric
+# pool suffix correctly, so no suffix-stripping is needed to handle it.
 sy_pool_brakeman_live() {
   _states_json="$(printf '%s' "$POOL_LIVE_STATES" | jq -Rc 'split(" ")')"
   gc session list --json --state all 2>/dev/null | jq -r --arg q "$1/switchyard-ops.brakeman" --argjson live "$_states_json" '
     [ (.sessions // [])[]
-      | select( ((.agent // .agent_name // .qualified_name // "") == $q) )
+      | (.agent // .agent_name // .qualified_name // "") as $n
+      | select( (.template // "") == $q
+                or $n == $q
+                or ($n | startswith($q + "-adhoc-")) )
       | select( (.state // "") as $st | ($live | index($st)) != null )
     ] | length' 2>/dev/null \
     | awk 'NF' | head -n1

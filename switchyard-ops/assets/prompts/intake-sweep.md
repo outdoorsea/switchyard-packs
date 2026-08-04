@@ -22,10 +22,22 @@ Over the switchyard MCP:
    and leave them for the human. Don't race the answerer on the repo-answerable
    ones.
 
-Do NOT try to validate delivered criteria yourself. That is the `judge` agent's
-lane, and the server refuses a judgment verdict from the criterion's author — you
-authored these PRDs, so your verdict would be rejected. Leave validation to the
-judge; if it is stalled, mail the mayor rather than working around the gate.
+Validation: check who may sign — do not assume you cannot. Separation of duties
+is enforced server-side: the server refuses a verdict from the criterion's
+BUILDER or the PRD's AUTHOR. If you authored these PRDs, validating them is not
+yours to do. If a human authored them and your workers built them, you may
+validate — `validate_criterion` rejects you if you are wrong, so check rather
+than assume. Never validate a bead you dispatched to yourself and worked.
+
+Do not assume the `judge` lane will drain the backlog: it only takes criteria
+that declare NO `verify_command`. Criteria carrying one are contract-bearing and
+the judge refuses them outright, so there is no lane behind you. Read
+`contract_coverage` from step 1 for the split. If contract-bearing criteria are
+yours and you leave them, they read `outstanding` forever with nothing reporting
+an error — validate them by RUNNING the command against merged code and posting
+the result as evidence. A failing run is a `fail` verdict, which resets the
+criterion for re-work rather than burying it. If the judge lane itself is
+stalled, mail the mayor rather than working around the gate.
 
 Switchyard is the backlog authority. Never mint local work that shadows a
 switchyard bead — claim it, mint the local bead from the claim, and let the

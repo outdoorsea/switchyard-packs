@@ -33,9 +33,19 @@
 #
 # CLASSES — the two are gated by different things and must not be nagged alike.
 #   item PR (head `gc-item-*`, base = the PRD integration branch)
-#     Policy is: judge reviews, then it auto-merges into the integration branch.
-#     So an aged item PR is a LANE FAILURE — the judge never reviewed it, or the
-#     merge step never fired. This is the actionable class.
+#     Policy is: a criterion earns a `done` verdict, then someone with merge
+#     authority merges it into the integration branch. THERE IS NO AUTOMATIC
+#     MERGE — this city has no refinery (city.toml:38-40) and `sy-item-work`
+#     terminates at `close-source-anchor`, one step after `publish`. Nothing in
+#     the pack calls `gh pr merge`.
+#
+#     This block used to read "judge reviews, then it auto-merges", and derived
+#     from that: "an aged item PR is a LANE FAILURE — the merge step never
+#     fired." That premise was false, so every escalation it produced was
+#     mislabelled: it reported broken automation where the truth was simply
+#     that nobody had merged yet. Corrected 2026-08-04. An aged item PR is a
+#     BACKLOG signal, and the action is to merge it, not to debug a step that
+#     does not exist. This is still the actionable class.
 #   integration PR (base = the rig default branch)
 #     Gated on the PRD being complete and accepted in switchyard, then merged to
 #     main and rebuilt. That is a legitimate long wait against a checkable
@@ -197,24 +207,31 @@ awaiting=$(cat "$TMP/awaiting" 2>/dev/null)
 # Silence is the success case.
 if [ -n "$stalled" ]; then
   gc mail send mayor \
-    -s "pr-gate: item PR(s) open past review SLA — the merge lane is not moving" \
-    -m "These item PRs are OPEN and aging. Policy for an item PR is: the judge
-reviews it, then it merges into the PRD integration branch. An item PR sitting
-here means that lane did not run to completion — not that someone is being slow.
+    -s "pr-gate: item PR(s) open past review SLA — nobody has merged them" \
+    -m "These item PRs are OPEN and aging. NOTHING MERGES THEM AUTOMATICALLY:
+this city has no refinery, and sy-item-work ends at close-source-anchor, one
+step after publish. A PR sitting here is the lane's DESIGNED terminal state,
+not evidence that a step failed. The question is only whether it has earned its
+merge yet.
 
 $stalled
-Most likely causes, cheapest first:
+Work the list in this order:
 
-  1. The judge lane is not running or is throttled. Check its cadence:
+  1. Does the criterion carry a recorded \`done\` verdict? If yes and the PR is
+     mergeable with checks green, MERGE IT — that is the whole Tier 1 gate, and
+     the blast radius is the integration branch only. Nothing reaches main.
+
+  2. No verdict yet? Then this is a review backlog, not a merge backlog. Check
+     the judge's cadence:
        grep -A2 'judge-sweep' \$GC_CITY/city.toml
        gc session list | grep -i judge
      A judge-sweep interval widened for a quiet rig and never tightened once
-     real intake arrived is the common one.
-
-  2. The judge reviewed it but nothing merges. Review state is shown above;
-     if it is APPROVED and the PR is still open, the merge step is the gap.
+     real intake arrived is the common one. Note the judge REFUSES
+     contract-bearing criteria — for those the verdict is earned by re-running
+     the criterion's verify_command, not by waiting.
 
   3. The PR is not mergeable (conflicts). Shown above as mergeable=CONFLICTING.
+     Re-fetch before judging this: the base branch may have moved underneath it.
 
 Inspect one with:
 

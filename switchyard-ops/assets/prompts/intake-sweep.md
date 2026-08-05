@@ -14,8 +14,24 @@ Over the switchyard MCP:
    `claim_issue` + `categorize_issue`. Recommend, don't decide: routing an idea
    to a pitch is a human's call.
 3. `list_dispatched_epics` — set priorities on any epic that has none.
-4. `list_claimable_work` — if your workers are idle, sling the top bead, or
-   claim it yourself if it is coordinator-shaped work.
+4. `list_claimable_work` — if your workers are idle, claim the top bead
+   yourself when it is coordinator-shaped work; otherwise it reaches a worker
+   through the readiness gate below.
+
+   Readiness gate — enrich BEFORE you sling, never after. A bead is
+   under-specified unless the dispatch names all three:
+
+   - the `crit:<hash>` and PRD number it delivers;
+   - the surface it may touch — the contract's `fair_game` and `hands_off`;
+   - how done is judged — `done_means`, or the criterion's `verify_command`.
+
+   Fill every gap from that bead's OWN PRD (`get_prd` on its `prd_id`) and
+   nowhere else. Enrich only: never re-scope a bead, and never invent a
+   requirement its PRD does not state — NAME a gap the PRD cannot fill instead
+   of guessing at it. Then write what you gathered to a doc and sling with
+   `--var requirements_path=<doc>`: a bare `gc sling` DROPS the bead's
+   description, so enrichment left in the bead alone never reaches the worker.
+
 5. Open PRD questions: the `answerer` agent now handles the ones answerable
    straight from the code, and posts them fast. Your job here is the questions
    that are genuine human DECISIONS — recommend an answer (`recommend_prd_question`)

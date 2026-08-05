@@ -1,0 +1,30 @@
+# Report a session idle with unsubmitted text on its input line.
+#
+# The third member of the silent-stall family, after publish-gate (work closed
+# with no PR) and pr-gate (PR opened and never merged). Same shape as both: a
+# condition every existing health surface reads as fine.
+#
+# Here the agent never receives the text at all — it sits in the tmux input
+# buffer awaiting an Enter that never came. The session stays `active`, the pane
+# repaints, `gc status` is clean, orders keep firing. A coordinator was parked
+# this way overnight with 13 beads unrouted and no workers.
+#
+# Distinct from the interactive-prompt stall the agent prompts forbid: that one
+# the agent chose to enter, so a prompt rule prevents it. This one is done TO the
+# agent by whatever left text on its line, so no instruction to the agent can
+# help. It has to be observed from outside.
+#
+# Cadence is 10m. Tighter than pr-gate's 30m because nothing is progressing
+# while it holds — unlike an unmerged PR, which is durable and merely waiting.
+# Looser than publish-gate's 5m because nothing is being LOST either: the work
+# is queued, not disappearing. The script reports each distinct stall once, so
+# the interval sets detection latency, not mail volume.
+#
+# It only ever reports. Clearing another agent's input line is destructive — the
+# session may be one keystroke from real work, and the text may be a question
+# worth answering rather than noise.
+[order]
+description = "Report sessions sitting idle with unsubmitted text on their input line, which no liveness check can see"
+trigger = "cooldown"
+interval = "10m"
+exec = "$PACK_DIR/assets/scripts/pane-stall.sh"

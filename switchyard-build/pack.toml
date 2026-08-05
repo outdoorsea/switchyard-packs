@@ -1,0 +1,72 @@
+# switchyard-build — the factory execution path for epic-scale switchyard PRDs.
+#
+# Layer 1.5: a thin methodology pack that imports the gascity base pack as `gc`
+# and will add one formula, `sy-build-from-prd`, which drives an approved
+# switchyard PRD end to end:
+#   fetch-prd          — read the approved PRD over the switchyard MCP and render
+#                        the base workflow's requirements/plan artifacts from the
+#                        PRD's own sections
+#   map-pool-to-convoy — claim the PRD's pool beads under lease and mint a local
+#                        convoy ordered by phase
+#   implement          — drain the convoy in parallel worktrees
+#   review             — the factory review + gap-analysis gate
+#   publish            — PR-only, with the PRD and bead ids in the PR title
+#   finalize           — complete each bead back with its PR attached, and post a
+#                        summary to the source PRD's discussion
+#
+# Why this pack exists: every switchyard bead today runs one-at-a-time through a
+# brakeman on the `mol-polecat-work` path — no plan artifact, no dependency
+# decomposition, no parallel drain, no multi-lane review. gascity already owns
+# all of that machinery; what is missing is the adapter that makes switchyard,
+# not the local bead ledger, the system of record for it.
+#
+# SWITCHYARD STAYS THE SYSTEM OF RECORD. This pack does not mint work; it claims
+# work that switchyard already holds, and hands the delivery record back. Every
+# piece of switchyard policy rides one of gascity's DOCUMENTED STABLE OVERRIDE
+# SEAMS (`extends` on `build-base`, the `*_formula` selector vars, the
+# `[metadata.gc.methodology]` block, and the path-shadow override contract) so
+# the import stays PINNED AND UNFORKED. If a change here would require editing
+# gascity itself, that is a signal the seam is wrong — raise it upstream rather
+# than forking the pin.
+#
+# THE IMPORT SOURCE IS A PINNED REMOTE, NOT `../gascity`.
+# gascity's four in-tree derived packs (compound-engineering, superpowers, bmad,
+# gstack) all bind `[imports.gc] source = "../gascity"`, which resolves only
+# because they are siblings INSIDE gascity-packs. This pack is authored in the
+# switchyard repo — next to the server it drives, so the pack and the API can
+# never skew — so a relative path would dangle. It therefore takes the same
+# pinned remote form that `packs/examples/city/pack.toml` documents for `gc`.
+# See REQUIREMENTS.md for the full divergence note.
+#
+# Bound as `gc` specifically: that is the binding gascity's own formulas and its
+# `roles` sub-pack expect. Renaming it breaks every `gc.*` route target
+# (`gc.implementation-worker`, `gc.publisher`, `gc.run-operator`).
+#
+# Import PER RIG, for a rig whose crew should run the factory:
+#   [rigs.imports.switchyard-build]
+#   source = "https://github.com/outdoorsea/switchyard-packs/tree/main/switchyard-build"
+#   # ...or from a local checkout of this repo:
+#   #   source = "/path/to/switchyard/packs/switchyard-build"
+# ...then `gc reload`. The rig also needs the switchyard-mcp overlay (the formula
+# reads its queue over the switchyard MCP) and `gascity/roles` for the role
+# targets the base formula's steps dispatch to.
+#
+# STATUS: this is the pack skeleton — the manifest and its compatibility ledger.
+# `sy-build-from-prd` and its step overrides land with the sibling acceptance
+# criteria of switchyard PRD #269; REQUIREMENTS.md marks each such claim PENDING
+# against the criterion that will satisfy it, so the ledger never asserts
+# evidence that does not exist yet.
+
+[pack]
+name = "switchyard-build"
+version = "0.1.0"
+schema = 2
+
+# --- Layer 1: the build methodology. Pinned; never forked. -------------------
+# The pin is a gascity-packs commit — the same one this city already pins for
+# its sibling pack from that repo — verified to contain `gascity/pack.toml`.
+# Upgrade with `gc import upgrade`, then re-run the Evidence Commands in
+# REQUIREMENTS.md and reconcile any claim the upgrade invalidates.
+[imports.gc]
+  source = "https://github.com/gastownhall/gascity-packs/tree/main/gascity"
+  version = "sha:637398502880f1a2a96a385f0d1b38b85343fa4e"

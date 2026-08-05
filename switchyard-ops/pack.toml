@@ -135,12 +135,22 @@
 # the retro — lives in a city-local, un-versioned $GC_PACK_STATE_DIR/roster.conf.
 # See assets/roster.conf.example.
 #
-# Requires: jq, tmux, and the gascity pack (sy-item-work extends its
+# Requires: jq, tmux, curl, and the gascity pack (sy-item-work extends its
 # implementation-base and dispatches to its gc.implementation-worker /
 # gc.publisher / gc.run-operator role targets — import gascity/roles per rig).
 # A `gh` or `glab` on PATH, authenticated for the rig's forge, since the worker
 # opens its own pull request. And — for the sweeps to be useful — the
 # switchyard-mcp overlay in any rig whose coordinator should drive switchyard.
+#
+# The judge and answer sweeps additionally read their lane's switchyard queue
+# BEFORE spawning, so they do not spend a session to discover there is nothing
+# to do (PRD #299). That read needs `curl` and a resolvable switchyard token —
+# either SWITCHYARD_API_TOKEN in the order's environment, or the one
+# `switchyard-mcp token-path` resolves, which is already installed wherever the
+# MCP overlay works. It is ADVISORY: with no token, no curl, or no reachable
+# switchyard the check is simply skipped and the sweeps spawn exactly as they
+# did before, so nothing here is a new hard dependency. It resolves a rig to its
+# project by matching the rig name against the project SLUG.
 #
 # Requires a RESIDENT MAYOR. gascity ships no always-on crew, so `gc init` writes
 # a city-local agents/mayor/ and you declare its [[named_session]] yourself. Every

@@ -3,10 +3,21 @@
 # agent AGENT alive for each rig that drives a switchyard project.
 #
 # This is the shared spawner behind the self-directed lanes — agents whose queue
-# is switchyard's (read over the MCP inside the session), not the gc bead ledger,
-# so there is no demand bead to detect and no hand-off to make. Its whole job is
-# "ensure a <AGENT> is running for each rig that has a coordinator"; the session
-# itself reads its switchyard queue and exits IDLE when there is nothing to do.
+# is switchyard's, not the gc bead ledger, so there is no demand bead to detect
+# and no hand-off to make. Its whole job is "ensure a <AGENT> is running for each
+# rig that has work for it".
+#
+# THAT LAST CLAUSE USED TO READ "for each rig that has a coordinator", and the
+# difference is switchyard PRD #299, crit:61754b5dbdb9. The queue was readable
+# only from INSIDE a session, so this order started one per rig per cycle and let
+# it discover for itself that there was nothing to do and exit IDLE. On a drained
+# lane that is a whole session — a process, a model context, a credential slot —
+# spent to learn a fact a single HTTP GET answers. Measured while building this:
+# one live rig's judging queue held 113 items while another's held 0, and the
+# sweep was staffing both identically every 30 minutes. So the queue is now read
+# BEFORE the spawn (lib/switchyard-api.sh), and a lane with nothing waiting is
+# left alone. The session still exits IDLE when it finds the queue empty; that
+# path is the backstop for the races this check cannot close, not the design.
 #
 #   judge-sweep   -> lane-ensure judge     "judging-validator"
 #   answer-sweep  -> lane-ensure answerer   "answerer"
@@ -48,8 +59,43 @@ SUBJECT="${2:-$AGENT}"          # human label for the escalation mail
 
 . "$(dirname "$0")/../lib/roster.sh"
 . "$(dirname "$0")/../lib/pane-state.sh"
+. "$(dirname "$0")/../lib/switchyard-api.sh"
 
 QUALIFIED="switchyard-ops.$AGENT"
+
+# THE LANE'S QUEUE, per agent — the read that answers "is there anything for a
+# session to do?" without starting one (switchyard PRD #299, crit:61754b5dbdb9).
+#
+# Each lane's backlog is a different switchyard queue, so the endpoint is chosen
+# by AGENT rather than derived: the judging lane takes delivered criteria that
+# declare no `verify_command` (`?lane=judgment` is REQUIRED — the API answers 400
+# on an absent lane rather than defaulting), and the answerer takes outstanding
+# PRD questions.
+#
+# AN UNRECOGNISED LANE LEAVES BOTH EMPTY, which disables the check and spawns as
+# before. A lane added to this pack later must keep working on the day it is
+# added, not go silently unstaffed until someone remembers to extend this case.
+#
+# THE COUNT FILTER INSISTS ON AN ARRAY, and that is a safety property rather than
+# pedantry. `null | length` is 0 in jq, so the obvious `(.validations // []) |
+# length` reads any 200 response that does not carry the key — an error envelope,
+# a renamed field, a future shape — as a DRAINED QUEUE, and silently stops
+# staffing a lane that has work. Demanding the array makes every one of those
+# answer `empty` instead, which the caller treats as unknown and spawns. Both
+# endpoints do return the key as a real array when the queue is empty (verified
+# against a live project holding zero), so the strictness costs nothing true.
+LANE_QUEUE_SUFFIX=""
+LANE_QUEUE_COUNT_JQ=""
+case "$AGENT" in
+  judge)
+    LANE_QUEUE_SUFFIX="/validations?lane=judgment"
+    LANE_QUEUE_COUNT_JQ='if (.validations|type) == "array" then (.validations|length) else empty end'
+    ;;
+  answerer)
+    LANE_QUEUE_SUFFIX="/questions/open"
+    LANE_QUEUE_COUNT_JQ='if (.questions|type) == "array" then (.questions|length) else empty end'
+    ;;
+esac
 
 # Session states that count as a live session — mirrors pool-spawn's
 # POOL_LIVE_STATES so "is one already running?" is answered the same way pack-wide.
@@ -333,6 +379,47 @@ lane_rig_suspended() {
   printf '%s\n' "$suspended_rigs" | grep -qxF "$1"
 }
 
+# The switchyard credential and project list, read ONCE per cycle for the same
+# two reasons the suspended set above is: each is a subprocess (and here a
+# network call), and a per-rig re-read would let a mid-cycle blip answer
+# differently for two rigs in the same sweep.
+#
+# Both are empty when switchyard cannot be reached, is not configured, or holds
+# no token — which disables the queue check entirely and spawns exactly as this
+# order did before it existed. That is the whole fail-open story: this check can
+# only ever WITHHOLD a spawn on a confident answer, never cause one.
+lane_token="$(sy_api_token)"
+lane_projects="$(sy_api_projects "$lane_token")"
+
+# lane_queue_depth RIG — how many items wait in RIG's queue for THIS lane.
+# Prints a count, or NOTHING when the answer is not confidently known.
+#
+# Empty is returned for every uncertainty, and they are deliberately not
+# distinguished: no lane mapping, no token, no reachable switchyard, a rig whose
+# project cannot be resolved unambiguously, a non-200, a body jq cannot read. The
+# caller treats all of them identically as "check unavailable" and spawns.
+#
+# The count is validated as digits before it is returned. jq answers `null` for a
+# shape it did not expect, and `null` compared against 0 is not equal — so an
+# unexpected body would fall through to the spawn anyway — but a count that is
+# not a number has no business reaching a numeric guard in the first place.
+lane_queue_depth() {
+  [ -n "$LANE_QUEUE_SUFFIX" ] || return 0
+  [ -n "$lane_token" ] || return 0
+
+  _lqd_project="$(sy_project_for_rig "$1" "$lane_projects")"
+  [ -n "$_lqd_project" ] || return 0
+
+  _lqd_body="$(sy_api_get "/api/v1/projects/$_lqd_project$LANE_QUEUE_SUFFIX" "$lane_token")"
+  [ -n "$_lqd_body" ] || return 0
+
+  _lqd_n="$(printf '%s' "$_lqd_body" | jq -r "$LANE_QUEUE_COUNT_JQ" 2>/dev/null | awk 'NF' | head -n1)"
+  case "${_lqd_n:-}" in
+    '' | *[!0-9]*) return 0 ;;
+  esac
+  printf '%s' "$_lqd_n"
+}
+
 rigs="$(lane_rigs)"
 
 # Fall back to the old coordinator derivation when the agent probe yields nothing
@@ -382,6 +469,28 @@ for rig in $rigs; do
     0) : ;;                       # confirmed none live → spawn below
     *) continue ;;                # already running → leave it
   esac
+
+  # AN EMPTY QUEUE MEANS THERE IS NOTHING TO START A SESSION FOR.
+  #
+  # This is the last gate before the spawn, and it is last on purpose: it is the
+  # only one that costs a network call, so it is asked only once every cheaper
+  # local reason to skip has already been ruled out. A city whose lanes are all
+  # busy pays nothing for it at all.
+  #
+  # ONLY A CONFIDENT ZERO WITHHOLDS THE SPAWN. lane_queue_depth answers empty for
+  # every uncertainty it meets, and empty falls through to the spawn — the same
+  # asymmetry the suspended-rig guard and the reaper are both built on. Skipping
+  # on a bad read would leave a lane with a real backlog permanently unstaffed and
+  # say nothing, and this file's teardown notes already argue at length that such
+  # a silent stall is worse than the over-spawn it would be preventing: a surplus
+  # session is visible in `gc session list`, a lane that quietly stopped is not.
+  #
+  # Note this cannot strand the backlog it declines to staff. The queue is read
+  # fresh every cycle, so the sweep that skips a drained lane is the same sweep
+  # that staffs it the moment one item lands.
+  if [ "$(lane_queue_depth "$rig")" = 0 ]; then
+    continue
+  fi
 
   id="$(lane_spawn "$rig")"
   [ -n "$id" ] && continue        # spawned cleanly → done for this rig

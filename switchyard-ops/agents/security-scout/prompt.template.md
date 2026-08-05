@@ -72,7 +72,7 @@ change code you should not have touched.
 2. `register_agent` as `{{ .Rig }}/switchyard-ops.security-scout` (display
    "Security scout — {{ .RigName }}"). File under this ref, so your findings are
    attributable to the second-opinion lane.
-3. Check for duplicates **before** filing: `list_open_issues`. If your finding is
+3. Check for duplicates **before** filing: `list_issues { filter: "open" }`. If your finding is
    already there, do not re-file — add nothing rather than a near-duplicate.
    `propose_issue_merge` if you find two existing issues are the same defect.
 4. File each finding with `submit_feedback` (or the project's issue intake).

@@ -295,6 +295,44 @@ lane_rigs() {
              | rtrimstr("/" + $q)' 2>/dev/null \
     | awk 'NF' | sort -u
 }
+
+# The rigs the mayor has suspended, read ONCE per cycle.
+#
+# A SUSPENDED RIG IS NOT A RIG WITH A QUEUE, and lane_rigs above cannot see
+# that. `gc agent list --json` carries the per-AGENT `suspended` flag and
+# NOTHING about the rig the agent lives in — roster.sh says so outright where
+# sy_derived_roster hits the same wall — so its filter answers "is this agent
+# suspended?" and can never answer "did the mayor suspend this rig?". Every
+# agent on a `gc rig suspend`-ed rig passes it with suspended=false, and the
+# sweep then spawns a session the reconciler is deliberately declining to run,
+# on a rig nobody asked to be staffed. That is the exact load this PRD exists to
+# stop, manufactured by the sweep itself.
+#
+# Read once and not per rig: `gc rig list` is a subprocess, and polling it
+# inside the loop would also let a mid-cycle blip answer differently for two
+# rigs in the same sweep — the suspended set must be one consistent snapshot.
+#
+# FAILS OPEN, deliberately, and this is sy_suspended_rigs' own documented
+# contract rather than a choice re-made here: an unreadable, slow or empty
+# `gc rig list` yields an EMPTY set, so nothing is withheld and every rig is
+# still staffed. The asymmetry is the one roster.sh argues at length. An
+# over-spawn is visible in `gc session list` and self-corrects on the next
+# cycle; a blipped lookup that silently withheld every spawn would stop the lane
+# city-wide with no signal at all — the silent stall lane-teardown.test.sh
+# already calls worse than the leak it replaced.
+suspended_rigs="$(sy_suspended_rigs)"
+
+# lane_rig_suspended RIG — 0 when the mayor has suspended RIG.
+#
+# grep -qxF and not a `case` glob: a rig name is arbitrary text and -F -x makes
+# the match literal and whole-line, so a rig called `forge` is never matched by
+# a suspended `forge-staging` (or vice versa). The empty-set short-circuit keeps
+# the fail-open path from paying a process at all.
+lane_rig_suspended() {
+  [ -n "$suspended_rigs" ] || return 1
+  printf '%s\n' "$suspended_rigs" | grep -qxF "$1"
+}
+
 rigs="$(lane_rigs)"
 
 # Fall back to the old coordinator derivation when the agent probe yields nothing
@@ -319,6 +357,24 @@ for rig in $rigs; do
   # sessions are all finished is exactly the rig that most needs the reap, and it
   # is the one a count-first ordering would skip.
   lane_reap "$rig" >/dev/null
+
+  # SUSPENSION WITHHOLDS THE SPAWN, NOT THE REAP — and the split is the whole
+  # point rather than an implementation detail.
+  #
+  # `gc rig suspend` tells the reconciler not to START this rig's agents. It
+  # says nothing about sessions already sitting there, and closing one that has
+  # printed IDLE does not fight the mayor's decision — it completes it. Skipping
+  # the rig outright instead would open a fresh retention hole in the exact PRD
+  # that exists to close them: suspend a rig while one of its adhoc sessions is
+  # finishing and that session is never swept again, retained for as long as the
+  # suspension lasts.
+  #
+  # This also matches the reap's own stated rule two blocks up — unconditional,
+  # never gated on the spawn guard, because the rig whose sessions are all
+  # finished is exactly the rig that most needs the reap.
+  if lane_rig_suspended "$rig"; then
+    continue
+  fi
 
   n="$(lane_live_count "$rig")"
   case "$n" in

@@ -68,13 +68,23 @@ flowchart TB
 | **coordinator** (compass/magnet/…) | per-rig | yes | **pinned** | triage the rig's switchyard project; sling work to the pool |
 | **brakeman** | per-rig | yes | on-demand pool (≤2) | claim a bead → build in a scoped worktree → push → open a PR |
 | **answerer** | per-rig | yes | on-demand | drain open PRD questions |
-| **judge** | per-rig | yes | on-demand | drain the awaiting-validation backlog |
+| **judge** | per-rig | yes — **independent model** | on-demand | drain the awaiting-validation backlog |
 | gascity **roles** | per-rig | yes | stateless targets | `gc.implementation-worker`, `gc.publisher`, `gc.run-operator` — what a formula step dispatches to |
 | **mayor** | city | yes | always-on | human interface, city coordination, **every escalation lands here** |
 | **dog** | city | yes | on-demand pool | mechanical formula orders (stale-DB sweeps, GC) — from the `bd` pack |
 
 **Nothing merges on its own.** A brakeman opens a pull request and stops; a human
 merges it. There is no refinery in a gascity city.
+
+**The judge does not share a brain with the workers.** The brakeman pool declares
+no provider and so runs the city default; `agents/judge/agent.toml` pins
+`provider = "kimi"`, the same provider `security-scout` already requires, so
+builder and validator reason on different models and a model's blind spot cannot
+pass its own work. Identity independence — the judge's own agent ref, which the
+server's separation-of-duties rules key on — is a separate and weaker property:
+two refs can be one runtime. The server-side complement refuses a judgment whose
+recorded runtime matches the builder's. Both halves, and the `[[patches.agent]]`
+opt-out for a city that has not wired kimi, are documented in that agent.toml.
 
 **There is also no always-on watcher.** gastown's `witness`, `deacon` and `boot`
 have no gascity equivalent, so a quiet city is much cheaper to run — and nothing

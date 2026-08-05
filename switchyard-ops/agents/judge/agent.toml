@@ -30,6 +30,66 @@
 # imported per rig, and judges THAT rig's switchyard project (via the rig's
 # switchyard-mcp overlay scope). A city import yields the orders; a rig import
 # yields the workers and the judge.
+
+# WHY A DIFFERENT PROVIDER FROM THE BRAKEMAN POOL (switchyard PRD #271).
+#
+# Everything above buys IDENTITY independence: the judge registers under its own
+# ref, so the server's two separation-of-duties rules can see that the validator
+# is not the builder. But both refs can still be the same LLM, and then the judge
+# is asked to catch the class of mistake it would itself have made — a model's
+# systematic blind spot passes its own work, and both SoD rules read green while
+# it happens. Identity independence without RUNTIME independence is a quorum of
+# one wearing two badges.
+#
+# The brakeman pool declares NO provider, so it runs the city default
+# (`[workspace] provider` — `claude` in every city that ships this pack). Pinning
+# the judge to a different provider here is what makes builder and validator
+# genuinely different brains. This is the PACK-SIDE half of the property; the
+# SERVER-SIDE half is PRD #249, which refuses a judgment verdict whose recorded
+# runtime matches the builder's. The two are complements, not duplicates: this
+# line makes the refusal never need to fire.
+#
+# WHY `kimi` SPECIFICALLY, AND NOT A THIRD PROVIDER. security-scout already pins
+# `kimi`, so every city importing this pack is ALREADY required to declare
+# `[providers.kimi]` — a referenced-but-absent provider does not degrade
+# gracefully, it rejects the WHOLE city config (`gc agent list`, `gc order list`
+# and `gc config show` all fail). Reusing the provider the pack already names
+# therefore adds ZERO new city.toml requirement; naming a third one would break
+# every city until its config caught up. Sharing a runtime with security-scout is
+# acceptable and self-correcting: the scout is the only other lane that opens
+# PRs, and PRD #249's server-side gate refuses a judgment on work whose builder
+# shared this runtime rather than banking it wrongly.
+#
+# ⚠ PROVIDER PREREQUISITES — same three as security-scout: the `kimi` CLI on
+# PATH, `KIMI_API_KEY` in the session environment, and `[providers.kimi]`
+# registered in city.toml.
+#
+# ⚠ UNLIKE security-scout, THIS LANE HAS NO READINESS GUARD. `security-scan.sh`
+# checks those three prerequisites and stays quiet when they are unmet;
+# `judge-sweep` calls `lane-ensure.sh` directly, and lane-ensure's
+# silent-failure invariant mails the mayor whenever a spawn returns no session
+# identity. So in a city where kimi is NOT usable, this pin turns the 30m judge
+# sweep into a 30m spawn-fail notice and the awaiting-validation backlog stops
+# draining. Giving judge-sweep the security-scan readiness check is the right
+# fix and is deliberately NOT done here: PRD #271's `hands_off` names the sweep
+# orders and lane-ensure mechanics. Until that lands, a city without kimi should
+# take the documented opt-out below rather than let the lane fail loudly.
+#
+# To run the judge on the default provider instead — accepting that builder and
+# validator share a runtime brain, which is the whole point of this line — patch
+# it off in city.toml rather than editing the pack:
+#   [[patches.agent]]
+#     dir = "<rig>"
+#     name = "switchyard-ops.judge"
+#     provider = "claude"
+#
+# NOTE ON MODEL SELECTION: the model is chosen by the PROVIDER's `args`/`env` in
+# city.toml, NOT here. `model` is not a valid agent.toml key — gc silently drops
+# it (verified by round-trip against gc 1.4.0), so a `model = "..."` line here
+# would look correct and do nothing. This criterion reads "pins a model or
+# provider"; only the provider half is real. See packs/docs/GAS-CITY-MECHANICS.md.
+provider = "kimi"
+
 scope = "rig"
 
 # fresh: each judging pass starts clean. A judgment is a self-contained read of a

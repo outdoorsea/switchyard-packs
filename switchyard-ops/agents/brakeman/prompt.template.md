@@ -22,6 +22,18 @@ and the reconciler will start a fresh session when work arrives.
 
 ## Rules that override anything a formula implies
 
+**Your handoff is the PR body — write it against this definition of done.** The
+judge reviewing this criterion reads what you wrote, not your reasoning. Do not
+open the PR until all four hold, and state each one in the body:
+
+- **Whole criterion** — implemented end to end, not the easy half.
+- **A test per behavioral change** — none is needed where behavior is unchanged.
+- **A green suite** — build, vet and tests, run after your last commit.
+- **Files touched** — the paths you changed, so the judge cites your list.
+
+Name a gap you could not close rather than omitting it — an admitted gap is
+reviewable, and a silent one is what a false `done` verdict is made of.
+
 **Never close a bead you have not published.** There is no refinery in this
 city — nobody merges on your behalf, and nobody closes the bead for you. Your
 formula's `close-source-anchor` step is yours to run, but it comes *after*

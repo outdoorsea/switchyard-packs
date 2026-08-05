@@ -65,22 +65,63 @@ PRD has at least one attached, merged PR (a diff you can read and cite).
    or commit. Do not trust the criterion's own wording that it "is satisfied," nor
    the worker's note; look at what shipped. If a path reads as absent, confirm you
    queried the right repo before concluding the code was never written.
-3. **Decide honestly:**
+3. **Try to break it before you bless it.** Before any `done` verdict, construct
+   the **single most plausible failure scenario** for this delivery — the way it
+   breaks while still looking correct in the diff — and write it as concrete
+   inputs or state leading to a concrete wrong outcome:
+
+       scenario: <inputs / state> → <wrong result the criterion forbids>
+
+   A criterion is not satisfied by code that *exists*; it is satisfied by code
+   that *holds up*. Reading a diff rewards you for seeing what the author
+   intended, which is exactly the reflex that passes work with a hole in it, so
+   this step deliberately asks the opposite question — and asks it while you can
+   still change your verdict.
+
+   **One scenario, the most plausible one — not a survey.** The point is to spend
+   your attention where this delivery is actually weak, not to enumerate
+   everything that could theoretically go wrong; a checklist of remote
+   possibilities costs a full pass and finds less than one honest attempt at the
+   likeliest break. Draw it from what you just read: a boundary the diff never
+   tests, an error path that returns success, an empty or absent input, a second
+   caller arriving concurrently, a column that is nullable in the schema and
+   assumed present in the code.
+
+   Then check the delivery against it and record what you found:
+
+   - **It handles the scenario** — you can point at the code that answers it.
+     Cite that place in `code_locations`; it is now part of why this `done` is
+     honest rather than a formality.
+   - **It does NOT handle the scenario** — that is a **`fail`**. Not a decline,
+     and not a `done` with a caveat in the rationale. You did not fail to confirm
+     something; you confirmed a gap, which is a finding.
+   - **You cannot construct a plausible scenario** — legitimate for a small,
+     total criterion, but say so **in the `rationale`**. It is a claim you are
+     making about the delivery, and it must be visible as one rather than an
+     unmentioned skip.
+
+4. **Decide honestly:**
    - **done** — the merged code fully and specifically satisfies the criterion,
-     and you can name the exact places that prove it. Post
+     you can name the exact places that prove it, and it survived the scenario
+     you constructed in step 3. Post
      `validate_criterion` with `verdict="done"`, `verdict_provenance="judgment"`,
      `evidence_ref=<the delivering PR url/number>`,
      `code_locations=["path:line-range", ...]` (the real places you read), and a
-     `rationale` explaining why each element of the criterion is met.
-   - **fail** — the code is absent, partial, contradicts the criterion, or a
-     required element is missing. Post `verdict="fail"` with the same evidence
-     shape and a rationale naming what is missing. This returns the criterion to
-     the pool for rework — the honest outcome for delivered-but-wrong work.
+     `rationale` explaining why each element of the criterion is met — including
+     how the delivery answers that scenario, or why none could be constructed.
+   - **fail** — the code is absent, partial, contradicts the criterion, a
+     required element is missing, **or it does not handle the failure scenario
+     you constructed**. Post `verdict="fail"` with the same evidence shape and a
+     rationale naming what is missing — and, for a scenario failure, naming the
+     scenario itself so the rework knows what to fix. This returns the criterion
+     to the pool for rework — the honest outcome for delivered-but-wrong work.
    - **decline (skip)** — you cannot confirm either way: the evidence is
      unreadable, the criterion is genuinely ambiguous, or answering needs a human.
      Post NOTHING and move on. An unjudged criterion is fine; a guessed verdict is
-     not.
-4. **Cite or decline. Every time.** A `judgment` verdict without concrete
+     not. **A delivery that does not handle your scenario is not this case** — it
+     is a `fail` above. Decline is for evidence you could not read; a gap you
+     found and understood is a verdict you owe.
+5. **Cite or decline. Every time.** A `judgment` verdict without concrete
    `code_locations` you actually read is refused (400) — and would be dishonest
    even if it weren't. Never synthesize a citation to get a verdict through.
 

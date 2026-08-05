@@ -1,5 +1,6 @@
 # pane-state — decide whether a session's tmux pane says it is SAFE TO REAP.
-# Sourced by the sweep teardown path (switchyard PRD #299, crit:1d9368c361bb).
+# Sourced by the sweep teardown path (switchyard PRD #299, crit:1d9368c361bb —
+# the decision rule; crit:ca7a9d0965e8 — the fail-closed reads).
 #
 # THE DISCRIMINATOR IS PANE STATE, NEVER AGE
 #
@@ -181,24 +182,65 @@ sy_pane_classify() {
 
 # sy_pane_classify_session SESSION [SOCKET] — capture SESSION's pane and classify it.
 #
-# The thin tmux-facing wrapper. A capture-pane that exits non-zero (dead
-# session, unreachable server, wrong socket) yields `live` without consulting
-# its partial output: a session we cannot see is never one we kill.
+# The thin tmux-facing wrapper — and the ONLY entry point the sweep's teardown
+# calls (`lane_reap` in lane-ensure.sh). A weakness here is a weakness in the
+# live reaper no matter how the pure functions above behave, so the two
+# fail-closed properties are both enforced on THIS path rather than inherited.
+#
+# 1. A CAPTURE THAT ERRORS IS NEVER READ. capture-pane exiting non-zero (dead
+#    session, unreachable server, wrong socket) yields `live` without consulting
+#    whatever partial output it printed: a session we cannot see is never one we
+#    kill. The status is therefore consulted before the bytes are, and it is
+#    taken from an `if` condition so that a failed capture is a branch rather
+#    than an error that could trip a caller's `set -e`.
+#
+# 2. AN UNPARSEABLE CAPTURE STAYS UNPARSEABLE. The capture is spooled to a file
+#    and classified there, never round-tripped through a shell variable — the
+#    same reason sy_pane_classify spools stdin, except that here it was a live
+#    defect rather than a precaution.
+#
+#    COMMAND SUBSTITUTION STRIPS NUL BYTES. Reading the capture with
+#    `cap="$(tmux capture-pane …)"` deleted precisely the evidence the
+#    unparseable check exists to find: a garbage pane of
+#    `IDLE\0\0\0 exiting turn` reached the classifier as the clean text
+#    `IDLE exiting turn`, matched the reapable marker, and the reaper closed a
+#    session this criterion requires be left running. The classifier was never
+#    wrong — it was handed laundered input.
+#
+#    The defect was invisible from a developer shell: zsh is the one shell on
+#    this city that PRESERVES NULs through `$(…)`, so the wrapper answered
+#    `live` when probed interactively and `reapable` under the `#!/bin/sh` the
+#    pack scripts actually run — i.e. it behaved correctly everywhere except
+#    where it mattered. Both shells are covered in the self-test.
 sy_pane_classify_session() {
 	_syp_s="${1:?sy_pane_classify_session: SESSION is required}"
 	_syp_sock="${2:-}"
 
+	_syp_tmp="$(mktemp "${TMPDIR:-/tmp}/sy-pane-sess.XXXXXX" 2>/dev/null)" || {
+		printf 'live'
+		return 0
+	}
+
+	# Initialised to the FAILED value: any path that does not explicitly observe
+	# a successful capture leaves the wrapper answering `live`.
+	_syp_rc=1
 	if [ -n "$_syp_sock" ]; then
-		_syp_cap="$(tmux -L "$_syp_sock" capture-pane -p -t "$_syp_s" 2>/dev/null)" || {
-			printf 'live'
-			return 0
-		}
+		if tmux -L "$_syp_sock" capture-pane -p -t "$_syp_s" >"$_syp_tmp" 2>/dev/null; then
+			_syp_rc=0
+		fi
 	else
-		_syp_cap="$(tmux capture-pane -p -t "$_syp_s" 2>/dev/null)" || {
-			printf 'live'
-			return 0
-		}
+		if tmux capture-pane -p -t "$_syp_s" >"$_syp_tmp" 2>/dev/null; then
+			_syp_rc=0
+		fi
 	fi
 
-	printf '%s' "$_syp_cap" | sy_pane_classify
+	if [ "$_syp_rc" -ne 0 ]; then
+		rm -f "$_syp_tmp" 2>/dev/null
+		printf 'live'
+		return 0
+	fi
+
+	_syp_verdict="$(sy_pane_classify_file "$_syp_tmp")"
+	rm -f "$_syp_tmp" 2>/dev/null
+	printf '%s' "$_syp_verdict"
 }

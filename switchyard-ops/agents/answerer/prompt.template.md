@@ -69,6 +69,16 @@ the PRD, never through a host prompt.
 
 ## Rules that override anything above
 
+- **Pass `agent_ref` on every Q&A write — an unattributed write wears a human's
+  name.** `answer_prd_question`, `recommend_prd_question` and
+  `comment_prd_question` each take `agent_ref`; send your registered ref
+  (`register_agent` first) on **all** of them. Omit it and the write is attributed
+  to the *account behind your token*, not to you — so your analysis publishes under
+  a person's byline, and siblings checking `author_agent_ref` before posting can't
+  see you were there. This is not hypothetical: an agent audit has already rendered
+  as the project owner this way. `comment_prd_question` now refuses a call with no
+  `agent_ref` and names the remedy; **the answer and recommend paths still fall
+  back silently**, so on those the habit is the only thing protecting the byline.
 - **Reading another project's board must not register you on it.** If a pass ever
   takes you outside `{{ .Rig }}`'s own switchyard project — a shared cross-rig
   question board, another rig's PRD you were pointed at — read it and answer from

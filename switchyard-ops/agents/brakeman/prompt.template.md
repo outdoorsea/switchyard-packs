@@ -49,8 +49,10 @@ from finished work, and that is how delivered code goes missing. Publish, record
 reviewer. Do not merge it, and do not push to `{{ .DefaultBranch }}`. If you find
 yourself on `{{ .DefaultBranch }}`, stop and mail the mayor.
 
-**Tests failing is not "done".** Fix them. Do not publish a red branch, and do
-not disable a test to make it green.
+**Tests failing is not "done".** Fix them. Do not publish a red branch. How you
+get to a green one — and what you may not do to get there — is **TDD
+Discipline** below, which is the method behind this section's *a test per
+behavioral change*.
 
 **When you are stuck, say so.** Mail the mayor and mark yourself stuck rather
 than guessing. A wrong build costs more than a paused one.
@@ -58,6 +60,8 @@ than guessing. A wrong build costs more than a paused one.
 **When context fills, restart rather than degrade**: `{{ cmd }} runtime
 request-restart` blocks until the controller replaces you. Your worktree and
 your bead survive; only your context is discarded.
+
+{{ template "tdd-discipline" . }}
 
 ## You run UNATTENDED — never ask an interactive question
 

@@ -33,6 +33,15 @@
 # mayor within the cycle. A session already running, or a city with no
 # coordinators, is a legitimate quiet state: say nothing.
 #
+# THAT ALARM IS CLASSIFIED, NOT UNIFORM (switchyard PRD #299, crit:8ef84c79bb1f).
+# "Could not start" covered two faults with opposite remedies — a lane that is
+# not configured (permanent, needs a human) and a startup handshake that failed
+# under load (transient, fixes itself) — and shipped the first one's remedy with
+# both. It also fired for rigs whose session had in fact started, because the
+# identity readback is the part load breaks first. So the escalation now
+# re-probes before alarming and splits by cause; see the loop at the foot of
+# this file.
+#
 # EVERY CYCLE REAPS BEFORE IT SPAWNS (switchyard PRD #299, crit:aa1366b1a73b).
 # Spawning was only ever half a lifecycle: this order created one adhoc session
 # per rig per cycle and removed none, so the population grew until the host
@@ -420,7 +429,24 @@ lane_queue_depth() {
   printf '%s' "$_lqd_n"
 }
 
-rigs="$(lane_rigs)"
+# lane_agent_probe — did `gc agent list --json` ANSWER, as distinct from what it
+# answered? Echoes the agent count (possibly 0) when the probe returned a
+# parseable list, and nothing when the probe itself failed.
+#
+# lane_rigs cannot tell these apart: an older gc without `agent list --json` and
+# a healthy city that simply does not define this lane BOTH reduce to an empty
+# set there. They demand opposite verdicts below — "cannot tell" and
+# "definitively not configured" — so the distinction has to be drawn here, from
+# whether the probe spoke at all.
+lane_agent_probe() {
+  gc agent list --json 2>/dev/null \
+    | jq -r '(if type=="array" then . else (.agents // []) end) | length' 2>/dev/null \
+    | awk 'NF' | head -n1
+}
+agents_probe="$(lane_agent_probe)"
+
+defined_rigs="$(lane_rigs)"
+rigs="$defined_rigs"
 
 # Fall back to the old coordinator derivation when the agent probe yields nothing
 # (an older gc build, or one whose `agent list` lacks --json). Covering the rigs
@@ -428,10 +454,65 @@ rigs="$(lane_rigs)"
 # this whole change exists to end.
 [ -n "$rigs" ] || rigs="$(sy_coordinators | sed 's#/.*$##' | awk 'NF' | sort -u)"
 
+# lane_defined RIG — does RIG actually DEFINE this lane's agent?
+#
+# This is the whole difference between the two failure conditions below, and it
+# is answered STRUCTURALLY rather than by matching `gc session new`'s error
+# prose. Error text is the worst possible discriminator here: it is unversioned,
+# varies between gc builds, and is the one thing guaranteed to change without
+# notice — whereas "is the agent in `gc agent list`?" is the same published
+# contract lane_rigs already depends on.
+#
+# This can only ever answer NO for a rig reached through the sy_coordinators
+# FALLBACK above — a rig reached through the agent-derived set is defined by
+# construction, since that set IS the agents. So the unconfigured verdict means
+# something precise: we are sweeping a rig because it has a coordinator, and the
+# lane's own agent is not there.
+#
+# FAILS TOWARD "DEFINED", but on the PROBE rather than on the set. An empty
+# $defined_rigs is ambiguous — an older gc that cannot answer `agent list --json`
+# and a healthy city that simply does not define this lane both land there — so
+# the test is $agents_probe, which is empty only in the first case. Gating on the
+# emptiness of $defined_rigs instead would be worse than not classifying at all:
+# it makes "unconfigured" UNREACHABLE, because the fallback that produces those
+# rigs runs precisely when that set is empty.
+#
+# The direction matters. Calling a working lane "unconfigured" sends an operator
+# to fix an import that is already correct while the real fault goes unnamed —
+# and a wrong remedy is acted on, where a vague one is merely ignored.
+#
+# -F, because a rig name is data: `grep -qx` would read a metacharacter in it as
+# a pattern and match the wrong rig.
+lane_defined() {
+  [ -n "$agents_probe" ] || return 0
+  printf '%s\n' "$defined_rigs" | grep -qxF "$1"
+}
+
 # No coordinators is a legitimate state (all rigs suspended, or a fresh city).
 [ -n "$rigs" ] || exit 0
 
-failed=""
+# A spawn that hands back no identity is TWO different faults wearing one string,
+# and this sweep used to mail both under "could not start a <lane>" with a single
+# remedy attached ("check the agent is imported"). That remedy is right for one
+# of them and actively misleading for the other:
+#
+#   unconfigured — the rig does not define this lane's agent. Permanent, and no
+#                  amount of re-running fixes it; a human must import the agent.
+#   handshake    — the lane IS configured and the spawn still did not come up.
+#                  Transient and load-induced: under saturation a new session
+#                  misses its startup handshake, so the identity readback comes
+#                  back empty. The next cycle retries and usually succeeds.
+#
+# Conflating them is not a cosmetic problem on this particular sweep, because
+# this sweep MANUFACTURES the second condition (PRD #299): retained sessions
+# saturate the host, saturation breaks the handshake, and the broken handshake
+# is reported in words that point the reader at the rig's config. Every such
+# mail sent an operator to inspect an import that was fine, while the actual
+# cause — the leak this PRD fixes — went unnamed. Measured 2026-08-03: 14
+# concurrent adhoc sessions across two rigs, load excursion to 311 on a 16-core
+# box, and the alarm the whole time read "check the agent is imported".
+unconfigured=""
+handshake=""
 for rig in $rigs; do
   # REAP FIRST, THEN SPAWN — see the lifecycle note in the header. A cycle
   # removes the sessions it spawned before it decides whether to spawn another,
@@ -494,13 +575,50 @@ for rig in $rigs; do
 
   id="$(lane_spawn "$rig")"
   [ -n "$id" ] && continue        # spawned cleanly → done for this rig
-  failed="$failed $rig"           # spawn returned no identity → escalate
+
+  # NO IDENTITY IS NOT YET EVIDENCE THE LANE IS UNSTAFFED. `gc session new`
+  # regularly STARTS a session whose identity we then fail to read back — that is
+  # the same load coupling described above, and it is also what the two
+  # plain-text fallbacks in lane_spawn exist to paper over. So re-probe the
+  # roster before alarming: this is the check that keeps a rig with a live
+  # session out of BOTH mails.
+  #
+  # Without it the sweep's own alarms scale with load rather than with breakage,
+  # which is how an operator learns to ignore them.
+  n2="$(lane_live_count "$rig")"
+  case "$n2" in
+    ''|*[!0-9]*) continue ;;      # cannot confirm unstaffed → do not alarm (see below)
+    0) : ;;                       # confirmed still none → a real failure; classify it
+    *) continue ;;                # live after all → the spawn worked; say nothing
+  esac
+  # The unreadable case is silent for the SAME reason the first probe is: acting
+  # on an unknown is what produced the false alarms. It cannot hide a real
+  # outage, either — an unreadable roster also stops the next cycle spawning, so
+  # a persistently unreadable `gc session list` surfaces as loop-health's
+  # probe-down rather than being swallowed here.
+
+  if lane_defined "$rig"; then
+    handshake="$handshake $rig"
+  else
+    unconfigured="$unconfigured $rig"
+  fi
 done
 
-if [ -n "$failed" ]; then
+# Two conditions, two subject lines, two remedies. The subjects are distinct on
+# their own — a reader triaging an inbox must be able to tell which fault this is
+# without opening the mail, and mail threading groups on subject, so a recurring
+# handshake blip never buries a one-off config fault in the same thread.
+if [ -n "$unconfigured" ]; then
   gc mail send mayor \
-    -s "$AGENT-sweep: could not start a $SUBJECT" \
-    -m "\`gc session new <rig>/$QUALIFIED --no-attach\` returned no session identity for:$failed. The $SUBJECT lane for these rigs' switchyard projects has no session running. Check the $AGENT agent is imported into the rig and that switchyard-mcp is available in its session, then re-run or spawn one by hand." \
+    -s "$AGENT-sweep: $SUBJECT lane is not configured" \
+    -m "No \`$QUALIFIED\` agent is defined for:$unconfigured. These rigs were swept because they have a switchyard coordinator, but the $SUBJECT lane itself was never imported into them, so \`gc session new <rig>/$QUALIFIED --no-attach\` has nothing to start and no cycle can fix this on its own. Import the $AGENT agent into these rigs (or stop sweeping them), then re-run. This is a configuration fault, NOT the load-induced startup failure reported under \"$AGENT-sweep: $SUBJECT did not come up\"." \
+    >/dev/null 2>&1
+fi
+
+if [ -n "$handshake" ]; then
+  gc mail send mayor \
+    -s "$AGENT-sweep: $SUBJECT did not come up" \
+    -m "\`gc session new <rig>/$QUALIFIED --no-attach\` returned no session identity for:$handshake, and a re-probe confirmed no live session for them. The $AGENT agent IS defined for these rigs, so this is not a missing import — it is the startup handshake failing, which on this sweep is normally load: a saturated host cannot complete a session handshake inside the spawn call. Check host load and the live adhoc session count before changing any config; the next cycle retries on its own and usually succeeds. Only if it persists on an unloaded host is it worth spawning one by hand to see the real error." \
     >/dev/null 2>&1
 fi
 

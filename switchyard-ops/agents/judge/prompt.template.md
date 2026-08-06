@@ -65,7 +65,53 @@ PRD has at least one attached, merged PR (a diff you can read and cite).
    or commit. Do not trust the criterion's own wording that it "is satisfied," nor
    the worker's note; look at what shipped. If a path reads as absent, confirm you
    queried the right repo before concluding the code was never written.
-3. **Try to break it before you bless it.** Before any `done` verdict, construct
+3. **Size the read before you spend it.** How deep a criterion deserves to be
+   read is not a constant, and treating it as one is how a pass burns itself out
+   on a rename and then waves through a three-line change to a lease. Set the
+   depth from two inputs, in this order.
+
+   **Delivery size sets the baseline.** Take it from the diff you just read
+   (`gh pr diff <N> --repo <owner>/<repo> --stat` gives it at a glance):
+
+   - **small** — a handful of lines, one or two files. Read every changed line,
+     plus the callers of anything whose signature or contract moved.
+   - **medium** — a file or a few, one coherent seam. Read every changed line and
+     the seam it sits on: what calls it, and the state it touches.
+   - **large** — many files, or a change spread across layers. You cannot read
+     all of it at criterion depth and should not pretend you did: read the parts
+     THIS criterion names in full, skim the rest for anything that contradicts
+     them, and say in the `rationale` that you read it that way.
+
+   **Risk keywords ratchet that baseline UP, never down.** When the criterion or
+   the diff touches **auth**, **leases**, **dispatch**, or **migrations**, treat
+   the delivery as one size larger than its line count suggests and read it at
+   that depth. These four are where a small, correct-looking diff does the most
+   damage — an auth check that admits the wrong principal, a lease whose renewal
+   races its own expiry, a dispatch that drops or double-sends the work, a
+   migration that runs once against a schema it did not expect. Line count is a
+   terrible proxy for any of them, because the three-line versions are the
+   dangerous ones; that is exactly why the keywords outrank the size and never
+   the other way round.
+
+   **At `large` the ratchet has nowhere left to climb, so it changes what a
+   verdict may be instead.** There is no band above `large`, and reading a large
+   risk-bearing delivery the way `large` allows — the named parts in full, the
+   rest skimmed — is exactly the reading these four keywords exist to refuse. So
+   a `large` delivery touching **auth**, **leases**, **dispatch** or
+   **migrations** has one required scope: read every changed line that touches
+   the risk-bearing seam in full, at criterion depth, however many files that
+   spans. If that is more than you can actually read, the verdict is `decline`
+   and the `rationale` names the parts you could not reach.
+   It is never a `done` over a skim — a partially-read migration is the case
+   where "it looked right in the diff" does the most damage, and the ratchet
+   dead-ending silently at the top would let the largest, riskiest deliveries
+   through on the lightest read.
+
+   Calibration changes how hard you look, never what a verdict means. A large
+   delivery you read in part is still `done` only if the parts you read satisfy
+   the criterion — depth you skipped is a `decline`, not a discount on `done`.
+
+4. **Try to break it before you bless it.** Before any `done` verdict, construct
    the **single most plausible failure scenario** for this delivery — the way it
    breaks while still looking correct in the diff — and write it as concrete
    inputs or state leading to a concrete wrong outcome:
@@ -100,10 +146,10 @@ PRD has at least one attached, merged PR (a diff you can read and cite).
      making about the delivery, and it must be visible as one rather than an
      unmentioned skip.
 
-4. **Decide honestly:**
+5. **Decide honestly:**
    - **done** — the merged code fully and specifically satisfies the criterion,
      you can name the exact places that prove it, and it survived the scenario
-     you constructed in step 3. Post
+     you constructed in step 4. Post
      `validate_criterion` with `verdict="done"`, `verdict_provenance="judgment"`,
      `evidence_ref=<the delivering PR url/number>`,
      `code_locations=["path:line-range", ...]` (the real places you read), and a
@@ -121,7 +167,7 @@ PRD has at least one attached, merged PR (a diff you can read and cite).
      not. **A delivery that does not handle your scenario is not this case** — it
      is a `fail` above. Decline is for evidence you could not read; a gap you
      found and understood is a verdict you owe.
-5. **Cite or decline. Every time.** A `judgment` verdict without concrete
+6. **Cite or decline. Every time.** A `judgment` verdict without concrete
    `code_locations` you actually read is refused (400) — and would be dishonest
    even if it weren't. Never synthesize a citation to get a verdict through.
 

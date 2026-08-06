@@ -8,9 +8,38 @@ to, so the worker opens its own PR and then closes its own source anchor.
 
 Launch inputs:
 - input_convoy: {{convoy_id}}
+- requirements_path: {{requirements_path}} (REQUIRED — the spec the worker builds from)
 - context_path: {{context_path}} (empty means no extra context bundle)
 - implementation_target: {{implementation_target}}
 - summary_path: {{summary_path}} (empty means use the default item summary path)
+
+WHY `requirements_path` IS REQUIRED, and why the check lives on the var rather
+than in a step:
+
+  `gc sling` does NOT carry a bead's description into a formula's rendered
+  context. It prints a note saying so and then proceeds. If you miss that note,
+  the worker builds from the bead TITLE ALONE and nothing downstream reports a
+  problem — the PR opens, the anchor closes, and every switchyard surface reads
+  the criterion as delivered. That is not hypothetical: it dispatched two
+  duplicate lanes on 2026-08-05, and the second was caught only because a
+  prepare-worktree step happened to look sideways.
+
+  Before this was a declared var, `requirements_path` reached the worker by
+  CONVENTION — it worked only because the worker happens to read the workflow
+  root's metadata while resolving the source anchor. A contract that holds by
+  accident is not a contract.
+
+  `required = true` is enforced at LAUNCH: `gc sling` refuses and no workflow
+  root, worktree, or step bead is ever created. That placement is deliberate. A
+  guard implemented as a step would fail AFTER the lane exists, and retiring a
+  live lane is hand-work with a trap at each step — closing the root does not
+  stop its children, and closing the gate RELEASES the lane rather than retiring
+  it. Failing before anything is created is the only version of this guard that
+  does not manufacture the cleanup problem it is trying to prevent.
+
+  A spec-less criterion build is therefore impossible, not merely warned about.
+  `context_path` remains what its own description says: supplementary, never the
+  spec.
 
 WHY THIS FORMULA EXISTS AT ALL, rather than pointing brakeman at gascity's
 `do-work`:
@@ -41,8 +70,12 @@ extends = ["implementation-base"]
 target_required = true
 
 [vars]
+[vars.requirements_path]
+description = "Requirements artifact the worker builds from. No default: a bead's description is NOT carried into the rendered context, so without this the worker builds from the title alone."
+required = true
+
 [vars.context_path]
-description = "Optional context bundle path."
+description = "Optional context bundle path. Supplementary only — never the spec."
 default = ""
 
 [vars.implementation_target]

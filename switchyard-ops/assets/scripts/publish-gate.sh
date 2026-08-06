@@ -17,7 +17,27 @@
 #
 # Selector: CLOSED work beads that went through the worker lane and carry no
 # `pr_url` — identified by `work_dir`, with `gc.kind` empty to exclude the
-# workflow/step beads.
+# workflow root, `gc.step_ref` empty to exclude STEP beads, and superseded
+# anchors filtered out by close reason.
+#
+# TWO FALSE-POSITIVE CLASSES, both measured rather than reasoned about. Run
+# against switchyard-forge's 649 closed beads on 2026-08-05, the pre-fix
+# selector matched 4 beads and ALL FOUR were false positives — no true positive
+# to weigh against them. A check whose every alert is noise gets ignored, which
+# costs more than having no check.
+#
+#   (a) STEP BEADS. Three "Prepare item worktree" step beads matched. `gc.kind`
+#       did not exclude them: step beads do not CARRY `gc.kind` at all, so
+#       `(.metadata["gc.kind"] // "") == ""` is TRUE for them and they sail
+#       through. The discriminator that actually works is `gc.step_ref`, which
+#       every step bead carries (479 of 649 here) and no source anchor does. A
+#       step bead can never hold a `pr_url`, so it can never be a real hit.
+#
+#   (b) SUPERSEDED ANCHORS. sf-ebve matched. It correctly has no PR: it lost a
+#       lane arbitration and no code was ever written on it. A superseded anchor
+#       says so in its close reason and names the lane that replaced it, so the
+#       close reason is the evidence — not the absence of a PR. `close_reason`
+#       is present in `gc bd list --json`, verified before relying on it.
 #
 # `work_dir` is the discriminator on purpose, and picking it correctly matters.
 # The obvious choice — `gc.routed_to` ending in `.brakeman`, which is what the
@@ -70,7 +90,9 @@ for rig in $(gc rig list --json 2>/dev/null | jq -r '(if type=="array" then . el
     | select(.metadata != null)
     | select((.metadata["work_dir"] // "") != "")
     | select((.metadata["gc.kind"] // "") == "")
+    | select((.metadata["gc.step_ref"] // "") == "")
     | select((.metadata["pr_url"] // "") == "")
+    | select(((.close_reason // "") | ascii_downcase | test("supersed")) | not)
     | .id' 2>/dev/null)
 
   for id in $ids; do

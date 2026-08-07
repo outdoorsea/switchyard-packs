@@ -91,6 +91,29 @@ being left implicit:
   inherited unchanged and is listed as Pending below.
   Satisfies `crit:3ee33868b070`.
 
+- **Per-item implement override** (`crit:4ea0ccf29b82`).
+  `assets/workflows/do-work/implement.md` overrides the per-item implement
+  prompt through the asset path-shadow seam, so `gascity/formulas/do-work.formula.toml`
+  stays inherited and unforked — no `extends`, no step rename, no edit to the
+  pin. The directory is `do-work/`, not `build-base/`: `build-base`'s `implement`
+  stage is the DRAIN ORCHESTRATOR (`[steps.drain] formula = "do-work"`), so the
+  per-item work runs in `do-work`'s own `implement` step and a shadow written at
+  the base stage's path would rewrite the drain's prose while leaving every item
+  on gascity's generic instructions. The override binds the three things a
+  leased item owes the pool: **heartbeat** the claim (reusing `sy.pool.claimed_by`
+  verbatim, since the pool renews a lease only for the identity that took it, and
+  the factory holds one identity per bead because switchyard's WIP limit keys on
+  that string), **release on abandon** with a handoff — explicitly *not* complete,
+  because at per-item time the PR is open by construction and attaching an open PR
+  marks a PRD's criteria delivered and judge-reachable — and the **switchyard
+  quality gates** `go build ./...`, `go vet ./...`, `go test ./...` with
+  `templ generate` ordered ahead of them. Because a shadow *replaces* the base
+  file rather than merging with it, the override restates every inherited base
+  instruction (worktree resolution, the summary's required sections, the coverage
+  table, the front-matter and trace shapes, the validator loop); the
+  `implement-item-gate` CI job asserts each one is still present, so a rewrite
+  cannot silently install a weaker prompt at the stronger one's path.
+
 ### Pending
 
 Each row lands with the switchyard PRD #269 acceptance criterion named beside
@@ -101,7 +124,6 @@ it. Until then the claim is not made.
 | **Formula contract** — `sy-build-from-prd` declares `extends = ["build-base"]` and preserves the inherited anchor order, overriding steps under their base ids without renaming, skipping, or reordering an anchor | the `sy-build-from-prd` step criteria below, collectively |
 | **Convoy mapping** — `map-pool-to-convoy` claims the target PRD's pool beads under lease and mints a local convoy ordered by phase, skipping and reporting any bead already claimed elsewhere | `crit:f8594ebe6dba` |
 | **Publish contract** — the publish preflight override enforces PR-only publishing with the PRD and bead ids in the PR title | `crit:c8bee483d06e` |
-| **Per-item implement override** — lease heartbeat, release-on-abandon, and the switchyard quality gates including `templ generate` | `crit:4ea0ccf29b82` |
 | **Review and gap analysis** — verdict reports with per-criterion met/partial/missing traceability linked to delivering PRs | `crit:c20b14ed613e` |
 | **Completion summary** — the factory run posts a summary message to the source PRD's discussion | `crit:867e5f748573` |
 | **End-to-end evidence** — an interactive factory run on a small approved PRD lands reviewed PRs and completes its beads with PRs attached | `crit:707a711e70df` |
@@ -127,6 +149,19 @@ gh api "repos/gastownhall/gascity-packs/contents/gascity/pack.toml?ref=$PIN" --j
 
 # Mirror parity: the pre-publish guard names this pack.
 grep -n 'for pack in' .github/workflows/mirror-packs.yml
+
+# Per-item implement override (crit:4ea0ccf29b82): the override sits at the
+# shadow path, retains every inherited base instruction, and binds the heartbeat
+# identity, the release-on-abandon direction and all four quality gates inside
+# their own sections. 46 assertions.
+#
+# The path is part of the assertion twice over — see the In-force claim above.
+# The suite checks the path first, because a prompt one directory across (or
+# under build-base/ rather than do-work/) overrides nothing and fails silently.
+bash scripts/implement-item-gate.test.sh
+
+# The same suite runs in CI as the `implement-item-gate self-test` job.
+grep -n 'implement-item-gate' .github/workflows/ci.yml
 
 # Ledger anchors the upstream evidence chain (expect all five).
 for f in GC-METH-012 '## Compatibility Claims' '## Evidence Commands' \

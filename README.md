@@ -167,22 +167,89 @@ source = "/path/to/switchyard/packs/switchyard-ops"
 
 ## What `switchyard-ops` gives you
 
-Twelve mechanical orders, run directly by the controller as `exec` scripts (no
-dog pool needed — that is only for *formula* orders), under one invariant:
+The pack's mechanical orders, run directly by the controller as `exec` scripts
+(no dog pool needed — that is only for *formula* orders), under one invariant:
 **every silent failure becomes mail to the mayor within one order cycle.**
+
+This table is the full manifest — [`docs/LOOP.md`](docs/LOOP.md) carries only the
+subset that drives the loop itself and points here for the rest. Cadences are the
+pack defaults; a city overrides any of them in `city.toml`. Rows are in cadence
+order, so no count is written down: one drifted from the table it summarised for
+eight orders, and a number in prose is the part nobody updates.
 
 | Order | Every | Purpose |
 |---|---|---|
 | `pool-spawn` | 1m | Spawn one brakeman per rig with claimable pool demand and a free WIP slot, then direct-assign it the demand bead |
 | `publish-gate` | 5m | Report worker beads that reached *closed* carrying no pull request |
+| `pane-stall` | 10m | Report sessions idling with unsubmitted text on their input line — a stall no liveness check can see |
+| `answer-sweep` | 20m | Keep one answerer alive per rig whose open-question queue is non-empty; reaps its own finished sessions first |
+| `judge-sweep` | 30m | Keep one judging-validator alive per rig whose judgment queue is non-empty; reaps its own finished sessions first |
 | `loop-health` | 30m | Pinned coordinators alive; escalate when the status probe lies |
+| `pr-gate` | 30m | Report open item PRs aging past the review SLA, and integration PRs awaiting PRD acceptance |
 | `intake-sweep` | 4h | Nudge coordinators to triage their switchyard project |
-| `nightly-retro` | 24h | Daily reports + improvement candidates |
 | `stray-reaper` | 6h | Sessions rooted at a stale city path |
 | `config-drift` | 6h | Config-as-code guard (no-ops if the city isn't a git repo) |
-| `events-rotate` | 24h | Cap `.gc/events.jsonl` to a recent tail (gc ships no retention for it) |
 | `scratch-reaper` | 6h | Report/prune orphaned `gc`-scratch dirs left at the city root — drained sessions' `work_dir`s, gated so a live one is never removed |
+| `token-spike-watch` | 6h | Mail the mayor when a day's token usage exceeds the prior-day median by the configured factor (mechanical, no LLM) |
+| `security-scan` | 12h | Start one security-scout per rig on an independent model; it files findings and opens PRs for high-severity only |
 | `disk-watch` | 12h | Mail the mayor when a worktree/backup/`.gc`/event-log path crosses a size threshold |
+| `events-rotate` | 24h | Cap `.gc/events.jsonl` to a recent tail (gc ships no retention for it) |
+| `nightly-retro` | 24h | Daily reports + improvement candidates |
+| `refactor-scan` | 168h | Start one refactor-scout per rig weekly; it files evidence-ranked refactor proposals and writes no code |
+| `token-audit` | 168h | Start the city token auditor weekly; it attributes spend to agents/rigs and files findings |
+
+### The sweep lanes reap what they spawn
+
+`judge-sweep` and `answer-sweep` are the two *self-directed* lanes: their queue is
+switchyard's, not the gc bead ledger, so there is no demand bead to route and
+nothing to hand off — only a session to start. Both run the same script
+(`assets/scripts/lane-ensure.sh <agent> <subject>`), and a cycle is
+**reap-then-spawn**, in that order.
+
+The ordering is load-bearing in both directions. Reaping first means the
+"is one already running?" guard is answered by a roster that no longer holds
+finished sessions; spawning after means a lane whose only session was just reaped
+is refilled in the same cycle rather than left unowned until the next one.
+
+Four gates stand between a cycle and a spawn, and each fails in a chosen
+direction:
+
+| Gate | Withholds the spawn when | On an unreadable answer |
+|---|---|---|
+| rig has this lane's agent | the agent is not defined for the rig | falls back to the coordinator set |
+| rig not suspended | `gc rig suspend` names it | **spawns** — an unreadable `gc rig list` withholds nothing |
+| no live session already | one is already running | **does not spawn** — never stack a second |
+| lane queue non-empty | the queue is a confident `0` | **spawns** — only a confident zero withholds |
+
+A suspended rig is skipped for the *spawn* but still **reaped**: `gc rig suspend`
+tells the reconciler not to start that rig's agents, which is not a reason to
+retain one that has already finished. Skipping the rig outright would open a
+fresh retention hole in the change that exists to close them.
+
+**Reaping decides on tmux pane state, never age** (`assets/lib/pane-state.sh`).
+`IDLE` and `exiting turn` are reapable; `esc to interrupt` and `Running` are live,
+and live wins unconditionally — scrollback is history, not state, so a capture
+holding both markers is live. Every uncertainty resolves to *leave it running*:
+empty, unreadable, unparseable and simply unrecognised captures all classify
+`live`. The two errors are not symmetrical. Failing to reap costs one retained
+session until the next cycle; reaping a live agent destroys in-flight work
+irrecoverably. Age was tried and it killed live agents — it misclassified 4 of 12
+sessions, one of them holding an unread mayor escalation — because a long
+thinking turn emits nothing for minutes and looks exactly like an idle session.
+
+Only sessions **this sweep spawned** may be reaped: the predicate matches the
+literal `-adhoc-` segment gc puts in the name it gives a `lane_spawn` session, so
+named and pinned roles (witness, refinery, conductor, mayor, deacon, boot) can
+never match whatever their pane says. Note this is deliberately *stricter* than
+the guard that decides whether to spawn — that one matches as broadly as it can,
+because over-matching there only suppresses a spawn, while over-matching here
+destroys a running agent's work. Same lane, same names, two identity tests on
+purpose: do not unify them.
+
+> **Not yet shipped:** teardown does **not** release a criterion claim the reaped
+> session was holding (PRD #299 `crit:a6656bdb27fb`, still outstanding). A judge
+> reaped mid-validation leaves its claim staked until the lease expires on its
+> own. Reaping only closes the session.
 
 ### Published before closed
 

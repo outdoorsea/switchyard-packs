@@ -50,9 +50,11 @@ triage, not by task assignment.
 Layer 3 encodes the loop as timed orders — cooldown trigger → wisp → dog
 executes → escalate to mayor on anomaly. No agent exists merely to run a clock.
 
-| Order | Trigger | What the dog does |
+| Order | Trigger | What runs |
 |---|---|---|
 | `pool-spawn` | 1m | Spawn a brakeman for each rig with claimable pool demand and a free WIP slot, and direct-assign it the demand bead |
+| `answer-sweep` | 20m | Reap finished answerers, then keep one alive per rig whose open-question queue is non-empty |
+| `judge-sweep` | 30m | Reap finished judging-validators, then keep one alive per rig whose judgment queue is non-empty |
 | `loop-health` | 30m | Verify every pinned session has a live process **and** the status probe answers; wake what's down; escalate if the probe itself lies |
 | `intake-sweep` | 4h | Nudge each coordinator to triage its project's intake and dispatched epics |
 | `nightly-retro` | 24h | Nudge the retro agent to draft daily reports and propose improvements |
@@ -91,6 +93,29 @@ So `loop-health` checks liveness **against tmux**, not against the probe, and
 treats a lying probe as an escalation in its own right. It checks panes rather
 than `ps` argv, because resumed sessions restart with only `--session-id`: an
 argv grep marks every once-woken coordinator dead forever.
+
+## Why the sweep lanes reap before they spawn
+
+Observed failure: `judge-sweep` and `answer-sweep` spawned one adhoc session per
+rig per cycle and removed none, so the population grew until the host saturated —
+14 concurrent adhoc sessions across two rigs, load excursion to 311 on a 16-core
+box.
+
+The retention was never a cadence problem, which is why widening the intervals in
+`city.toml` did not stop it. It is a **state** problem: a finished adhoc session
+leaves the live-state set — it settles as `asleep` — so the "one already running?"
+guard correctly reported none live and correctly spawned a replacement, while the
+finished session stayed registered forever. The guard was not the leak; the
+missing half of the lifecycle was. Widening the interval only slows the accrual,
+it never bounds it.
+
+So a cycle is now **reap-then-spawn**. Reaping decides on tmux pane state and
+never age — for the same reason `loop-health` reads panes, and because an
+age-based guard misclassified 4 of 12 sessions and killed one holding an unread
+mayor escalation. A sweep reaps only what it spawned, and every uncertain read
+leaves the session running. Full rules, and the four gates that stand between a
+cycle and a spawn, are in
+[`../README.md`](../README.md#the-sweep-lanes-reap-what-they-spawn).
 
 ## Escalation discipline
 

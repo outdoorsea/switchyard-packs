@@ -14,7 +14,7 @@ that will satisfy it — this ledger never asserts evidence that does not exist.
 
 | Field | Value |
 | --- | --- |
-| Status | Skeleton — manifest + ledger only |
+| Status | Manifest, ledger, and `sy-build-from-prd`'s source stage (`fetch-prd` and the three anchors it feeds) |
 | Scope | switchyard's factory execution path for epic-scale approved PRDs |
 | Base contract | `gascity/REQUIREMENTS.md` (`gc.build-methodology-base.requirements.v1`) |
 | Base formula | `build-base` |
@@ -76,6 +76,20 @@ being left implicit:
 - **System of record.** This pack mints no work. It claims work switchyard
   already holds and hands the delivery record back, leaving switchyard — not the
   local bead ledger — authoritative for PRD progress and per-PRD spend.
+- **Requirements/plan artifacts.** `sy-build-from-prd` declares
+  `extends = ["build-base"]` and its `fetch-prd` stage renders `requirements.md`
+  and `implementation-plan.md` from an approved PRD's own sections, recording the
+  app-side approval on the workflow root as the `plan-review` evidence
+  (`gc.build.plan_review_evidence=switchyard-prd-approval`, alongside the PRD id,
+  version, approval time and approver account). The `requirements`, `plan`, and
+  `plan-review` anchors are overridden **under their base ids**, keeping their
+  base artifact schemas and their `build-artifact-valid.sh` gates, so a
+  PRD-derived artifact is validated by exactly the check the base would have
+  applied; only the authoring instruction changes, from *author* to *confirm*.
+  `fetch-prd` is an added stage between `prepare` and `requirements`, so no
+  anchor is renamed, skipped, or reordered. Every remaining anchor is still
+  inherited unchanged and is listed as Pending below.
+  Satisfies `crit:3ee33868b070`.
 
 ### Pending
 
@@ -85,7 +99,6 @@ it. Until then the claim is not made.
 | Claim | Lands with |
 | --- | --- |
 | **Formula contract** — `sy-build-from-prd` declares `extends = ["build-base"]` and preserves the inherited anchor order, overriding steps under their base ids without renaming, skipping, or reordering an anchor | the `sy-build-from-prd` step criteria below, collectively |
-| **Requirements/plan artifacts** — the `fetch-prd` step renders `requirements.md` and `implementation-plan.md` from an approved PRD's own sections and records the app-side approval as plan-review evidence | `crit:3ee33868b070` |
 | **Convoy mapping** — `map-pool-to-convoy` claims the target PRD's pool beads under lease and mints a local convoy ordered by phase, skipping and reporting any bead already claimed elsewhere | `crit:f8594ebe6dba` |
 | **Publish contract** — the publish preflight override enforces PR-only publishing with the PRD and bead ids in the PR title | `crit:c8bee483d06e` |
 | **Per-item implement override** — lease heartbeat, release-on-abandon, and the switchyard quality gates including `templ generate` | `crit:4ea0ccf29b82` |
@@ -121,6 +134,49 @@ for f in GC-METH-012 '## Compatibility Claims' '## Evidence Commands' \
   grep -q -- "$f" packs/switchyard-build/REQUIREMENTS.md \
     && echo "ok: $f" || echo "MISSING: $f"
 done
+
+# Formula contract: the formula extends the base rather than forking it.
+grep -n '^extends' packs/switchyard-build/formulas/sy-build-from-prd.formula.toml
+
+# No anchor is renamed, skipped or reordered: every step id this formula
+# declares is either a build-base anchor id or the added `fetch-prd` stage.
+# Expect NO output — any line printed is a step id that is neither.
+grep -o '^id = "[^"]*"' packs/switchyard-build/formulas/sy-build-from-prd.formula.toml \
+  | sed 's/^id = "//;s/"$//' \
+  | grep -vxE 'fetch-prd|requirements|plan|plan-review'
+
+# `fetch-prd` is INSERTED between `prepare` and the `requirements` anchor.
+grep -n -A2 '^id = "fetch-prd"' packs/switchyard-build/formulas/sy-build-from-prd.formula.toml
+
+# The overridden anchors keep their base artifact schemas and the base's
+# validation gate. Expect exactly 2 declared check paths — anchor the pattern
+# at `path =` so a prose mention of the script in a comment is not counted, and
+# expect `gc.build.requirements.v1` then `gc.build.plan.v1`.
+grep -c '^path = "\.gc/scripts/checks/build-artifact-valid\.sh"' \
+  packs/switchyard-build/formulas/sy-build-from-prd.formula.toml
+grep -o 'gc\.build\.\(requirements\|plan\)\.v1' packs/switchyard-build/formulas/sy-build-from-prd.formula.toml
+
+# Every description_file the formula names exists — the same contract that
+# gascity/tests/test_formula_assets.py enforces for in-tree packs.
+grep -o 'description_file = "[^"]*"' packs/switchyard-build/formulas/sy-build-from-prd.formula.toml \
+  | sed 's/^description_file = "//;s/"$//' \
+  | while read -r p; do
+      [ -f "packs/switchyard-build/formulas/$p" ] \
+        && echo "ok: $p" || echo "MISSING: $p"
+    done
+
+# The approval is recorded from the app, never fabricated, and an unapproved
+# PRD is refused rather than built.
+grep -n 'plan_review_evidence\|prd_approved_at\|prd_approver_account_id' \
+  packs/switchyard-build/assets/workflows/sy-build-from-prd/fetch-prd.md
+grep -n 'Never stamp an approval time yourself' \
+  packs/switchyard-build/assets/workflows/sy-build-from-prd/fetch-prd.md
+grep -n 'prd-not-approved' \
+  packs/switchyard-build/assets/workflows/sy-build-from-prd/fetch-prd.md
+
+# plan-review fails closed when the approval evidence is absent.
+grep -n 'plan-review-evidence-missing\|missing_approval_evidence' \
+  packs/switchyard-build/assets/workflows/sy-build-from-prd/plan-review.md
 
 # The pack is loadable and its imports resolve (requires the pin fetched).
 gc import check

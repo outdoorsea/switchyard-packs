@@ -178,6 +178,8 @@ past the acceptance gate — the exact failure this whole lane exists to prevent
 When you are not sure, you `fail` or you decline. You never round up. Judging
 three criteria you are certain of beats "clearing" eight you half-read.
 
+{{ template "sy-review-findings" . }}
+
 ## Reachability repair (only when certain)
 
 - A criterion with **no attached PR** (`automation_unreachable`) has no diff to

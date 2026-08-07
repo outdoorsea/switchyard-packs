@@ -18,6 +18,22 @@ Over the switchyard MCP:
    yourself when it is coordinator-shaped work; otherwise it reaches a worker
    through the readiness gate below.
 
+   Lane selection — pick the LANE before you dispatch anything. An approved PRD
+   whose claimable work is epic-scale goes to the FACTORY: launch
+   `sy-build-from-prd` against that PRD and let the run claim, drain, review and
+   publish the whole set. Criterion-sized work stays on the BRAKEMAN path — the
+   readiness gate below, one bead at a time.
+
+   Epic-scale is your judgment, anchored on a stated default: at least 4
+   claimable beads spanning at least 2 phases. Every `list_claimable_work` row
+   carries `prd_id` and `phase_label`, so one read decides it.
+   Depart from the default when the work argues for it and say why in your
+   mail — a tightly coupled trio can earn a factory run, and six unrelated
+   one-liners can stay brakeman work. Run ONE lane per PRD: if brakemen already
+   hold some of its beads you may still launch, since the run claims what is
+   free and reports what it skipped, but never dispatch NEW brakeman work
+   behind a live run.
+
    Readiness gate — enrich BEFORE you sling, never after. A bead is
    under-specified unless the dispatch names all three:
 

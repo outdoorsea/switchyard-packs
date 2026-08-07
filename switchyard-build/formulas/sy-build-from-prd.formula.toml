@@ -1,0 +1,110 @@
+description = """
+Drive an APPROVED switchyard PRD end to end as a Gas City factory run.
+
+This is switchyard's concrete implementation of `build-base`. It preserves the
+base's stage contract and artifact names; what it changes is where the early
+artifacts come from. A switchyard PRD has already been written, reviewed,
+questioned and approved in the app, so this formula does not re-author
+requirements or re-run a design review — it RENDERS the base workflow's
+artifacts from the PRD's own sections and carries the app-side approval forward
+as the plan-review evidence.
+
+Switchyard stays the system of record. This formula mints no work; it reads work
+switchyard already holds and hands the delivery record back.
+
+Launch inputs (in addition to the inherited build-base inputs):
+- prd_id: {{prd_id}}
+
+The artifact root convention for a factory run is `plans/prd-<prd_id>/build` in
+the rig (switchyard PRD #269, q181). Pass it explicitly as `artifact_root`; the
+inherited `prepare` stage records the normalized paths on the workflow root.
+
+STATUS: the `fetch-prd` stage and the three base anchors it feeds
+(`requirements`, `plan`, `plan-review`) land with switchyard PRD #269
+`crit:3ee33868b070`. Every other anchor — `decompose`, `implement`,
+`implement-same-session`, `summarize-implementation`, `review`, `finalize`,
+`publish` — is still INHERITED UNCHANGED from `build-base` and is overridden by
+its own sibling acceptance criterion. REQUIREMENTS.md records each such claim as
+PENDING until it lands, so the ledger never asserts evidence that does not exist.
+"""
+formula = "sy-build-from-prd"
+version = 1
+contract = "graph.v2"
+extends = ["build-base"]
+target_required = true
+
+[catalog]
+name = "sy-build-from-prd"
+description = "Run an approved switchyard PRD as a factory build: render its requirements and plan from the PRD itself, then drain, review and publish."
+
+# Matches build-base's vocabulary exactly. Narrowing the drain policy or the
+# interaction modes is a decision that belongs to the implement/drain criteria,
+# not to this stage — `prepare` validates a requested mode against whatever the
+# running formula declares here, so declaring the base vocabulary keeps every
+# mode the base supports launchable until a sibling criterion deliberately
+# restricts one.
+[metadata.gc.methodology]
+allowed_drain_policies = ["separate", "same-session"]
+implementation_strategy = "drain"
+interaction_modes = ["interactive", "autonomous", "headless"]
+review_modes = ["report", "agent", "interactive"]
+
+[vars]
+[vars.prd_id]
+description = "Numeric switchyard PRD id to build. The PRD must already be approved in the app."
+required = true
+
+# --- fetch-prd: the switchyard-specific source stage ------------------------
+# Inserted between `prepare` and the `requirements` anchor. It does not replace
+# an anchor and it does not reorder one; the inherited anchor sequence
+# (requirements -> plan -> plan-review -> decompose -> ...) is unchanged, and
+# `requirements` simply now waits on this stage instead of directly on
+# `prepare`.
+[[steps]]
+id = "fetch-prd"
+title = "Render build artifacts from the approved PRD"
+needs = ["prepare"]
+metadata = { "gc.run_target" = "gc.run-operator" }
+description_file = "../assets/workflows/sy-build-from-prd/fetch-prd.md"
+
+# --- Inherited anchors, overridden to CONSUME rather than re-author ---------
+# Each keeps its base id, its base artifact schema and its base validation gate,
+# so the artifact `fetch-prd` wrote is still checked by
+# `.gc/scripts/checks/build-artifact-valid.sh` against the same schema the base
+# would have applied. Only the authoring instruction changes.
+[[steps]]
+id = "requirements"
+title = "Confirm PRD-derived requirements"
+needs = ["fetch-prd"]
+metadata = { "gc.run_target" = "gc.requirements-planner", "gc.build.artifact_schema" = "gc.build.requirements.v1", "gc.build.artifact_path_keys" = "gc.build.requirements_path,gc.var.requirements_path" }
+description_file = "../assets/workflows/sy-build-from-prd/requirements.md"
+
+[steps.check]
+max_attempts = 3
+
+[steps.check.check]
+mode = "exec"
+path = ".gc/scripts/checks/build-artifact-valid.sh"
+timeout = "5m"
+
+[[steps]]
+id = "plan"
+title = "Confirm PRD-derived implementation plan"
+needs = ["requirements"]
+metadata = { "gc.run_target" = "gc.design-author", "gc.build.artifact_schema" = "gc.build.plan.v1", "gc.build.artifact_path_keys" = "gc.build.plan_path,gc.var.plan_path" }
+description_file = "../assets/workflows/sy-build-from-prd/plan.md"
+
+[steps.check]
+max_attempts = 3
+
+[steps.check.check]
+mode = "exec"
+path = ".gc/scripts/checks/build-artifact-valid.sh"
+timeout = "5m"
+
+[[steps]]
+id = "plan-review"
+title = "Record the app-side approval as plan-review evidence"
+needs = ["plan"]
+metadata = { "gc.run_target" = "gc.review-synthesizer" }
+description_file = "../assets/workflows/sy-build-from-prd/plan-review.md"

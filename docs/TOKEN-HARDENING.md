@@ -60,19 +60,27 @@ reloads shipping nothing. Cap it per rig:
   max_active_sessions = 2
 ```
 
-The same applies to `answerer` and `judge`, whose sweeps can otherwise fan out
-adhoc sessions faster than they drain.
+The same cap applies to `answerer` and `judge`, but now as a second line of
+defence rather than the main one. Their sweeps did once fan out adhoc sessions
+faster than they drained; since PRD 299 each keeps at most one session alive per
+rig and reaps its own finished ones at the top of every cycle, so the population
+is bounded by the sweep itself rather than by this cap. See
+[`../README.md`](../README.md#the-sweep-lanes-reap-what-they-spawn).
 
 ### 4. `intake-sweep` cadence
 `intake-sweep` (default `interval = "4h"`) nudges **every** coordinator into a
 triage pass — a forced LLM turn — even when its switchyard intake is empty (6
 no-op wakes/day/coordinator). The *right* fix is a mechanical emptiness gate
-(skip the nudge when the queue is empty). Today that read is available only over
-MCP, from inside a session — the shell-side `switchyard-gt` CLI has the token +
-switchyard.work API plumbing but is push-only (`patrol`), with no read
-subcommand. So until a `switchyard-gt intake --count`-style read exists (see
-"Future work"), the only shell-level lever is cadence: raise `intake-sweep.toml`'s
-`interval` to `8h`/`12h` for a low-throughput city.
+(skip the nudge when the queue is empty).
+
+That read is no longer MCP-only. `assets/lib/switchyard-api.sh` (PRD 299) gives an
+order an authenticated shell-side GET against switchyard — `sy_api_token`,
+`sy_api_projects`, `sy_project_for_rig`, `sy_api_get` — and `judge-sweep` /
+`answer-sweep` already gate their spawn on it, skipping a rig whose lane queue
+reads a confident zero. `intake-sweep` has not adopted it, so cadence remains its
+only lever *today*: raise `intake-sweep.toml`'s `interval` to `8h`/`12h` for a
+low-throughput city. But what is left is wiring an existing helper into one
+script, not the new CLI subcommand this section used to call for.
 
 ### 5. `mol-idea-to-plan` fan-out
 One run dispatches ~24 `mol-review-leg` sessions (6 PRD-review + 6 design + 3+3
@@ -142,12 +150,13 @@ Put in `city.toml` under `[patches]`. Repeat both blocks for each rig.
 
 ## Future work
 
-- **Mechanical intake gate for `intake-sweep`.** `switchyard-gt` already resolves
-  the token and speaks the `switchyard.work` API, so
-  the missing piece is small: a read endpoint + a `switchyard-gt intake --count`
-  (or `--json`) subcommand. With it, the sweep skips the nudge for any coordinator
-  whose queue is empty — turning a fixed 6×/day drip into "wake only when there is
-  real triage." (Spans the switchyard cloud + the `gt` plugin, not these packs.)
+- **Mechanical intake gate for `intake-sweep`.** Mostly unblocked now: the
+  shell-side read shipped with PRD 299 as `assets/lib/switchyard-api.sh`, and the
+  two sweep lanes already use it to skip a drained queue. What is left is pointing
+  `intake-sweep.sh` at the same helper against an intake-count read, so the sweep
+  skips the nudge for any coordinator whose queue is empty — turning a fixed
+  6×/day drip into "wake only when there is real triage." No new `switchyard-gt`
+  subcommand is needed for the sweep side.
 - **Re-home the supervision gastown used to provide.** Dropping `witness`/`deacon`
   removed a real cost centre and a real safety net. If stuck beads or expired
   leases start going unnoticed, the cheap answer is an `exec` order that mails on

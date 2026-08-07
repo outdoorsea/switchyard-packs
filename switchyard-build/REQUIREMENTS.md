@@ -44,8 +44,11 @@ being left implicit:
 
 1. `gascity/tests/test_derived_pack_compatibility.py` does **not** cover this
    pack. Its `DERIVED_PACKS` list is the four in-tree packs, and it reads them
-   from the gascity-packs checkout. The claims below are therefore verified by
-   the Evidence Commands in this ledger, not by that suite.
+   from the gascity-packs checkout. The claims below are therefore verified on
+   the switchyard side: `scripts/check-derived-pack-compat.sh` is this repo's
+   counterpart to that suite and runs in CI as the **`derived-pack
+   compatibility`** job, and the Evidence Commands below cover what a static
+   gate cannot reach (see the split under *Verified in CI* next).
 2. The base moves only on an explicit `gc import upgrade`. After any upgrade,
    re-run the Evidence Commands and reconcile every claim the new base
    invalidates, in the same change that moves the pin.
@@ -114,6 +117,35 @@ being left implicit:
   `implement-item-gate` CI job asserts each one is still present, so a rewrite
   cannot silently install a weaker prompt at the stronger one's path.
 
+- **Compatibility test in CI.** `scripts/check-derived-pack-compat.sh` enforces
+  the statically checkable claims above on every push and pull request, as the
+  `derived-pack compatibility` job in `.github/workflows/ci.yml`. It is
+  self-tested against hermetic fixtures by
+  `scripts/check-derived-pack-compat.test.sh`, which runs first in the same job
+  — a gate nothing exercises is indistinguishable from a gate that passes
+  everything.
+
+### Verified in CI, and what is not
+
+The gate covers the claims that can be checked from this repository alone:
+the binding is named `gc` and is the only import, the base is pinned to a
+40-hex commit rather than a moving ref, the source is the pinned remote and
+never `../gascity`, every pin this ledger asserts equals the pin the manifest
+holds, the anchors below are all present, every `crit:` label is well-formed,
+and the mirror workflow still guards this pack by name.
+
+Three Evidence Commands are deliberately **left out** of it: the two `gh api`
+calls and `gc import check` need the network, credentials, or the `gc` binary.
+A gate that skips itself when one of those is unavailable would report success
+for a check that never ran, which is worse than no gate at all — CI would go
+green and be read as "compatible". Those three stay manual, run at
+pin-upgrade time.
+
+Pin coherence is the claim most likely to be the one that fires. The pin is
+written in three places — the manifest's `[imports.gc]`, the `Pinned base` row
+above, and the `PIN=` line below — and an upgrade moves the first, leaving this
+ledger vouching for a commit the pack no longer imports.
+
 ### Pending
 
 Each row lands with the switchyard PRD #269 acceptance criterion named beside
@@ -132,7 +164,17 @@ it. Until then the claim is not made.
 
 Run these from the switchyard repository root.
 
+The first command is the whole statically checkable set at once; the rest are
+either what it checks (kept here because this ledger should stay readable
+without reading the gate) or the three it deliberately cannot reach.
+
 ```sh
+# Everything checkable offline, in one run — the same gate CI runs.
+bash scripts/check-derived-pack-compat.sh
+
+# ...and the gate's own self-test, which CI runs first.
+bash scripts/check-derived-pack-compat.test.sh
+
 # Import contract: the pack binds the base as `gc`, pinned.
 sed -n '/^\[pack\]/,$p' packs/switchyard-build/pack.toml
 

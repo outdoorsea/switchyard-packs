@@ -1,0 +1,37 @@
+# Report a factory run that has stopped making progress.
+#
+# The fourth member of the silent-stall family, after publish-gate (work closed
+# with no PR), pane-stall (a session parked at its input line) and pr-gate (a PR
+# opened and never merged). Same shape as all three: a condition every existing
+# health surface reads as fine.
+#
+# THE FAILURE THIS GUARDS
+#
+# `sy-build-from-prd` (switchyard-build) drains an approved PRD's pool beads
+# through a convoy titled `prd-<id>-build`. A factory run is long — hours — and
+# nothing about it is supervised: the convoy stays open because open is its
+# normal state, the sessions stay `active` because they are, `gc status` is
+# clean, and orders keep firing ok:true. A run that stops advancing is therefore
+# indistinguishable from a run that is simply still going, and stays that way
+# until a human happens to look. The PRD's own done_means names this directly:
+# "a deliberately wedged run produces mayor mail within one build-watch cycle."
+#
+# DETECTOR ONLY. It never releases a lease, reopens a bead, closes a convoy or
+# respawns a worker. Every one of those is destructive on a run that is merely
+# slow, and this order cannot tell slow from wedged with enough confidence to
+# act — only with enough to report. Recovery is a human's call.
+#
+# Cadence is 10m, matching pane-stall: nothing is progressing while the
+# condition holds, unlike an unmerged PR (pr-gate, 30m), which is durable and
+# merely waiting. The script reports each distinct stall episode ONCE, so this
+# interval sets detection latency, not mail volume — which is what lets the
+# criterion's "within one order cycle" be true without the order becoming a nag.
+#
+# The stall threshold itself is env-tunable via roster.conf (BUILD_WATCH_*); see
+# the header of assets/scripts/build-watch.sh for the wedge predicate and why it
+# is drawn where it is.
+[order]
+description = "Mail the mayor when a switchyard-build factory run stops making progress"
+trigger = "cooldown"
+interval = "10m"
+exec = "$PACK_DIR/assets/scripts/build-watch.sh"

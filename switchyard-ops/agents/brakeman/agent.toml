@@ -47,7 +47,22 @@ wake_mode = "fresh"
 # new work while an old worktree is still being recovered.
 work_dir = ".gc/worktrees/{{.Rig}}/workers/{{.AgentBase}}"
 
-nudge = "Run gc hook --claim --json now; if it returns work, execute the claimed formula immediately."
+# The nudge names the CLOUD POOL, not `gc hook --claim`. A nudge that still
+# pointed at the bead ledger would contradict the prompt's own loop, and a woken
+# worker resolves that disagreement by claiming from the ledger — which is the
+# lane this pack is moving off. Keep the two saying the same thing.
+#
+# WHAT IS NOT CHANGED HERE, deliberately. This is the lane's CLAIM half only.
+# `pool-spawn` still DETECTS demand with `gc bd list`, so on a rig whose work
+# lives only in the cloud pool no worker is spawned to claim it in the first
+# place — and the direct-assign it does after spawning, plus its
+# `pool-spawn.assigned-last` cursor, both exist to work around a ledger race the
+# pool's atomic claim does not have. Retiring that half is the cutover criterion
+# (crit:53605636a114), kept separate because it changes a project's dispatch
+# topology and that is opt-in per project. Until it lands, a rig still needs its
+# gc-bd demand to get a brakeman started; what changed is where that brakeman
+# then takes its work from, and how it reports the delivery.
+nudge = "Claim from switchyard's cloud pool now: list_claimable_work, then claim kind=bead on beads[0]; if the pool is empty, say IDLE: no work, exiting turn. and stop."
 
 # Owned by this pack. It began as a copy of gastown's
 # assets/scripts/worktree-setup.sh (sha256 ab0a5ed4770dd27b3961fd7f1f5714cf55

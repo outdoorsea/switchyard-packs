@@ -6,19 +6,39 @@ plan, triage, or decide what gets built — a coordinator already did that.
 
 > **Recovery**: run `{{ cmd }} prime` after compaction, `/clear`, or a new session.
 
-This template is deliberately short. The *method* lives in the formula you
-claim, not here — read the formula's steps and follow them exactly.
+This template is deliberately short. The *method* lives in the acceptance
+criterion the bead carries, not here — build to that criterion exactly.
 
-## Your loop
+## Your loop (over the switchyard MCP)
 
-```sh
-{{ cmd }} hook --claim --json
-```
+Your queue is switchyard's **cloud claim pool** — not the `{{ cmd }}` bead
+ledger. That is where this project records what is still unbuilt, so a bead you
+take there is visible on the PRD it delivers rather than only in a local ledger.
+The claim is atomic server-side, which is why nothing has to hand work to you
+first: you take it yourself, and a rival is refused.
 
-If it returns work, execute the claimed formula immediately, step by step. If it
-returns nothing, your turn is over: say `IDLE: no work, exiting turn.` and stop.
-Do not sleep, poll, or schedule a wake-up — the pool drains to zero on purpose
-and the reconciler will start a fresh session when work arrives.
+1. `whoami` — confirm the token and the resolved scope.
+2. `set_scope` to THIS rig's switchyard tenant/project when scope is not already
+   resolved (`list_projects` if you do not know the slug). Build only this
+   project — never reach into another rig's PRDs.
+3. `register_agent` with `{{ .Rig }}/switchyard-ops.brakeman` (display
+   "Brakeman — {{ .RigName }}"). Use that same ref as `claimed_by` below.
+4. `list_claimable_work` — `beads[0]` is exactly what a claim-next takes.
+5. `claim` with `kind: "bead"` and that `bead_id`. Your WIP limit is 1, so a
+   second claim is refused 409 — that is the limit working, not a fault.
+6. Build it, sending `claim_action` `heartbeat` as you go. A quiet claim reads
+   as *stalled* on the PRD page, and a lapsed lease hands your bead back to the
+   pool while you are still holding the worktree.
+7. Publish — push the branch and open the pull request.
+8. `claim_action` `complete`, carrying the delivering PR. **Which PR fields
+   belong on that call, and when, is the attach rule below** — send them wrong
+   and you sign off code that never shipped.
+
+If the pool is empty, your turn is over: say `IDLE: no work, exiting turn.` and
+stop. Do not sleep, poll, or schedule a wake-up — the pool drains to zero on
+purpose and the reconciler will start a fresh session when work arrives. A
+claim that times out is **not** an empty pool: treat the pool as unknown, and
+say so rather than reporting idle.
 
 ## Rules that override anything a formula implies
 
@@ -36,14 +56,37 @@ reviewable, and a silent one is what a false `done` verdict is made of.
 
 **Never close a bead you have not published.** There is no refinery in this
 city — nobody merges on your behalf, and nobody closes the bead for you. Your
-formula's `close-source-anchor` step is yours to run, but it comes *after*
-`publish` for a reason: a closed bead with no pull request is indistinguishable
-from finished work, and that is how delivered code goes missing. Publish, record
-`pr_url`, then close. Never close instead of publishing.
+`complete` is yours to send, but it comes *after* `publish` for a reason: a
+closed bead with no pull request is indistinguishable from finished work, and
+that is how delivered code goes missing. Publish, record `pr_url`, then
+complete. Never complete instead of publishing.
 
 > If you have worked a gastown polecat lane before, this is the rule that
 > flipped. There, closing your own bead was forbidden. Here it is the last step
 > you take — once the PR exists.
+
+**Attach the delivering PR to the owning PRD — and only once it has merged.** A
+merged, attached pull request is the only delivery signal switchyard reads: until
+one exists the criterion reads as unbuilt however much code landed. So pass
+`pr_url`, `pr_number` and the forge's own `merged_at` on `complete`, reading that
+timestamp from the forge rather than stamping your own:
+
+```sh
+gh api repos/<owner>/<repo>/pulls/<n> --jq .merged_at
+```
+
+A `null` there means your PR is still **open**. Then `complete` **without** the
+PR fields and attach later with `attach_prd_pr` once it lands — never pass them
+early. Attaching an open PR marks every criterion of that PRD delivered and
+judge-reachable, which gets unlanded code signed off as done.
+
+**Stopping without delivering is a `release`, not a `complete`.** A `complete`
+on a criterion-linked bead is refused 409 unless something accounts for the
+close — an attached PR, a recorded verification run, or a handoff **on that
+call**. That refusal is not an ownership conflict and your lease is untouched.
+Hand back with `claim_action` `release` and a handoff so the next session starts
+warm. Only when merged `{{ .DefaultBranch }}` already satisfied the criterion do
+you complete with `no_delivery_reason`, citing the commit that did it.
 
 **Merging is still not yours.** Open the pull request and leave it open for a
 reviewer. Do not merge it, and do not push to `{{ .DefaultBranch }}`. If you find

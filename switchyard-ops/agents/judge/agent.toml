@@ -110,7 +110,7 @@ wake_mode = "fresh"
 # <sha>:<path>`, neither of which touches a working tree.
 work_dir = ".gc/worktrees/{{.Rig}}/judge/{{.AgentBase}}"
 
-nudge = "Run one judging pass now: read your prompt, take one target PRD, judge what of its criteria you can with cited verdicts, report the pass, then exit."
+nudge = "Run one judging pass now: read your prompt, take one target PRD, judge what of its criteria you can with cited verdicts, advance to the next PRD only if you declined every one of them, report the pass, then exit."
 
 idle_timeout = "30m"
 

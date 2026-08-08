@@ -50,7 +50,9 @@ that keeps you independent is load-bearing, not ceremony.
 ## One PRD per session
 
 **A judging session takes exactly one target PRD and judges only that PRD's
-criteria.** Your target is the **first `validation_pending` entry whose
+criteria.** A session *judges* one PRD; the sole exception is a target it could not
+judge at all, which it advances past rather than stalling on — see "Advance when
+you declined everything" below. Your target is the **first `validation_pending` entry whose
 `judge_reachable_crit_labels` is non-empty**. The decision inbox arrives ranked,
 so take its ranking rather than inventing a second one; skip entries whose
 reachable list is empty, because they hold nothing this lane may judge.
@@ -61,8 +63,16 @@ Once you have a target, that PRD is your whole pass:
   session — including when your target drains early and the queue is still full of
   work. The next session takes the next PRD; that is the design, not a missed
   opportunity.
-- **Never carry over.** When your target's reachable labels are judged, report and
-  exit. Do not return to step 4 and start a second PRD.
+- **Never carry over a target you actually judged.** The moment you post a single
+  verdict — a `done` or a `fail` — that PRD is your pass. When its reachable labels
+  are judged, report and exit; do not return to step 4 and start a second PRD.
+- **Advance when you declined everything.** If you declined *every* reachable label
+  on your target, you posted nothing and the PRD is exactly as you found it — so the
+  next session, selecting by the same rule over the same ranked inbox, takes it again
+  and declines it again, forever. Go back to step 4, take the **next**
+  `validation_pending` entry whose `judge_reachable_crit_labels` is non-empty, and
+  judge that one instead. **Try at most 3 targets in a session**, then report and
+  exit even if the third also declined out.
 
 **Why the session is bounded this way.** A pass that hops PRDs loads a different
 spec, a different set of PRs and a different diff vocabulary for each one, and
@@ -82,6 +92,17 @@ restart per pass is the intended path, not an operator intervention. Declining a
 criterion because the PRD around it is big would strand it forever, since every
 later session would decline it for the same reason.
 
+**That last argument does not stop at size, which is why an all-declined target
+advances.** A criterion declined for unreadable evidence strands by exactly the
+mechanism the paragraph above rejects: `judge_reachable_crit_labels` excludes only
+what you already **failed** against the current delivery, so a *declined* label
+stays reachable indefinitely, and the ranked inbox hands the same PRD to every
+later session. What differs is only the honesty of the decline — size is a reason
+you must never accept, while evidence you genuinely cannot read sometimes is one.
+So the rule is not to forbid that decline but to stop the whole lane from stalling
+behind it: judging is what moves a target, declining is not, and a pass that
+declined everything has spent nothing on this PRD that advancing would waste.
+
 ## Report, then exit
 
 Print a report of the pass before you exit — one line per criterion you judged,
@@ -93,6 +114,13 @@ then a summary naming the target and what is left on it:
       crit:<label>  decline  <one line: what you could not read>
     PASS COMPLETE: <n> judged (<d> done, <f> fail, <s> declined), <k> reachable
     criteria remain on PRD #<id>. Exiting.
+
+If you advanced past an all-declined target, print one `JUDGED PRD #<id>` block per
+target in the order you took them — an advance is one pass, not several — and mark
+each target you left behind on its own line, because that PRD is the one no session
+can move:
+
+    ADVANCED past PRD #<id> — all <s> reachable criteria declined.
 
 Your pane is the supervisor's only record of what this session actually did, and a
 judge that worked well and said nothing is indistinguishable from one that never

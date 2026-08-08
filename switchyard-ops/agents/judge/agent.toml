@@ -95,6 +95,13 @@ scope = "rig"
 # fresh: each judging pass starts clean. A judgment is a self-contained read of a
 # criterion + its diff; resuming a finished pass replays nothing useful and burns
 # the window.
+#
+# This is load-bearing for the one-PRD-per-session bound (switchyard PRD #329 P1).
+# A session takes a single target PRD, judges as much of it as it can, reports
+# and exits; the next session resumes that PRD where this one stopped. That only
+# drains the backlog because `fresh` hands each pass a clean budget — under
+# `resume` the second pass would inherit the first one's spent context and meet
+# the same "too large" cliff the bound exists to remove.
 wake_mode = "fresh"
 
 # The judge is READ-ONLY except for the verdict it posts over MCP. It never cuts a
@@ -103,7 +110,7 @@ wake_mode = "fresh"
 # <sha>:<path>`, neither of which touches a working tree.
 work_dir = ".gc/worktrees/{{.Rig}}/judge/{{.AgentBase}}"
 
-nudge = "Run one judging pass now: read your prompt, drain what judge-reachable criteria you can with cited verdicts, then exit."
+nudge = "Run one judging pass now: read your prompt, take one target PRD, judge what of its criteria you can with cited verdicts, report the pass, then exit."
 
 idle_timeout = "30m"
 

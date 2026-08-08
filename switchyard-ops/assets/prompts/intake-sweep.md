@@ -11,8 +11,8 @@ Over the switchyard MCP:
    `contract_coverage` rollup to see the validation picture. Use it to decide
    where this pass is best spent, then drill in with the tools below.
 2. `list_intake_queue` — for anything untriaged: `recommend_idea`, or
-   `claim_issue` + `categorize_issue`. Recommend, don't decide: routing an idea
-   to a pitch is a human's call.
+   `claim(kind='issue')` + `claim_action(kind='issue', action='categorize')`.
+   Recommend, don't decide: routing an idea to a pitch is a human's call.
 3. `list_dispatched_epics` — set priorities on any epic that has none.
 4. `list_claimable_work` — if your workers are idle, claim the top bead
    yourself when it is coordinator-shaped work; otherwise it reaches a worker

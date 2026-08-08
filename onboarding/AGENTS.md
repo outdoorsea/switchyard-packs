@@ -32,8 +32,8 @@ and let completion flow back. Anything else forks the truth.
 
 ### 1 · Triage intake
 - `list_intake_queue` — for anything untriaged: `recommend_idea`, or
-  `claim_issue` + `categorize_issue`. **Recommend, don't decide** — routing an
-  idea to a pitch is a human's call.
+  `claim(kind='issue')` + `claim_action(kind='issue', action='categorize')`.
+  **Recommend, don't decide** — routing an idea to a pitch is a human's call.
 - `list_dispatched_epics` — set priorities on any epic that has none.
 - Answer open PRD questions you can settle from the code or history
   (`list_prd_questions` → `answer_prd_question`); leave the rest for humans.
@@ -50,11 +50,15 @@ decision **on the PRD** where the team can see and answer it. Do **not** ask
 out-of-band through a host prompt or modal.
 
 ### 3 · Deliver — bead → shipped
-- `list_claimable_work` → `claim_bead` (takes a lease).
-- Long-running work: renew the lease with `heartbeat_bead` so it doesn't expire
-  mid-build.
-- Do the work in your repo. When it lands: `complete_bead`.
-- Stuck or wrong-shaped? `release_bead` so someone else can take it.
+One claim protocol covers every domain: `claim` takes the lease, `claim_action`
+drives it, and `kind` says what you are holding (`bead`, `criterion`, `issue`).
+- `list_claimable_work` → `claim(kind='bead')` (takes a lease).
+- Long-running work: renew the lease with
+  `claim_action(kind='bead', action='heartbeat')` so it doesn't expire mid-build.
+- Do the work in your repo. When it lands:
+  `claim_action(kind='bead', action='complete')`.
+- Stuck or wrong-shaped? `claim_action(kind='bead', action='release')` so someone
+  else can take it.
 
 ### 4 · Validate — separation of duties
 - `validate_criterion` records the acceptance-criterion verdict — and must be
@@ -80,9 +84,9 @@ out-of-band through a host prompt or modal.
 | Phase | Tools |
 |---|---|
 | Orient | `whoami`, `list_projects`, `set_scope`, `get_project_briefing` |
-| Triage | `list_intake_queue`, `recommend_idea`, `claim_issue`, `categorize_issue`, `list_dispatched_epics`, `list_prd_questions`, `answer_prd_question` |
+| Triage | `list_intake_queue`, `recommend_idea`, `claim`, `claim_action`, `list_dispatched_epics`, `list_prd_questions`, `answer_prd_question` |
 | Author | `create_blueprint`, `draft_prd`, `set_prd_phases`, `ask_prd_question`, `recommend_prd_question`, `approve_prd`, `create_beads_from_prd` |
-| Deliver | `list_claimable_work`, `claim_bead`, `heartbeat_bead`, `complete_bead`, `release_bead` |
+| Deliver | `list_claimable_work`, `claim`, `claim_action` |
 | Validate | `list_criteria`, `validate_criterion`, `link_bead_to_criterion` |
 | Report | `draft_daily_report`, `create_project_report`, `get_roadmap` |
 

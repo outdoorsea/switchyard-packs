@@ -34,7 +34,7 @@ mcp_servers:
     tools:
       include: [whoami, list_projects, set_scope, get_project_briefing,
                 list_intake_queue, recommend_idea, list_claimable_work,
-                claim_bead, heartbeat_bead, complete_bead,
+                claim, claim_action,
                 list_criteria, validate_criterion]
 ```
 

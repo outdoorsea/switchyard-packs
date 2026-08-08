@@ -19,8 +19,18 @@
 # is a worker starts within an order cycle), so this runs at the tight end of
 # the PRD's 1-2 minute window, like publish-gate's 5m cadence rather than the 6h
 # reapers.
+# TWO DISPATCH TOPOLOGIES (switchyard PRD #327, crit:53605636a114). Everything
+# above describes the local-`bd` ledger, which is still the default. A rig named in
+# roster.conf's CLOUD_POOL_RIGS instead takes its demand from switchyard's managed
+# CLOUD claim pool and dispatches with no `bd` read, no direct-assign and no cursor
+# file: that claim is atomic and server-side, so the spawned brakeman claims for
+# itself and there is no hand-off to race, guard or remember. The cutover is opt-in
+# per rig, and a city that sets nothing behaves exactly as it did before. The cloud
+# probe fails CLOSED — an unreadable pool spawns nothing and mails, because there it
+# is the only evidence of demand there is.
+
 [order]
-description = "Spawn one brakeman per non-suspended rig with claimable pool demand and a free WIP slot, then direct-assign it the demand bead (open, unassigned, real work)"
+description = "Spawn one brakeman per non-suspended rig with claimable demand and a free WIP slot — from the rig's bd ledger (direct-assigning the demand bead) or, for a rig cut over via CLOUD_POOL_RIGS, from switchyard's cloud claim pool (no bd, no assign, no cursor)"
 trigger = "cooldown"
 interval = "1m"
 exec = "$PACK_DIR/assets/scripts/pool-spawn.sh"

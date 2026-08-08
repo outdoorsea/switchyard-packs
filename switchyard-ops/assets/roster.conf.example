@@ -8,7 +8,9 @@
 # roster.conf one directory up (<city>/.gc/runtime/switchyard-ops/) is read by
 # nothing. To confirm you picked the right directory, look for the marker files
 # the orders themselves write — nightly-retro.unconfigured, pool-spawn.assigned-
-# last, loop-health.missing-last. roster.conf belongs beside those.
+# last, loop-health.missing-last. roster.conf belongs beside those. (A city whose
+# every rig is cut over to CLOUD_POOL_RIGS below never writes pool-spawn.assigned-
+# last at all — cloud dispatch keeps no cursor — so use one of the other two.)
 #
 # Installing it anywhere else fails SILENTLY and identically to not installing
 # it at all: sy_load_conf sources nothing, the roster comes back empty, and
@@ -59,6 +61,42 @@
 # exactly the coordinator set: pinned, long-lived, one per rig.
 #
 # COORDINATORS="<rig>/<coordinator> <rig>/<coordinator>"
+
+# ---------------------------------------------------------------------------
+# CLOUD_POOL_RIGS — the rigs cut over to switchyard's CLOUD claim pool.
+#
+# Unset (the default) means every rig dispatches from its local `bd` ledger, the
+# topology pool-spawn was written for. Naming a rig here switches THAT RIG ONLY to
+# switchyard's managed claim pool (docs/dispatch-topologies.md, topology A), which
+# is a different shape of dispatch rather than a tuning knob:
+#
+#   - Demand is read from the project's cloud pool over the switchyard API, not
+#     from `gc bd list`. The rig's `bd` ledger is not consulted at all.
+#   - NOTHING IS DIRECT-ASSIGNED. The cloud claim is atomic and server-side — the
+#     spawned brakeman claims for itself over MCP and a second claimant is refused
+#     — so there is no hand-off to race, to guard, or to remember. The
+#     `pool-spawn.assigned-last` cursor file is not written for a cut-over rig.
+#   - A rig still spawns at most one brakeman per cycle and only while its pool is
+#     below max_active_sessions. The WIP bound is unchanged.
+#
+# WHICH PROJECT A RIG MEANS is resolved by matching the rig NAME against a project
+# SLUG the pack's token can reach — the same rule the lane queue probes use. A slug
+# that exists in more than one workspace is ambiguous and is treated as unreadable
+# (below), never guessed.
+#
+# THE PROBE FAILS CLOSED. If the pool cannot be read — no token, an unreachable
+# switchyard, an ambiguous rig name — the rig spawns NOTHING and the mayor is
+# mailed. In this topology the pool is the only evidence of demand, so spawning on
+# an unread queue would wake an LLM session against a queue nobody looked at, every
+# cycle. A confidently EMPTY pool is silent and spawns nothing either.
+#
+# Needs the pack's switchyard credential (SWITCHYARD_API_TOKEN, or the
+# switchyard-mcp CLI's own token file) and SWITCHYARD_BASE_URL for a non-default
+# instance — the same two the judge/answerer queue probes already use.
+#
+# Format: space-separated rig names.
+#
+# CLOUD_POOL_RIGS="<rig> <rig>"
 
 # ---------------------------------------------------------------------------
 # MERGE_STRATEGY is GONE, and setting it now does nothing.

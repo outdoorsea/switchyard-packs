@@ -23,6 +23,45 @@
 # Exactly one brakeman per rig per cycle — the singular hand-off the controller's
 # dead sling-claim would have made.
 #
+# TWO DISPATCH TOPOLOGIES, AND THE CLOUD ONE DELETES MOST OF THIS FILE
+# (switchyard PRD #327, crit:53605636a114). Everything described above serves the
+# LOCAL-`bd` topology (docs/dispatch-topologies.md, topology B): demand lives in a
+# rig's `bd` ledger, and because a `bd` hand-off is NOT atomic — the order spawns a
+# worker, then writes an assignee, racing anyone else reading the same ledger — it
+# needs the direct-assign, the reassign guard that re-verifies the holder in the
+# instant before that write, and a cursor file remembering last cycle's hand-offs
+# so one that silently did not take can be caught a cycle later.
+#
+# Switchyard's managed CLOUD claim pool (topology A) is the documented default and
+# has none of that shape. Its claim is ATOMIC and server-side: a worker claims for
+# itself over MCP, and a second claimant is refused 409. So the cloud path does not
+# port the triad above, it DELETES it. For a rig cut over to cloud dispatch this
+# order does exactly one thing — ask the project's pool how deep it is, and, if it
+# has work and the rig has a free WIP slot, spawn one brakeman to go claim it:
+#   - NO `gc bd` read or write (that is the "bd bridge" the cutover removes),
+#   - NO direct-assign and no reassign guard (nothing is handed off to race over),
+#   - NO cursor file (there is no cross-cycle hand-off to remember).
+# That is the whole of "a project can be cut over to cloud-pool dispatch without
+# the bd bridge, and the builder lane requires no cursor file or local ledger".
+#
+# OPT-IN, PER RIG, ALWAYS. `CLOUD_POOL_RIGS` in the city's roster.conf names the
+# rigs cut over; unset (the default) means every rig keeps the `bd` path below,
+# byte for byte. PRD #327 puts this out of scope in as many words — "Changing the
+# dispatch topology of any project already running the local-bd bridge. The
+# cutover is opt-in per project" — so the opt-in is not a convenience, it is the
+# criterion. A city with no roster.conf sees no behaviour change at all.
+#
+# THE CLOUD PROBE FAILS CLOSED, INVERTING THE READ LIBRARY'S DEFAULT, and that is
+# deliberate. switchyard-api.sh is advisory and fails OPEN: an unreadable answer
+# means "proceed as if the check did not exist", because there the check only ever
+# WITHHOLDS a spawn some other signal already justified. Here it is the SOLE
+# evidence of demand — there is no other signal to fall back on — so failing open
+# would not be "proceed as before", it would be "spawn an LLM session against a
+# queue we could not read", every minute, up to the pool's max. PRD #327 forbids
+# exactly that ("a lane with an empty queue must not spawn"), so an unreadable
+# probe spawns NOTHING and MAILS instead — the silent stall becomes a signal,
+# which is this pack's standing invariant rather than a new rule invented here.
+#
 # THE REASSIGN GUARD (crit:65a9b77b2d30). The demand set is a snapshot, read a
 # spawn ago; a rival worker can claim a demand bead in the interval between that
 # read and this write. So the direct-assign RE-VERIFIES the target bead's CURRENT
@@ -95,6 +134,16 @@
 set -u
 
 . "$(dirname "$0")/../lib/roster.sh"
+. "$(dirname "$0")/../lib/switchyard-api.sh"
+
+# CLOUD_POOL_RIGS — the rigs cut over to cloud-pool dispatch, space-separated, from
+# the city's roster.conf. Defaulted to empty HERE rather than in sy_load_conf: this
+# order is its only consumer, and roster.sh is shared by a dozen others whose
+# hermetic tests should not have to absorb a new global for a setting they ignore.
+# The default is what makes the cutover opt-in — unset means every rig takes the
+# `bd` path exactly as before.
+CLOUD_POOL_RIGS=""
+sy_load_conf
 
 # The pool this order serves. A rig's worker pool is `<rig>/switchyard-ops.brakeman`;
 # routing stamps that qualified name onto a bead's `gc.routed_to`.
@@ -143,6 +192,58 @@ sy_pool_rig_demand() {
   gc bd list --rig "$1" --status open --json 2>/dev/null \
     | jq -r "$POOL_DEMAND_JQ" 2>/dev/null \
     | awk 'NF'
+}
+
+# sy_pool_rig_is_cloud RIG — 0 when RIG is opted into cloud-pool dispatch.
+#
+# The space-padded `case`, the same idiom the still-unclaimed check below uses, and
+# not `for _r in $CLOUD_POOL_RIGS`. Iterating the bare expansion would word-split as
+# intended but ALSO pathname-expand: a rig name holding a glob character would be
+# replaced by whatever files happen to sit in the order's working directory. Here
+# both operands stay quoted, so the only pattern characters are the two `*` written
+# literally, and the padding makes the match whole-token — a rig `forge` is never
+# matched by a cut-over `forge-staging`, nor the reverse. No subprocess either,
+# which matters on a 1-minute cadence.
+sy_pool_rig_is_cloud() {
+  case " ${CLOUD_POOL_RIGS:-} " in
+    *" $1 "*) return 0 ;;
+  esac
+  return 1
+}
+
+# sy_pool_cloud_depth RIG — how many beads wait in RIG's CLOUD claim pool. Prints a
+# count (possibly 0), or NOTHING when the answer is not confidently known.
+#
+# `?limit=1` because this asks a QUESTION, not for the work: `total` is the pool's
+# full claimable depth regardless of the page bound, so bounding the page keeps the
+# answer one bead wide while staying exact. The count needs no client-side
+# classification the way the `bd` demand set does — the server already excludes
+# claimed beads, applies the cross-lane criterion exclusion (PRD #154) and honours
+# PRD-level admission control (PRD #179), so `total` is by construction "beads a
+# fresh worker could actually claim right now".
+#
+# EMPTY IS NOT ZERO, and the caller must not conflate them. Empty means the probe
+# could not answer — no token, no reachable switchyard, an ambiguous rig→project
+# mapping, a body jq could not read — and the caller escalates rather than spawning.
+# A real `0` is a confident "the queue is empty", which is silence.
+sy_pool_cloud_depth() {
+  [ -n "$cloud_token" ] || return 0
+
+  _pcd_project="$(sy_project_for_rig "$1" "$cloud_projects")"
+  [ -n "$_pcd_project" ] || return 0
+
+  _pcd_body="$(sy_api_get "/api/v1/projects/$_pcd_project/pool?limit=1" "$cloud_token")"
+  [ -n "$_pcd_body" ] || return 0
+
+  # `.total` and not `.beads | length`: the page is bounded to 1, so the array's
+  # length answers a different question (how many did you send me) than the one
+  # asked (how much is there). `// empty` so an unexpected shape yields nothing and
+  # is caught by the digit check rather than reaching a numeric guard as `null`.
+  _pcd_n="$(printf '%s' "$_pcd_body" | jq -r '.total // empty' 2>/dev/null | awk 'NF' | head -n1)"
+  case "${_pcd_n:-}" in
+    '' | *[!0-9]*) return 0 ;;
+  esac
+  printf '%s' "$_pcd_n"
 }
 
 # sy_pool_brakeman_max RIG — the rig brakeman pool's max_active_sessions, from the
@@ -287,10 +388,69 @@ ASSIGNED_LAST="$(sy_state_dir)/pool-spawn.assigned-last"
 prev_assigned=""
 [ -f "$ASSIGNED_LAST" ] && prev_assigned="$(cat "$ASSIGNED_LAST" 2>/dev/null)"
 
+# The switchyard credential and project list, resolved ONCE per cycle and ONLY when
+# some rig is actually cut over. A `bd`-only city (the default) must pay no network
+# call at all on a 1-minute cadence, and a cloud city must not let a mid-cycle blip
+# answer differently for two rigs in the same sweep.
+cloud_token=""
+cloud_projects=""
+if [ -n "${CLOUD_POOL_RIGS:-}" ]; then
+  cloud_token="$(sy_api_token)"
+  cloud_projects="$(sy_api_projects "$cloud_token")"
+fi
+
 report=""
 escalations=""    # per-rig silent failures to mail the mayor this cycle
 assigned_now=""   # `<rig> <bead>` hand-offs made this cycle, for next cycle's check
+bd_rigs_seen=""   # did the local-`bd` path run for ANY rig this cycle?
 for rig in $(sy_pool_nonsuspended_rigs); do
+  # CLOUD-POOL DISPATCH (crit:53605636a114) — probe, then spawn, and nothing else.
+  # No `bd` read, no direct-assign, no cursor entry: the worker claims for itself
+  # over MCP, atomically, so there is no hand-off here to race, guard or remember.
+  if sy_pool_rig_is_cloud "$rig"; then
+    depth="$(sy_pool_cloud_depth "$rig")"
+
+    # Unreadable probe: spawn NOTHING and mail. This is the sole demand signal in
+    # cloud mode, so "unknown" cannot degrade to "spawn anyway" — that would wake an
+    # LLM session against a queue we could not read, every cycle. Mailing is what
+    # keeps the resulting quiet from being silent.
+    if [ -z "$depth" ]; then
+      report="$report
+- $rig: cloud pool UNREADABLE (no token, unreachable switchyard, or the rig's project could not be resolved unambiguously)
+    action: none (no spawn on an unread queue)"
+      escalations="$escalations
+- $rig: is cut over to cloud-pool dispatch (CLOUD_POOL_RIGS) but its claim pool could not be read — no token, an unreachable switchyard, or a rig name that does not resolve to exactly one project. No brakeman was spawned, so any work waiting in that pool is stalled until this is fixed."
+      continue
+    fi
+
+    [ "$depth" -gt 0 ] || continue   # a confidently empty queue is the silent case
+
+    max="$(sy_pool_brakeman_max "$rig")"; case "$max" in ''|*[!0-9]*) max=0 ;; esac
+    live="$(sy_pool_brakeman_live "$rig")"; case "$live" in ''|*[!0-9]*) live=0 ;; esac
+
+    if [ "$max" -gt "$live" ]; then
+      sess="$(sy_pool_spawn_brakeman "$rig")"
+      if [ -z "$sess" ]; then
+        action="spawn FAILED (no session identity captured)"
+        escalations="$escalations
+- $rig: brakeman spawn returned no session identity — $depth claimable cloud-pool bead(s) left unclaimed."
+      else
+        action="spawned $sess (claims from the cloud pool itself; no direct-assign)"
+      fi
+      slot="free ($live/$max)"
+    else
+      slot="full ($live/$max)"
+      action="none (no WIP slot)"
+    fi
+
+    report="$report
+- $rig: $depth claimable cloud-pool bead(s), WIP slot $slot
+    dispatch: cloud pool (no bd ledger, no cursor file)
+    action: $action"
+    continue
+  fi
+
+  bd_rigs_seen=1
   demand="$(sy_pool_rig_demand "$rig")"
   [ -n "$demand" ] || continue            # silence is the success case
 
@@ -375,8 +535,17 @@ done
 # Remember this cycle's hand-offs so the NEXT cycle can catch one that silently did
 # not take. Rewritten every cycle (even to empty) so a bead that WAS claimed drops
 # out of the memory and is never re-flagged.
-mkdir -p "$(dirname "$ASSIGNED_LAST")" 2>/dev/null
-printf '%s\n' "$assigned_now" | awk 'NF' > "$ASSIGNED_LAST" 2>/dev/null
+#
+# ONLY WHEN THE `bd` PATH ACTUALLY RAN (crit:53605636a114). A cursor file exists to
+# remember a hand-off, and cloud dispatch makes none — so a city whose every rig is
+# cut over must not merely stop USING this file, it must never create it. Gating on
+# "did any rig take the `bd` path" and not on "were there hand-offs" keeps the
+# rewrite-to-empty semantics intact for a mixed city: a `bd` rig present means the
+# file is still rewritten every cycle, exactly as before.
+if [ -n "$bd_rigs_seen" ]; then
+  mkdir -p "$(dirname "$ASSIGNED_LAST")" 2>/dev/null
+  printf '%s\n' "$assigned_now" | awk 'NF' > "$ASSIGNED_LAST" 2>/dev/null
+fi
 
 # What this order detected AND did is observed through its own log (gc captures
 # order stdout) — the per-rig `action:` line records each spawn + direct-assign.
@@ -384,15 +553,16 @@ if [ -n "$report" ]; then
   printf 'pool-spawn: claimable brakeman demand by rig:%s\n' "$report"
 fi
 
-# Silent-failure-becomes-mail invariant (crit:90116a548d3b): any spawn-or-assign
-# failure this cycle — no session identity, a rejected assign, or a hand-off still
-# unclaimed a full cycle later — is mailed to the mayor, not left as a log line.
-# ONE consolidated mail per cycle (never one per rig) so a wide outage does not
-# flood the mayor's box the way a chronically noisy order would.
+# Silent-failure-becomes-mail invariant (crit:90116a548d3b): any dispatch failure
+# this cycle — no session identity, a rejected assign, a hand-off still unclaimed a
+# full cycle later, or (crit:53605636a114) a cut-over rig whose cloud pool could not
+# be read at all — is mailed to the mayor, not left as a log line. ONE consolidated
+# mail per cycle (never one per rig) so a wide outage does not flood the mayor's box
+# the way a chronically noisy order would.
 if [ -n "$escalations" ]; then
   gc mail send mayor \
-    -s "pool-spawn: brakeman spawn/assign failure — demand left unclaimed" \
-    -m "The switchyard-ops pool-spawn order could not hand off claimable brakeman demand this cycle. This order replaces the controller's dead sling-claim, so each line below is stalled work — a rig whose demand a spawn-or-assign failure left unclaimed, which nothing else will pick up until the next cycle clears it or a human intervenes:$escalations" \
+    -s "pool-spawn: brakeman dispatch failure — demand left unclaimed" \
+    -m "The switchyard-ops pool-spawn order could not get claimable brakeman demand into a worker's hands this cycle. This order replaces the controller's dead sling-claim, so each line below is stalled work — a rig whose demand a spawn, an assign, or an unreadable cloud-pool probe left unclaimed, which nothing else will pick up until the next cycle clears it or a human intervenes:$escalations" \
     >/dev/null 2>&1
 fi
 

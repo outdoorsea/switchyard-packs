@@ -135,7 +135,7 @@ case "$FORGE" in
     echo "UNKNOWN FORGE for origin '$ORIGIN_URL' — cannot open a PR."
     echo "Escalate rather than closing: the branch is pushed but unreviewed."
     gc mail send mayor --subject "sy-item-work: unknown forge, PR not opened" \
-        --body "Bead $WORK_BEAD_ID pushed $CURRENT_BRANCH but origin '$ORIGIN_URL' matched no known forge."
+        -m "Bead $WORK_BEAD_ID pushed $CURRENT_BRANCH but origin '$ORIGIN_URL' matched no known forge."
     exit 1
     ;;
 esac
@@ -156,7 +156,7 @@ case "$PR_URL" in
     echo "  forge exit: ${CREATE_RC:-?}"
     echo "  forge said: ${CREATE_OUT:-<no output>}"
     gc mail send mayor --subject "sy-item-work: PR not opened, bead left open" \
-        --body "Bead $WORK_BEAD_ID pushed $CURRENT_BRANCH but no PR could be opened or found. Forge exit ${CREATE_RC:-?}. Output: ${CREATE_OUT:-<none>}"
+        -m "Bead $WORK_BEAD_ID pushed $CURRENT_BRANCH but no PR could be opened or found. Forge exit ${CREATE_RC:-?}. Output: ${CREATE_OUT:-<none>}"
     exit 1
     ;;
 esac

@@ -101,6 +101,13 @@ QUALIFIED="switchyard-ops.$AGENT"
 # answer `empty` instead, which the caller treats as unknown and spawns. Both
 # endpoints do return the key as a real array when the queue is empty (verified
 # against a live project holding zero), so the strictness costs nothing true.
+# ADDING A LANE? IT NEEDS AN ARM HERE. scripts/check-lane-queue-declarations.sh
+# enforces that every lane an order dispatches through this script declares BOTH
+# variables below, and CI fails the PR that adds one without them — a lane with
+# no arm spawns every cycle whether or not it has work, and nothing at run time
+# distinguishes that from a queue it merely could not read. A lane that gates on
+# something other than a switchyard queue records an exemption there instead,
+# naming the gate it uses.
 LANE_QUEUE_SUFFIX=""
 LANE_QUEUE_COUNT_JQ=""
 case "$AGENT" in

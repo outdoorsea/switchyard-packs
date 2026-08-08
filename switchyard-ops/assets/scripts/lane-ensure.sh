@@ -130,6 +130,110 @@ LANE_SESSION_ID_JQ='
   (if type=="object" then (.session // .) else empty end)
   | (.qualified_name // .name // .session_name // .id // .session_id // "")'
 
+# THE SWEEP BOUNDS ITS OWN WORK (sw-jqrx).
+#
+# This order failed 21 consecutive times with `context deadline exceeded` and had
+# never once completed since 2026-08-04 — so the judging lane's whole
+# reap-then-spawn lifecycle (PRD #299) never ran. It was not close to the
+# deadline: measured 2026-08-08 on this host, `gc session list --json --state all`
+# costs 16.8-27.1s (mean ~21.8s), and the loop below called it TWICE per rig —
+# once for lane_reap, once for lane_live_count — across 11 rigs carrying
+# `switchyard-ops.judge`. That is ~480s of serial subprocess time before a single
+# spawn decision, and it is why the failure was total rather than intermittent.
+#
+# Two things follow, and they are separate fixes:
+#
+#   1. READ THE ROSTER ONCE. This is roster.sh's own documented remedy — see
+#      sy_session_snapshot ("one `gc session list` per cycle instead of one per
+#      agent"), whose second and load-bearing reason is COHERENCE: per-rig lookups
+#      judge different rigs against different rosters. lane_adhoc_sessions already
+#      honoured SY_SESSION_SNAPSHOT; nothing ever SET it, and lane_live_count did
+#      not read it at all, so the pack paid the exact cost its library exists to
+#      avoid. 22 reads become 1.
+#   2. CAP THE WHOLE SWEEP. A cheaper sweep is still an unbounded one, and this
+#      order died silently for four days precisely because nothing it did was
+#      bounded by anything it controlled. The budget below is the sweep's own
+#      deadline, deliberately set well inside any plausible order-exec deadline,
+#      so a sweep that cannot finish SAYS SO (below) instead of being killed
+#      mid-rig with no record.
+#
+# Overridable per city because the honest number depends on host load and rig
+# count, both of which vary; 0 disables the cap for a hand-run debug sweep.
+LANE_SWEEP_BUDGET_SECONDS="${LANE_SWEEP_BUDGET_SECONDS:-600}"
+case "$LANE_SWEEP_BUDGET_SECONDS" in
+  '' | *[!0-9]*) LANE_SWEEP_BUDGET_SECONDS=600 ;;
+esac
+
+# A bound on the single roster read too. Without it the one remaining
+# `gc session list` is itself unbounded, and one wedged call reproduces the whole
+# bug with a smaller call count.
+LANE_ROSTER_TIMEOUT="${LANE_ROSTER_TIMEOUT:-120}"
+case "$LANE_ROSTER_TIMEOUT" in
+  '' | *[!0-9]*) LANE_ROSTER_TIMEOUT=120 ;;
+esac
+
+lane_now() { date +%s 2>/dev/null || printf '0'; }
+LANE_STARTED="$(lane_now)"
+
+# lane_over_budget — has this sweep spent its allowance?
+#
+# Fails toward "keep going" on an unreadable clock: a sweep that cannot time
+# itself should do its work, not refuse to. `date +%s` yielding 0 makes the
+# elapsed figure meaningless rather than large, so the comparison is skipped.
+lane_over_budget() {
+  [ "$LANE_SWEEP_BUDGET_SECONDS" -gt 0 ] || return 1
+  [ "$LANE_STARTED" -gt 0 ] || return 1
+  _lob_now="$(lane_now)"
+  [ "$_lob_now" -gt 0 ] || return 1
+  [ "$(( _lob_now - LANE_STARTED ))" -ge "$LANE_SWEEP_BUDGET_SECONDS" ]
+}
+
+# lane_roster [fresh] — the session roster JSON, from the per-cycle snapshot
+# unless the caller demands a fresh read (or no snapshot was taken).
+#
+# Bounded on the fresh path for the reason above. An empty answer keeps
+# lane_live_count's existing "cannot confirm absent" contract intact: callers
+# already treat empty as UNKNOWN and decline to spawn, so a timed-out read is
+# indistinguishable from an unreadable one, which is exactly right.
+lane_roster() {
+  if [ "${1:-}" = fresh ] || [ -z "${SY_SESSION_SNAPSHOT:-}" ]; then
+    sy_timeout "$LANE_ROSTER_TIMEOUT" gc session list --json --state all 2>/dev/null
+    return 0
+  fi
+  printf '%s' "$SY_SESSION_SNAPSHOT"
+}
+
+# lane_escalate_once KEY SUBJECT BODY — mail the mayor at most once per episode.
+#
+# A SWEEP THAT CANNOT COMPLETE MUST SAY SO. The whole reason sw-jqrx survived 21
+# repetitions is that its only symptom was one line in a machine-wide log while
+# every other surface — gc status, tmux, the switchyard agent roster — reported the
+# lane healthy. Silence on the failure path is the defect, not a side effect of it.
+#
+# ONCE PER EPISODE, not once per cycle: a condition that persists is one problem,
+# and re-mailing it every cycle is how an operator learns to filter this sender.
+# The marker is cleared by lane_clear_escalation on the first clean sweep, so the
+# NEXT occurrence mails again — an episode, not a permanent mute. Mirrors
+# loop-health.sh's probe-alerted/missing-alerted markers, including their location.
+#
+# Keyed per AGENT so the judge and answerer lanes cannot mute each other, and per
+# condition so a budget overrun does not suppress an unreadable-roster notice.
+#
+# Marker written only when the mail is accepted: if `gc mail send` fails there is
+# no record of the escalation, so the next cycle must be free to retry it.
+lane_escalate_once() {
+  _leo_marker="$(sy_state_dir)/lane-ensure.$AGENT.$1"
+  [ -f "$_leo_marker" ] && return 0
+  mkdir -p "$(sy_state_dir)" 2>/dev/null || return 0
+  gc mail send mayor -s "$2" -m "$3" >/dev/null 2>&1 || return 0
+  : > "$_leo_marker" 2>/dev/null || true
+}
+
+# lane_clear_escalation KEY — the episode is over; the next occurrence may mail.
+lane_clear_escalation() {
+  rm -f "$(sy_state_dir)/lane-ensure.$AGENT.$1" 2>/dev/null || true
+}
+
 # lane_live_count RIG — how many live sessions of this agent RIG already has. A
 # readable roster showing none is the only case that spawns; an unreadable or
 # non-numeric answer yields nothing (treated as "cannot confirm absent" → no
@@ -180,12 +284,35 @@ LANE_SESSION_ID_JQ='
 # quietly stopped judging is not. A closed session is definitively not draining
 # any backlog, so counting it as live was never right; it was merely harmless
 # while nothing ever closed one. Mirrors sy_session_alias_for in roster.sh.
+# lane_live_count RIG [REAPED_REFS] [fresh]
+#
+# REAPED_REFS is the newline-separated list of refs lane_reap closed for RIG on
+# THIS cycle, and passing it is not optional bookkeeping — it is what makes the
+# one-read-per-cycle snapshot safe. The loop is reap-then-spawn, so this count is
+# asked AFTER the reap, against a roster captured BEFORE it. A session this cycle
+# just closed is still non-closed and still in a live state in that snapshot, so
+# without the subtraction it reads as "one already running", the spawn is skipped,
+# and the lane the reap just emptied is left unstaffed until the next cycle. That
+# turns the timeout this bounding exists to fix into the silent stall this file's
+# teardown notes call strictly worse. Refs are compared on the same
+# `(.alias // .id // .name)` key lane_adhoc_sessions emits, so the two agree by
+# construction rather than by coincidence.
+#
+# `fresh` bypasses the snapshot for the post-spawn re-probe, which is the one
+# caller that MUST see the roster as it is now: the session it is asking about was
+# created after the snapshot was taken, so the snapshot cannot contain it and a
+# cached answer would report every successful spawn as a failure and mail on it.
 lane_live_count() {
+  _llc_raw="$(lane_roster "${3:-}")"
+  [ -n "$_llc_raw" ] || return 0
   _states_json="$(printf '%s' "$LANE_LIVE_STATES" | jq -Rc 'split(" ")')"
-  gc session list --json --state all 2>/dev/null \
-    | jq -r --arg q "$1/$QUALIFIED" --argjson live "$_states_json" '
+  _reaped_json="$(printf '%s' "${2:-}" | jq -Rsc 'split("\n") | map(select(length > 0))')"
+  printf '%s' "$_llc_raw" \
+    | jq -r --arg q "$1/$QUALIFIED" --argjson live "$_states_json" --argjson reaped "$_reaped_json" '
         [ (.sessions // [])[]
           | select( ((.closed // false) | not) )
+          | select( ((.alias // .id // .name // "")) as $ref
+                    | $ref == "" or ($reaped | index($ref)) == null )
           | (.agent // .agent_name // .qualified_name // "") as $n
           | select( (.template // "") == $q
                     or $n == $q
@@ -582,7 +709,47 @@ handshake=""
 reach_credential=""
 reach_unreachable=""
 reach_scope=""
+uncovered=""
+
+# ONE ROSTER READ FOR THE WHOLE CYCLE — see the bounding note above.
+#
+# Taken here rather than at the top of the file so it is as fresh as possible when
+# the loop starts, and after every cheap local reason to exit (no rigs at all) has
+# already run: a city with nothing to sweep should not pay for a roster read.
+SY_SESSION_SNAPSHOT="$(sy_timeout "$LANE_ROSTER_TIMEOUT" gc session list --json --state all 2>/dev/null)" \
+  || SY_SESSION_SNAPSHOT=""
+
+# AN UNREADABLE ROSTER ENDS THE SWEEP RATHER THAN GRINDING THROUGH IT.
+#
+# Not an optimisation. With no snapshot every lane_live_count falls back to its own
+# read, which is the 22-call shape this change exists to remove — and it buys
+# nothing, because a roster that cannot be read cannot answer "is one already
+# running?" for ANY rig: every rig would take the "cannot confirm absent" branch
+# and skip. So the whole loop is already decided, and running it just spends ~8
+# minutes to reach the same verdict, which is how this failure stayed invisible.
+#
+# Escalated, because a lane that cannot be swept at all is exactly the condition
+# that went unreported for four days. Deduped like every other notice here.
+if [ -z "$SY_SESSION_SNAPSHOT" ]; then
+  lane_escalate_once "roster-unreadable" \
+    "$AGENT-sweep: session roster unreadable, lane not swept" \
+    "\`gc session list --json --state all\` returned nothing within ${LANE_ROSTER_TIMEOUT}s, so no rig's liveness could be determined and the $SUBJECT lane was not swept this cycle: nothing was reaped and nothing was spawned. This is a gc/Dolt read problem, not a lane problem — check host load and \`gc doctor\` before touching this pack. The next cycle retries on its own; this notice repeats at most once per episode and clears itself on the first sweep that completes."
+  exit 0
+fi
+
 for rig in $rigs; do
+  # SPEND THE BUDGET, THEN NAME WHAT WAS MISSED — do not just stop.
+  #
+  # `continue` rather than `break` so the remaining rigs are still collected by
+  # name for the escalation below. Skipping them costs nothing (no subprocess runs
+  # past this point), and a report that says WHICH rigs went unswept is the
+  # difference between an actionable alarm and the single log line this bug hid
+  # behind for four days.
+  if lane_over_budget; then
+    uncovered="$uncovered $rig"
+    continue
+  fi
+
   # REAP FIRST, THEN SPAWN — see the lifecycle note in the header. A cycle
   # removes the sessions it spawned before it decides whether to spawn another,
   # so the guard below is answered by a roster holding only sessions that are
@@ -593,7 +760,12 @@ for rig in $rigs; do
   # Unconditional, and in particular NOT gated on lane_live_count: the rig whose
   # sessions are all finished is exactly the rig that most needs the reap, and it
   # is the one a count-first ordering would skip.
-  lane_reap "$rig" >/dev/null
+  #
+  # The refs are CAPTURED rather than discarded now that the roster is read once
+  # per cycle: lane_live_count below is asked against a snapshot taken before this
+  # reap ran, so it must be told what this reap closed or it will count those
+  # sessions as live and skip the spawn. See lane_live_count's own note.
+  reaped="$(lane_reap "$rig")"
 
   # SUSPENSION WITHHOLDS THE SPAWN, NOT THE REAP — and the split is the whole
   # point rather than an implementation detail.
@@ -613,7 +785,7 @@ for rig in $rigs; do
     continue
   fi
 
-  n="$(lane_live_count "$rig")"
+  n="$(lane_live_count "$rig" "$reaped")"
   case "$n" in
     ''|*[!0-9]*) continue ;;      # cannot confirm absent → do not stack a second
     0) : ;;                       # confirmed none live → spawn below
@@ -674,7 +846,11 @@ for rig in $rigs; do
   #
   # Without it the sweep's own alarms scale with load rather than with breakage,
   # which is how an operator learns to ignore them.
-  n2="$(lane_live_count "$rig")"
+  # FRESH, not the snapshot: the session this asks about was created seconds ago
+  # by lane_spawn, so it cannot be in a roster captured before the loop. Answering
+  # it from the snapshot would report every successful spawn whose identity we
+  # failed to read back as a failure, and mail the mayor about a working lane.
+  n2="$(lane_live_count "$rig" "" fresh)"
   case "$n2" in
     ''|*[!0-9]*) continue ;;      # cannot confirm unstaffed → do not alarm (see below)
     0) : ;;                       # confirmed still none → a real failure; classify it
@@ -750,6 +926,31 @@ if [ -n "$reach_scope" ]; then
     -s "$AGENT-sweep: $SUBJECT lane has no switchyard project" \
     -m "switchyard answered and the token is good, but no single project matches the rig name for:$reach_scope, so the $SUBJECT lane's queue could not be read for them. These rigs were still spawned into — the check fails open — but a session with no project to scope to exits IDLE, so the lane is running and doing nothing. A rig is matched to the project whose SLUG equals the rig name, and exactly one match is required, so this is either no match (this token cannot reach that project: wrong workspace, or an access grant it has not been given) or more than one (the slug exists in several of its workspaces, and a rig name cannot say which). Grant the token access to the intended project, or rename so the slug is unique across its workspaces. This is a scope fault: the credential itself is working, which is why it is not reported under \"$AGENT-sweep: no switchyard credential\"." \
     >/dev/null 2>&1
+fi
+
+# A SWEEP THAT RAN OUT OF TIME IS A REPORTED FAILURE, NOT A QUIET ONE (sw-jqrx).
+#
+# This is the condition that replaces `context deadline exceeded`. Before, an
+# over-long sweep was killed by the order runner mid-rig: no record of how far it
+# got, which rigs it covered, or that the lane had gone unswept at all. Now it
+# stops itself while it still has a voice, and says exactly which rigs it did not
+# reach — so the alarm names the gap instead of merely proving something died.
+#
+# The distinction matters for the remedy too: rigs listed here were never
+# examined, so nothing can be concluded about their lanes. That is different from
+# a rig that was checked and found healthy, and the mail says so rather than
+# leaving a reader to assume the sweep's silence meant coverage.
+if [ -n "$uncovered" ]; then
+  lane_escalate_once "budget-exceeded" \
+    "$AGENT-sweep: sweep ran out of time, rigs left unswept" \
+    "The $SUBJECT sweep hit its ${LANE_SWEEP_BUDGET_SECONDS}s budget and stopped before covering:$uncovered. Those rigs were NOT examined this cycle — nothing was reaped and nothing was spawned for them, and no conclusion should be drawn about their lanes. Rigs swept before the budget ran out were handled normally. This bound is the sweep's own, deliberately inside gc's order-exec deadline, so this mail replaces the silent \`order exec $AGENT-sweep failed: context deadline exceeded\` that hid this condition for four days (sw-jqrx). If it recurs on an unloaded host the sweep has genuinely outgrown its budget: raise LANE_SWEEP_BUDGET_SECONDS, or reduce the per-rig cost. This notice repeats at most once per episode and clears itself on the first sweep that covers every rig."
+else
+  # THE EPISODE IS OVER. Clearing on the clean sweep is what makes these notices
+  # episodic rather than one-shot: the next occurrence mails again instead of being
+  # permanently muted by a marker nothing ever removes. Both keys clear here — a
+  # sweep that covered every rig necessarily read the roster to do it.
+  lane_clear_escalation "budget-exceeded"
+  lane_clear_escalation "roster-unreadable"
 fi
 
 exit 0

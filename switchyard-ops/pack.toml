@@ -5,6 +5,7 @@
 #   publish-gate   — report worker beads closed with no pull request (5m)
 #   judge-sweep    — keep a judging-validator draining the awaiting-validation backlog (30m)
 #   answer-sweep   — keep an answerer clearing open PRD questions (20m)
+#   dupe-sweep     — start a dupe-scout for a rig with open issues (6h)
 #   loop-health    — pinned coordinators alive + status probe honest (30m)
 #   intake-sweep   — nudge coordinators to triage switchyard intake (4h)
 #   nightly-retro  — nudge the retro agent to draft daily reports (24h)
@@ -23,7 +24,7 @@
 # Governing invariant: every silent failure becomes mail to the mayor within
 # one order cycle.
 #
-# ...and ships three agents — the switchyard product-cycle lanes that run as a
+# ...and ships the agents below — the switchyard product-cycle lanes that run as a
 # session's OWN reasoning (the north star: the server does deterministic checks
 # only; every judgment/answer is an external connected agent). Each is scope=rig,
 # min=0, and is started on demand by a sweep order above; none is slung gc beads —
@@ -43,6 +44,14 @@
 #                    questions from the repo's code + history, recommends on the
 #                    ones that are really human decisions. Latency upgrade over the
 #                    coordinator's 4h intake sweep. Started by answer-sweep.
+#   dupe-scout     — the DUPLICATE-DETECTION lane (PRD #327 P1). Reads the
+#                    project's open issues and files two advisory PROPOSALS: a
+#                    duplicate-merge for a pair describing one root problem, and
+#                    a covered-by for an issue an existing PRD already addresses.
+#                    It confirms nothing — a human applies both in the dashboard.
+#                    Takes NO claim (proposals are idempotent server-side), so a
+#                    re-scan is safe and the cadence is the slowest of the lane
+#                    sweeps. Started by dupe-sweep.
 #   security-scout — the SECURITY-REVIEW lane, run on an INDEPENDENT PROVIDER
 #                    (kimi) so it does not share the blind spots of the model it
 #                    reviews. Scans the diff since its last pass, files findings
@@ -78,48 +87,25 @@
 # Sessions in each pool are named after railway occupations (see each namepool.txt:
 # brakeman = trades, judge = inspectors, answerer = dispatchers).
 #
-# LANES NOT YET SHIPPED AS AGENTS (documented so the gap is a decision, not an
-# oversight — the companion defines these lanes: work, answer, validate, judge,
-# triage, dedup, covered-by, watch):
-#   triager     — issue auto-triage. NOT a separate agent: the coordinator is
-#                 allowed to triage and intake-sweep already nudges it. A dedicated
-#                 triager would only duplicate it (triage is "recommend, human
-#                 decides").
-#   validate    — the automated (contract) validator: re-runs a criterion's
-#                 verify_command. Purely mechanical, so it belongs to the
-#                 switchyard-companion `validate` daemon, not an LLM session.
-#                 ⚠ ITS STATED PRECONDITION IS NOW MET. This entry used to say
-#                 "today it has nothing to do (contract_bearing coverage is ~0)"
-#                 and deferred wiring the daemon until coverage rose. It has:
-#                 groundspeak/forge PRD #287 dispatched 17 criteria of which
-#                 ~100% declare a runnable `go test ./... -run Test...` command
-#                 (measured 2026-07-31). That backlog is reachable by NEITHER
-#                 shipped lane — `judge` deliberately takes only criteria with NO
-#                 command, so it declines every one of these, and no companion
-#                 runs. A fully contract-bearing PRD is therefore the WORST case
-#                 for acceptance today, not the best: nothing can sign it off.
-#                 Wire `switchyard-companion validate`; still do not add an LLM
-#                 agent for it. ⚠ WHEN YOU DO: `validate_main_branch` must name
-#                 the branch the criteria actually LAND on. The lane validates
-#                 "against merged main" and defaults to `main`; under a
-#                 one-integration-branch-per-PRD policy the code sits on
-#                 prd-<N>-<slug> until the whole PRD merges, so the default runs
-#                 every contract against a tree without the code — and a `fail`
-#                 verdict RESETS the criterion for re-work. It would undo
-#                 delivered work while reporting success. Point it at the
-#                 integration branch, give it a DEDICATED clean clone (the
-#                 freshness gate refuses a dirty tree, and a rig checkout is
-#                 dirty by construction), and leave validate_skip_repo_check
-#                 false — an automated `done` is terminal.
-#   watch       — the event bridge (companion `watch`: switchyard SSE → gc session
-#                 wake). The high-value missing piece, but a DAEMON/order, not an
-#                 agent: it would let judge/answer/triage be woken the instant a
-#                 criterion is delivered or a question opens, turning the 20-30m
-#                 polls above into a safety net. Ship as its own order once the
-#                 wake wiring is exercised end to end (it can spam wakes if wrong).
-#   dedup /     — issue duplicate-merge proposals / covered-by-existing-PRD
-#   covered-by    linkage. Coordinator-adjacent, low urgency; companion daemons
-#                 (`dedup`) exist. Add only if the issue backlog warrants it.
+# WHICH COMPANION CAPABILITIES THIS PACK COVERS — see COMPANION.md, which is the
+# single source of truth for it and is CI-enforced
+# (scripts/check-companion-capability-ledger.sh). It records all 21 companion
+# capabilities: which a pack lane covers today, which are landing under PRD #327,
+# which disappear along with the daemon, and the two that will never be a pack
+# lane. In short:
+#
+#   `validate` and `watch` still require the companion. Everything else does not.
+#
+# `validate` needs a dedicated clean clone it hard-resets and a branch that
+# actually holds the code — its `fail` verdict RESETS delivered work, so pointed
+# at the wrong branch it undoes delivery while reporting success. `watch` is a
+# held-open SSE subscription with an in-memory resume cursor, and a wake-based
+# pack agent cannot hold a socket across its own exit; the sweep orders above are
+# the polling stand-in, which costs latency and not coverage.
+#
+# This list deliberately lives in ONE place. It used to be duplicated here, and
+# the copy went stale — which is the specific way an operator ends up assuming a
+# lane is running when it is not.
 #
 # IMPORT AT CITY SCOPE ONLY — `[imports.switchyard-ops]` in pack.toml.
 # One city import yields BOTH the orders and a brakeman pool in every rig: gc

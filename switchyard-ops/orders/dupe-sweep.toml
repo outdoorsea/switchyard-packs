@@ -1,0 +1,36 @@
+# Spawn a duplicate-detection scout for each rig whose switchyard project has
+# open issues, so duplicate-merge and covered-by proposals get filed without a
+# `switchyard-companion` running (switchyard PRD #327 P1).
+#
+# The dupe-scout (agents/dupe-scout) reads the project's open issues and files
+# advisory proposals: a merge for a pair describing one root problem, a
+# covered-by for an issue an existing PRD already addresses. It is
+# min_active_sessions=0, so nothing keeps it alive; this order spawns one per
+# rig-with-a-queue when none is running, via the shared lane-ensure spawner.
+#
+# THE QUEUE IS `/issues/open` AND THE FLOOR IS ONE. lane-ensure.sh reads that
+# endpoint before spawning and withholds the session on a confident zero. One
+# open issue is enough to be worth a pass — a merge pair needs two, but a
+# covered-by needs only one, and gating on two would strand the covered-by half
+# on any project sitting at exactly one open issue.
+#
+# CADENCE IS 6h, AND DELIBERATELY THE SLOWEST OF THE THREE LANE SWEEPS.
+# judge-sweep runs at 30m and answer-sweep at 20m because both drain queues that
+# BLOCK something: unvalidated work holds a PRD open, and an unanswered question
+# holds a human. This queue blocks nothing. A duplicate pair is not made worse by
+# waiting — both issues stay readable and workable — and the proposal is advisory
+# anyway, so the value of finding it sooner is close to zero while the cost of
+# looking is a whole session.
+#
+# The re-scan economics point the same way. This lane takes NO claim (proposals
+# are idempotent server-side), so a faster cadence does not race anything — it
+# just re-reads the same open-issue list and re-derives the same pairs, paying
+# for a session to rediscover what it proposed last time. PRD #327's own risk
+# register names exactly this ("duplicate merge and covered-by proposals can
+# accumulate, since those sweeps take no claim and re-list every pass") and
+# prescribes the slow cadence as the mitigation.
+[order]
+description = "Spawn one duplicate-detection scout per rig whose switchyard project has open issues; it files merge and covered-by proposals for a human to confirm"
+trigger = "cooldown"
+interval = "6h"
+exec = "$PACK_DIR/assets/scripts/lane-ensure.sh dupe-scout dupe-scout"

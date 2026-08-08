@@ -25,8 +25,8 @@ and let completion flow back. Anything else forks the truth.
    stateless client can skip `set_scope`.)
 3. `get_project_briefing` — the one-call landing read: project, roadmap
    milestones, dispatched epics, open-question count, claimable-work count, and
-   the latest report. Start here instead of chaining `get_project` +
-   `get_roadmap` + `list_*`.
+   the latest report. Start here instead of chaining a project read,
+   `get_roadmap` and the `list_*` reads.
 
 ## The loop
 

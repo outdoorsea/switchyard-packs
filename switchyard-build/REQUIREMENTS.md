@@ -14,7 +14,7 @@ that will satisfy it — this ledger never asserts evidence that does not exist.
 
 | Field | Value |
 | --- | --- |
-| Status | Manifest, ledger, and `sy-build-from-prd`'s source stage (`fetch-prd` and the three anchors it feeds) |
+| Status | Manifest, ledger, `sy-build-from-prd`'s source stage (`fetch-prd` and the three anchors it feeds), the `decompose` (pool → convoy) override, and the `build-base` publish override (completion summary) |
 | Scope | switchyard's factory execution path for epic-scale approved PRDs |
 | Base contract | `gascity/REQUIREMENTS.md` (`gc.build-methodology-base.requirements.v1`) |
 | Base formula | `build-base` |
@@ -94,6 +94,40 @@ being left implicit:
   inherited unchanged and is listed as Pending below.
   Satisfies `crit:3ee33868b070`.
 
+- **Convoy mapping.** `packs/switchyard-build/formulas/sy-build-from-prd.formula.toml`
+  overrides the base `decompose` anchor — under its own base id, restated in
+  full — and points it at
+  `packs/switchyard-build/assets/workflows/sy-build-from-prd/map-pool-to-convoy.md`,
+  which claims the target PRD's pool beads under lease, mints a local convoy
+  ordered by phase, and reports every bead it could not take. Three properties
+  carry this claim, and each is the reason a neighbouring rule was rejected:
+  - **The lease is the mutex, so a skip is never a steal.** A bead held by
+    another lane is skipped and reported, never released or waited out; the run
+    hands back rather than taking a live claim, per the PRD's stop condition.
+    The report rides `trace.coverage` with the schema's own `blocked` status, so
+    the base's `build-artifact-valid.sh` gate enforces it instead of leaving it
+    to optional prose.
+  - **One identity per bead, derived deterministically.** The pool's WIP cap
+    (`projects.pool_wip_limit`, default 1) keys on the `claimed_by` string —
+    `HeldPoolBeads(project_id, claimed_by)` — so a run holds a whole PRD's beads
+    only by claiming each as `sy-build/<prd_id>/<pool-bead-id>`. Deriving it
+    rather than randomising it is what lets a retry recognise its OWN prior
+    claims instead of reporting them as another lane's and minting an empty
+    convoy.
+  - **Phase order comes from one pool read.** `list_claimable_work` projects
+    `phase_label` beside `prd_id` and `crit_label` (crit:f74755f880ea), which is
+    the whole reason that projection exists (q178/q189). The criteria read is
+    for the skip report only, never for phase.
+  Satisfies `crit:f8594ebe6dba`.
+
+- **Artifact contract preserved.** The `decompose` override changes only `title`
+  and `description_file`; `gc.run_target`, both `gc.build.*` artifact keys,
+  `needs`, and the `build-artifact-valid.sh` check block are the base's own,
+  restated verbatim because `extends` merges steps by WHOLE-STEP REPLACEMENT.
+  The stage still emits `gc.build.decomposition.v1` at the recorded
+  decomposition path and still sets `gc.input_convoy_id` +
+  `gc.build.implementation_convoy_id` for the inherited `implement` drain.
+
 - **Per-item implement override** (`crit:4ea0ccf29b82`).
   `assets/workflows/do-work/implement.md` overrides the per-item implement
   prompt through the asset path-shadow seam, so `gascity/formulas/do-work.formula.toml`
@@ -116,6 +150,46 @@ being left implicit:
   table, the front-matter and trace shapes, the validator loop); the
   `implement-item-gate` CI job asserts each one is still present, so a rewrite
   cannot silently install a weaker prompt at the stronger one's path.
+
+- **Review and gap analysis.** Both verdict reports trace the PRD's acceptance
+  criteria one row each, keyed by `crit:<hash>`, carrying switchyard's
+  `met`/`partially_met`/`missing` verdict alongside the base `coverage_statuses`
+  vocabulary, and a `met` row names the PR that delivered it. The two overrides
+  ride the documented path-shadow seam — `assets/workflows/review/write-report.md`
+  and `assets/workflows/gap-analysis/write-report.md`, the base's own asset paths
+  — so no gascity formula is edited and the pin stays unforked. `crit:c20b14ed613e`.
+
+- **Completion summary** (`crit:867e5f748573`).
+  `assets/workflows/build-base/publish.md` overrides the run's terminal stage
+  through the asset path-shadow seam, so `build-base` stays inherited and
+  unforked — no `extends`, no step rename, no edit to the pin. The stage is
+  `publish` because it is build-base's LAST anchor (`needs = ["finalize"]`, no
+  condition): at `finalize` the pull requests are not open yet — finalize records
+  the outcome metadata that publish then acts on — so a summary posted any
+  earlier could not name a single PR. The override resolves its destination from
+  the PRD itself: `get_prd` returns the PRD's `blueprint_id`, which the PRD page
+  renders as its **Discussion** section (the composer there posts to the same
+  endpoint the `post_blueprint_message` tool hits), and the summary is attributed
+  to the registered factory agent via `agent_ref` rather than to the human
+  account behind the token. Three properties make the claim more than "a message
+  is sent": the destination is resolved from the PRD rather than from a launch
+  input, so a run cannot post another PRD's readers a summary of work never done
+  for them; the post is guarded by `gc.build.completion_summary_posted_at` read
+  BEFORE posting, because this stage is retryable and a discussion thread is
+  append-only with no de-duplication; and the summary reports rather than
+  fabricates — it never claims a criterion is delivered, since delivery is
+  recorded by attaching a MERGED PR. Because this file sits at the BASE pack's
+  asset path it is inherited by every formula extending `build-base`, not only
+  `sy-build-from-prd`, so it reads the PRD id from the workflow root's
+  `gc.build.prd_id` (never a `{{prd_id}}` placeholder, which renders its own raw
+  body where that var is undefined) and degrades to a recorded
+  `completion_summary_status=skipped` no-op on a run that had no source PRD.
+  Because a shadow *replaces* the base file rather than merging with it, the
+  override restates the base's whole publish contract — all five required
+  workflow-root keys, the disabled-publishing branch and its remote status, and
+  the close conditions; the `completion-summary-gate` CI job asserts each one is
+  still present, so a rewrite cannot silently install a weaker publish gate at
+  the stronger one's path.
 
 - **Compatibility test in CI.** `scripts/check-derived-pack-compat.sh` enforces
   the statically checkable claims above on every push and pull request, as the
@@ -154,10 +228,7 @@ it. Until then the claim is not made.
 | Claim | Lands with |
 | --- | --- |
 | **Formula contract** — `sy-build-from-prd` declares `extends = ["build-base"]` and preserves the inherited anchor order, overriding steps under their base ids without renaming, skipping, or reordering an anchor | the `sy-build-from-prd` step criteria below, collectively |
-| **Convoy mapping** — `map-pool-to-convoy` claims the target PRD's pool beads under lease and mints a local convoy ordered by phase, skipping and reporting any bead already claimed elsewhere | `crit:f8594ebe6dba` |
 | **Publish contract** — the publish preflight override enforces PR-only publishing with the PRD and bead ids in the PR title | `crit:c8bee483d06e` |
-| **Review and gap analysis** — verdict reports with per-criterion met/partial/missing traceability linked to delivering PRs | `crit:c20b14ed613e` |
-| **Completion summary** — the factory run posts a summary message to the source PRD's discussion | `crit:867e5f748573` |
 | **End-to-end evidence** — an interactive factory run on a small approved PRD lands reviewed PRs and completes its beads with PRs attached | `crit:707a711e70df` |
 
 ## Evidence Commands
@@ -205,12 +276,67 @@ bash scripts/implement-item-gate.test.sh
 # The same suite runs in CI as the `implement-item-gate self-test` job.
 grep -n 'implement-item-gate' .github/workflows/ci.yml
 
+# Convoy mapping (crit:f8594ebe6dba): the override sits on the BASE id, not a
+# renamed one. Expect `id = "decompose"` and NO step whose id is
+# "map-pool-to-convoy" — the stage's name lives in its title and its asset
+# filename, the id belongs to the base contract.
+# ANCHOR THESE. Unanchored, both patterns also match the formula's own prose
+# (it explains the rule by quoting the id it does NOT use), so the negative
+# assertion reports 1 and reads as a failure while the file is correct.
+F=packs/switchyard-build/formulas/sy-build-from-prd.formula.toml
+grep -c '^id = "decompose"' "$F"           # expect 1 (positive control)
+grep -c '^id = "map-pool-to-convoy"' "$F"  # expect 0
+
+# ...and it restates the base's target, artifact keys and check block, because
+# `extends` replaces a step WHOLE (a partial override silently drops them).
+for k in 'gc.run_target" = "gc.task-decomposer' \
+         'gc.build.artifact_schema" = "gc.build.decomposition.v1' \
+         'gc.build.decomposition_path,gc.var.decomposition_path' \
+         'build-artifact-valid.sh'; do
+  grep -q -- "$k" "$F" && echo "ok: $k" || echo "MISSING: $k"
+done
+
+# Skip-not-steal, and the deterministic per-bead identity, are both stated in
+# the asset (expect all four).
+for s in 'Never release a bead you skipped' \
+         'sy-build/{{prd_id}}/<pool-bead-id>' \
+         'pool_wip_limit' 'blocked'; do
+  grep -q -- "$s" packs/switchyard-build/assets/workflows/sy-build-from-prd/map-pool-to-convoy.md \
+    && echo "ok: $s" || echo "MISSING: $s"
+done
+
+# The WIP cap really does key on the claimed_by string, which is what makes one
+# identity per bead necessary rather than stylistic.
+grep -n 'claimed_by = ?' internal/db/epics.go
+grep -n 'HeldPoolBeads(r.Context(), proj.ID, claimedBy)' internal/api/api_v1_beads.go
+
+# Phase ordering needs no second read: the pool projects phase_label itself.
+grep -rn 'PhaseLabel' internal/db/pool.go | head -3
+
+# Completion summary (crit:867e5f748573): the override sits at the shadow path,
+# restates the base publish contract in full, resolves its destination from the
+# PRD's own blueprint_id, guards against double-posting, and refuses to claim
+# delivery. 46 assertions, each scoped to the section that owns the rule.
+#
+# The path is part of the assertion — see the In-force claim above. The suite
+# checks it first, because a prompt one directory across overrides nothing and
+# fails silently.
+bash scripts/completion-summary-gate.test.sh
+
+# The same suite runs in CI as the `completion-summary-gate self-test` job.
+grep -n 'completion-summary-gate' .github/workflows/ci.yml
+
 # Ledger anchors the upstream evidence chain (expect all five).
 for f in GC-METH-012 '## Compatibility Claims' '## Evidence Commands' \
          ../gascity build-base; do
   grep -q -- "$f" packs/switchyard-build/REQUIREMENTS.md \
     && echo "ok: $f" || echo "MISSING: $f"
 done
+
+# Review + gap-analysis traceability: the two overrides sit at the base's own
+# asset paths, and their contract holds. Also runs in CI as
+# `verdict-traceability gate self-test`.
+bash scripts/verdict-traceability-gate.test.sh
 
 # Formula contract: the formula extends the base rather than forking it.
 grep -n '^extends' packs/switchyard-build/formulas/sy-build-from-prd.formula.toml
@@ -220,18 +346,24 @@ grep -n '^extends' packs/switchyard-build/formulas/sy-build-from-prd.formula.tom
 # Expect NO output — any line printed is a step id that is neither.
 grep -o '^id = "[^"]*"' packs/switchyard-build/formulas/sy-build-from-prd.formula.toml \
   | sed 's/^id = "//;s/"$//' \
-  | grep -vxE 'fetch-prd|requirements|plan|plan-review'
+  | grep -vxE 'fetch-prd|requirements|plan|plan-review|decompose'
 
 # `fetch-prd` is INSERTED between `prepare` and the `requirements` anchor.
 grep -n -A2 '^id = "fetch-prd"' packs/switchyard-build/formulas/sy-build-from-prd.formula.toml
 
 # The overridden anchors keep their base artifact schemas and the base's
-# validation gate. Expect exactly 2 declared check paths — anchor the pattern
-# at `path =` so a prose mention of the script in a comment is not counted, and
-# expect `gc.build.requirements.v1` then `gc.build.plan.v1`.
+# validation gate. Expect exactly 3 declared check paths — anchor the pattern
+# at `path =` so a prose mention of the script in a comment is not counted.
 grep -c '^path = "\.gc/scripts/checks/build-artifact-valid\.sh"' \
   packs/switchyard-build/formulas/sy-build-from-prd.formula.toml
-grep -o 'gc\.build\.\(requirements\|plan\)\.v1' packs/switchyard-build/formulas/sy-build-from-prd.formula.toml
+
+# The declared schemas, in stage order: expect `gc.build.requirements.v1`,
+# `gc.build.plan.v1`, then `gc.build.decomposition.v1`. Match the SETTING, not
+# the bare schema name, for the same reason the check path above is anchored —
+# the decompose stage's own comment names its schema in prose, and an
+# unanchored pattern counts that comment as a fourth declaration.
+grep -o '"gc\.build\.artifact_schema" = "[^"]*"' \
+  packs/switchyard-build/formulas/sy-build-from-prd.formula.toml
 
 # Every description_file the formula names exists — the same contract that
 # gascity/tests/test_formula_assets.py enforces for in-tree packs.

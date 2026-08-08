@@ -1,0 +1,69 @@
+# dupe-scout — the switchyard duplicate-detection lane, as a Gas City agent.
+#
+# A dupe-scout reads a project's OPEN issues and files two kinds of advisory
+# proposal: a duplicate-merge proposal for a pair describing one root problem
+# (`propose_issue_merge`), and a covered-by proposal for an issue an existing PRD
+# already covers (`propose_covered_by`). It decides nothing — a human confirms
+# every merge in the dashboard — and it writes no code.
+#
+#   gc session new <rig>/switchyard-ops.dupe-scout --no-attach
+#
+# ...which is what the `dupe-sweep` order does on a cadence. Like the judge and
+# the answerer, you do not sling work to a dupe-scout: its queue is switchyard's
+# open-issue list, read over the switchyard MCP, not the gc bead ledger.
+#
+# WHY THIS LANE EXISTS (switchyard PRD #327 P1). Duplicate detection and
+# covered-by detection ran only inside `switchyard-companion` — a second runtime
+# an operator had to install, credential and supervise before the factory worked.
+# Both sweeps need NO MCP tool that is missing: `list_issues`, `list_prds`,
+# `propose_issue_merge` and `propose_covered_by` all ship today. That makes this
+# the lowest-risk proof that a companion verb becomes a pack agent, which is why
+# the PRD lands it before the builder-lane cutover.
+#
+# WHY NO CLAIM, UNLIKE THE JUDGE. The judging lane stakes each criterion because
+# two judges spending two model passes on one criterion is wasted money and the
+# second write just loses. Proposals are different: they are advisory, the server
+# dedups a re-proposed pair, and nothing is consumed by filing one. So this lane
+# takes no lease and needs no release path — a re-scan is safe by construction.
+# That is also why its cadence is slow (see orders/dupe-sweep.toml): re-listing
+# the same open issues every few minutes would buy nothing and cost a session.
+#
+# WHY NO PROVIDER PIN, UNLIKE THE JUDGE AND security-scout. Those two pin `kimi`
+# to buy RUNTIME independence from the model that wrote the code, because the
+# server's separation-of-duties rules cannot see a shared blind spot. No such
+# rule applies here — this lane validates nothing and signs nothing off; a human
+# confirms every proposal. And a pin is not free: a referenced-but-absent
+# provider does not degrade gracefully, it rejects the WHOLE city config
+# (`gc agent list`, `gc order list` and `gc config show` all fail). Declaring
+# none means this lane costs a city importing the pack no new `city.toml`
+# requirement at all.
+#
+# scope = "rig": like the judge and answerer, the dupe-scout materializes where
+# the pack is imported per rig, and scans THAT rig's switchyard project via the
+# rig's switchyard-mcp overlay scope.
+scope = "rig"
+
+# fresh: each pass is a self-contained scan of the current open-issue list.
+# Resuming a finished pass replays a list that has already been proposed on.
+wake_mode = "fresh"
+
+# Read-only except for the proposals it posts over MCP. It never cuts a branch,
+# edits a file or commits, so its cwd is a plain scratch dir, not a build
+# worktree.
+work_dir = ".gc/worktrees/{{.Rig}}/dupe-scout/{{.AgentBase}}"
+
+nudge = "Run one duplicate-detection pass now: read the open issues, file merge and covered-by proposals for the ones you can evidence, then exit."
+
+idle_timeout = "30m"
+
+# min 0 / max 1: the sweep scales the lane to zero between passes and dupe-sweep
+# spawns a fresh one when issues are waiting. One is enough — two scouts on the
+# same open-issue list produce the SAME proposals, and while the server dedups
+# them, the duplicate model spend is pure waste. namepool.txt must hold at least
+# max_active_sessions names.
+min_active_sessions = 0
+max_active_sessions = 1
+
+# No default_sling_formula and no pre_start worktree setup: the dupe-scout runs
+# no gastown formula and is slung no gc beads — its work list is switchyard's
+# open-issue queue, reached over the MCP. The prompt IS the method.

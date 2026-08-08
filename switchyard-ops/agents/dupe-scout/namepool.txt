@@ -1,0 +1,23 @@
+# Railway record & reconciliation occupations — themed session names for the
+# dupe-scout pool. Kin to brakeman (trades), judge (inspectors) and answerer
+# (dispatchers), drawn from the roles that MATCH RECORDS: the clerks who compared
+# waybills and tallies to find the same car written down twice, and the tracer
+# who chased a shipment recorded under two names.
+#
+# `gc` draws one name per concurrent session, so this pool must hold at least
+# max_active_sessions entries (dupe-scout runs one). Single-word, lowercase — a
+# name is a session id, not a specialty.
+tracer
+tallyman
+checker
+comparer
+recorder
+abstractor
+auditor
+reconciler
+waybiller
+manifester
+interchanger
+demurrager
+prorater
+indexer

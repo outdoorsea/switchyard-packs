@@ -78,8 +78,16 @@ QUALIFIED="switchyard-ops.$AGENT"
 # Each lane's backlog is a different switchyard queue, so the endpoint is chosen
 # by AGENT rather than derived: the judging lane takes delivered criteria that
 # declare no `verify_command` (`?lane=judgment` is REQUIRED — the API answers 400
-# on an absent lane rather than defaulting), and the answerer takes outstanding
-# PRD questions.
+# on an absent lane rather than defaulting), the answerer takes outstanding
+# PRD questions, and the dupe-scout takes the project's OPEN issues.
+#
+# THE DUPE-SCOUT'S THRESHOLD IS ONE OPEN ISSUE, NOT TWO. It files two kinds of
+# proposal from that one queue, and they need different minimums: a duplicate
+# MERGE pair needs two issues, but a COVERED-BY needs only one (an issue an
+# existing PRD already covers). Gating on two would therefore silently strand the
+# covered-by half on every project sitting at exactly one open issue — the same
+# class of quiet unstaffing this whole guard exists to avoid. One is the floor
+# that keeps both halves reachable.
 #
 # AN UNRECOGNISED LANE LEAVES BOTH EMPTY, which disables the check and spawns as
 # before. A lane added to this pack later must keep working on the day it is
@@ -103,6 +111,10 @@ case "$AGENT" in
   answerer)
     LANE_QUEUE_SUFFIX="/questions/open"
     LANE_QUEUE_COUNT_JQ='if (.questions|type) == "array" then (.questions|length) else empty end'
+    ;;
+  dupe-scout)
+    LANE_QUEUE_SUFFIX="/issues/open"
+    LANE_QUEUE_COUNT_JQ='if (.issues|type) == "array" then (.issues|length) else empty end'
     ;;
 esac
 
@@ -429,6 +441,55 @@ lane_queue_depth() {
   printf '%s' "$_lqd_n"
 }
 
+# lane_reach_fault RIG — WHY this lane's queue cannot be read for RIG, or
+# nothing when there is no reachability fault to report.
+#
+# lane_queue_depth above answers empty for every uncertainty and deliberately
+# refuses to distinguish them, because the SPAWN decision is the same for all of
+# them: fail open. That stays exactly as it is — nothing here changes what is
+# spawned. But one spawn decision is not one OPERATOR STORY, and collapsing the
+# causes is what lets a broken credential wear the face of a drained lane
+# (switchyard PRD #327, crit:7ee5962457ff).
+#
+# THE FAILURE THIS ENDS IS A LOOP THAT REPORTS NOTHING. With no usable token, or
+# a scope resolving to no project, every cycle does this: the sweep cannot read
+# the queue, so it fails open and spawns; the session cannot read the queue
+# either, so it exits IDLE; the reaper closes it; the next cycle repeats. No
+# command fails, no mail is sent, `gc session list` looks healthy — and the lane
+# does no work for as long as the fault lasts. Every other way this order can
+# fail already escalates; this was the one that did not.
+#
+# IT COSTS NO EXTRA NETWORK CALL, which is what lets it sit on the hot path of
+# every cycle. Both cycle-level facts are already in hand ($lane_token and
+# $lane_projects, each read once per cycle above), and the per-rig one is a jq
+# pass over that same already-fetched project list. A classifier that re-probed
+# in order to explain itself would double this order's network cost to learn
+# nothing the cycle did not already know.
+#
+#   credential  — no `sy_` token resolved at all. Permanent: no cycle fixes it.
+#   unreachable — a token DID resolve and the project list still did not come
+#                 back: the instance is down, or it rejected the token.
+#   scope       — the token works and the list was read, but this rig's project
+#                 is not in it, or its slug is ambiguous across workspaces.
+#
+# The credential/unreachable split is drawn on whether a token resolved at all,
+# so the two are mutually exclusive within a cycle and at most one is ever
+# reported. They are separated because their remedies are: one is a credential
+# to install, the other an instance to bring up or a token to re-issue.
+#
+# A LANE WITH NO QUEUE MAPPING IS NOT A FAULT. LANE_QUEUE_SUFFIX is empty for an
+# unrecognised AGENT, which disables the queue check by design so a lane added to
+# this pack later keeps working on the day it is added rather than going
+# silently unstaffed. There is no queue it is failing to read, so there is
+# nothing to escalate — and reporting one would page the mayor about every lane
+# this pack has not taught the sweep about yet.
+lane_reach_fault() {
+  [ -n "$LANE_QUEUE_SUFFIX" ] || return 0
+  [ -n "$lane_token" ]        || { printf 'credential';  return 0; }
+  [ -n "$lane_projects" ]     || { printf 'unreachable'; return 0; }
+  [ -n "$(sy_project_for_rig "$1" "$lane_projects")" ] || printf 'scope'
+}
+
 # lane_agent_probe — did `gc agent list --json` ANSWER, as distinct from what it
 # answered? Echoes the agent count (possibly 0) when the probe returned a
 # parseable list, and nothing when the probe itself failed.
@@ -513,6 +574,14 @@ lane_defined() {
 # box, and the alarm the whole time read "check the agent is imported".
 unconfigured=""
 handshake=""
+
+# The reachability faults, accumulated by lane_reach_fault inside the loop and
+# mailed at the foot beside the two spawn faults above. Same shape deliberately:
+# a fault is a space-separated rig list, empty means "did not happen", and one
+# cycle sends at most one mail per condition however many rigs it names.
+reach_credential=""
+reach_unreachable=""
+reach_scope=""
 for rig in $rigs; do
   # REAP FIRST, THEN SPAWN — see the lifecycle note in the header. A cycle
   # removes the sessions it spawned before it decides whether to spawn another,
@@ -549,6 +618,26 @@ for rig in $rigs; do
     ''|*[!0-9]*) continue ;;      # cannot confirm absent → do not stack a second
     0) : ;;                       # confirmed none live → spawn below
     *) continue ;;                # already running → leave it
+  esac
+
+  # WHY THE QUEUE MIGHT NOT BE READABLE, recorded for the escalation at the foot.
+  #
+  # OBSERVATIONAL ONLY. It records a cause; it never withholds a spawn. The
+  # fail-open contract below is untouched, and lane-queue.test.sh asserts that
+  # independently of anything here.
+  #
+  # ITS PLACEMENT IS THE ESCALATION'S PRECISION, not tidiness. Reaching this line
+  # means the rig survived every earlier gate: it is not suspended, and it has no
+  # live session. So the mails below name only rigs this sweep was genuinely
+  # about to staff and could not read a queue for — which is exactly the set that
+  # goes quietly idle. Classifying at the top of the loop instead would page the
+  # mayor about rigs the mayor has suspended, and about lanes that are working,
+  # every cycle: the false-alarm pattern the spawn classifier above already had
+  # to unlearn once.
+  case "$(lane_reach_fault "$rig")" in
+    credential)  reach_credential="$reach_credential $rig" ;;
+    unreachable) reach_unreachable="$reach_unreachable $rig" ;;
+    scope)       reach_scope="$reach_scope $rig" ;;
   esac
 
   # AN EMPTY QUEUE MEANS THERE IS NOTHING TO START A SESSION FOR.
@@ -608,6 +697,10 @@ done
 # their own — a reader triaging an inbox must be able to tell which fault this is
 # without opening the mail, and mail threading groups on subject, so a recurring
 # handshake blip never buries a one-off config fault in the same thread.
+#
+# THE REACHABILITY MAILS BELOW EXTEND THAT RULE RATHER THAN REOPENING IT: one
+# subject per remedy, because the whole point of splitting them is that an
+# operator can act on the subject alone.
 if [ -n "$unconfigured" ]; then
   gc mail send mayor \
     -s "$AGENT-sweep: $SUBJECT lane is not configured" \
@@ -619,6 +712,43 @@ if [ -n "$handshake" ]; then
   gc mail send mayor \
     -s "$AGENT-sweep: $SUBJECT did not come up" \
     -m "\`gc session new <rig>/$QUALIFIED --no-attach\` returned no session identity for:$handshake, and a re-probe confirmed no live session for them. The $AGENT agent IS defined for these rigs, so this is not a missing import — it is the startup handshake failing, which on this sweep is normally load: a saturated host cannot complete a session handshake inside the spawn call. Check host load and the live adhoc session count before changing any config; the next cycle retries on its own and usually succeeds. Only if it persists on an unloaded host is it worth spawning one by hand to see the real error." \
+    >/dev/null 2>&1
+fi
+
+# THE REACHABILITY ESCALATIONS (switchyard PRD #327, crit:7ee5962457ff).
+#
+# The three above all describe a session that did not start. These describe the
+# opposite and worse shape: a session that starts perfectly, finds it cannot see
+# switchyard, and exits IDLE — cycle after cycle, silently. Nothing fails, so
+# nothing was ever reported, and the lane's backlog simply does not move.
+#
+# THEY DO NOT WITHHOLD ANYTHING. The queue check still fails open on every one of
+# these; the sweep still spawns. Escalating is the entire behaviour change, which
+# is what keeps this safe: the worst case is a mail about a lane that is working.
+#
+# THEY REPEAT WHILE THE FAULT DOES, matching the two mails above rather than
+# inventing a dedup this order has never had. A credential or a grant is a human
+# fix, and the cadence of the reminder is the sweep's interval by design — the
+# alternative is a fault that announces itself once and is then forgotten for as
+# long as it lasts, which is the silence this criterion exists to end.
+if [ -n "$reach_credential" ]; then
+  gc mail send mayor \
+    -s "$AGENT-sweep: no switchyard credential" \
+    -m "No switchyard API token resolved this cycle, so the $SUBJECT lane's queue could not be read for:$reach_credential. These rigs were still spawned into — the check fails open — but a session that cannot reach switchyard has no queue to work and exits IDLE, so the lane is running and doing nothing. Neither \`SWITCHYARD_API_TOKEN\` nor the file \`switchyard-mcp token-path\` names holds a usable token; install one (\`switchyard-mcp login\`) or set the variable for the order's environment. This is a missing credential, NOT the rejected-or-down instance reported under \"$AGENT-sweep: switchyard is unreachable\"." \
+    >/dev/null 2>&1
+fi
+
+if [ -n "$reach_unreachable" ]; then
+  gc mail send mayor \
+    -s "$AGENT-sweep: switchyard is unreachable" \
+    -m "A switchyard API token resolved, but \`GET /api/v1/projects\` returned nothing this cycle, so the $SUBJECT lane's queue could not be read for:$reach_unreachable. These rigs were still spawned into — the check fails open — but a session that cannot reach switchyard exits IDLE, so the lane is running and doing nothing. Either the instance is down or it rejected the token: check the instance named by \`SWITCHYARD_BASE_URL\` is serving, then whether the token has been revoked or expired and re-issue it. A token holds this shape until it is replaced, so unlike a startup blip this does not clear on its own. This is a rejected-or-down instance, NOT the missing credential reported under \"$AGENT-sweep: no switchyard credential\"." \
+    >/dev/null 2>&1
+fi
+
+if [ -n "$reach_scope" ]; then
+  gc mail send mayor \
+    -s "$AGENT-sweep: $SUBJECT lane has no switchyard project" \
+    -m "switchyard answered and the token is good, but no single project matches the rig name for:$reach_scope, so the $SUBJECT lane's queue could not be read for them. These rigs were still spawned into — the check fails open — but a session with no project to scope to exits IDLE, so the lane is running and doing nothing. A rig is matched to the project whose SLUG equals the rig name, and exactly one match is required, so this is either no match (this token cannot reach that project: wrong workspace, or an access grant it has not been given) or more than one (the slug exists in several of its workspaces, and a rig name cannot say which). Grant the token access to the intended project, or rename so the slug is unique across its workspaces. This is a scope fault: the credential itself is working, which is why it is not reported under \"$AGENT-sweep: no switchyard credential\"." \
     >/dev/null 2>&1
 fi
 

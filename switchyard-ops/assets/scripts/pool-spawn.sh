@@ -121,9 +121,28 @@
 #     the same selector publish-gate trusts),
 #   - it is UNASSIGNED (no `.assignee` — an assigned bead is already someone's),
 #   - it is REAL WORK, the work bead itself and not a self-blocked molecule root:
-#     a directly-slung work bead carries no `gc.kind` (workflow roots/steps all
-#     do), and it is not blocked by an open dependency (a molecule root is
-#     blocked by its own children — the gff-56lh phantom).
+#     a directly-slung work bead carries no `gc.kind` (workflow ROOTS carry
+#     `gc.kind=workflow`), and it is not blocked by an open dependency (a molecule
+#     root is blocked by its own children — the gff-56lh phantom),
+#   - its molecule ROOT is still alive (`gc.root_bead_id` names a bead that is not
+#     closed), and
+#   - nothing it waits on is outstanding: no `blocks` / `waits-for` /
+#     `conditional-blocks` dependency pointing at a bead that has not closed.
+#
+# THE LAST TWO EXIST BECAUSE THE FIRST FOUR LEAKED 72 PHANTOMS (gff-1d2y, sw-ghad).
+# A molecule STEP is not a root: it carries `gc.step_ref` and NO `gc.kind`, so the
+# `gc.kind` test above — written believing "roots/steps all carry it" — never
+# excluded one. Steps are chained (step N+1 `blocks`-depends on step N), so all six
+# of a molecule counted as six demand units when at most the head was claimable;
+# and when a root was reaped its orphaned steps stayed open forever, re-reported
+# every cycle with nothing left to reap them. Neither leak was visible to the old
+# guards: `.blocked_by` and `.blocked` are fields `bd` DOES NOT EMIT, so
+# `(.blocked_by // [])` and `(.blocked // false)` took their defaults and admitted
+# every row. They are kept below only because the self-test's fixtures assert them;
+# the two guards added underneath are the ones with teeth. If you tighten this
+# classifier again, verify it against `bd ready` — an independent implementation of
+# unblocked semantics that cannot be edited from here — and not against a fixture
+# you wrote yourself.
 # ...and the rig must have a free WIP slot: fewer LIVE brakeman sessions than the
 # pool's max_active_sessions. Demand a full pool cannot take is reported, but not
 # as spawn-ready.
@@ -174,22 +193,54 @@ sy_pool_nonsuspended_rigs() {
 # classification against fixture bead JSON directly — the part that can be subtly
 # wrong (an included self-blocked root becomes a phantom spawn) is the part a
 # hermetic test must pin.
+#
+# TWO OF THESE GUARDS ARE QUESTIONS ABOUT *OTHER* BEADS — is this step's molecule
+# root still alive, and are the steps it waits on finished? — so the program takes
+# the WHOLE ledger (`--all`, closed rows included) and indexes it into `$status`
+# first. That keeps the order at exactly ONE `gc bd list` per rig: resolving each
+# root with its own `gc` call would multiply a ~20s subprocess by the rig count,
+# which is what pushed the judging lane's sweep past its deadline (sw-jqrx), and
+# this order runs on a 1-minute cadence.
+#
+# An id MISSING from `$status` is read pessimistically in both places — an unknown
+# root counts as closed, an unknown blocker as unfinished — so a bead this order
+# cannot fully account for is dropped from demand rather than spawned on. That is
+# the same fail-toward-nothing direction the rest of the file takes.
 POOL_DEMAND_JQ='
   (if type=="array" then . else (.beads // []) end)
-  | .[]
+  | . as $all
+  | (reduce $all[] as $b ({}; .[$b.id] = ($b.status // "open"))) as $status
+  | $all[]
   | select((.status // "open") == "open")
   | select((.assignee // "") == "")
   | select((.metadata["gc.routed_to"] // "") | endswith("'"$POOL_SUFFIX"'"))
   | select((.metadata["gc.kind"] // "") == "")
   | select(((.blocked_by // []) | length) == 0)
   | select((.blocked // false) | not)
+  | select(
+      ((.metadata["gc.root_bead_id"] // "") as $root
+       | $root == "" or (($status[$root] // "closed") != "closed"))
+    )
+  | select(
+      ([ .dependencies[]?
+         | ((.type // .dependency_type // "") as $t
+            | select($t == "blocks" or $t == "waits-for" or $t == "conditional-blocks"))
+         | ((.depends_on_id // .id // "") as $dep
+            | select($dep != "" and (($status[$dep] // "open") != "closed")))
+       ] | length) == 0
+    )
   | .id'
 
 # sy_pool_rig_demand RIG — ids of RIG's claimable brakeman demand, one per line.
 # `gc bd list` from the city root sees only the town ledger, so the rig is named
 # explicitly (the same rule publish-gate follows).
+# `--all` rather than `--status open`: the classifier needs the CLOSED rows to tell
+# a finished blocker from an outstanding one and a reaped molecule root from a live
+# one. Without them every closed id reads as absent, and absent is the pessimistic
+# branch — a correct-but-useless demand set of nothing. The rows are cheap (the
+# switchyard ledger measures 428 open / 89 closed) and still cost a single call.
 sy_pool_rig_demand() {
-  gc bd list --rig "$1" --status open --json 2>/dev/null \
+  gc bd list --rig "$1" --all --json 2>/dev/null \
     | jq -r "$POOL_DEMAND_JQ" 2>/dev/null \
     | awk 'NF'
 }

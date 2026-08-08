@@ -14,6 +14,7 @@ switchyard already holds and hands the delivery record back.
 
 Launch inputs (in addition to the inherited build-base inputs):
 - prd_id: {{prd_id}}
+- pool_lease_seconds: {{pool_lease_seconds}}
 
 The artifact root convention for a factory run is `plans/prd-<prd_id>/build` in
 the rig (switchyard PRD #269, q181). Pass it explicitly as `artifact_root`; the
@@ -21,11 +22,12 @@ inherited `prepare` stage records the normalized paths on the workflow root.
 
 STATUS: the `fetch-prd` stage and the three base anchors it feeds
 (`requirements`, `plan`, `plan-review`) land with switchyard PRD #269
-`crit:3ee33868b070`. Every other anchor — `decompose`, `implement`,
-`implement-same-session`, `summarize-implementation`, `review`, `finalize`,
-`publish` — is still INHERITED UNCHANGED from `build-base` and is overridden by
-its own sibling acceptance criterion. REQUIREMENTS.md records each such claim as
-PENDING until it lands, so the ledger never asserts evidence that does not exist.
+`crit:3ee33868b070`; the `decompose` anchor lands with `crit:f8594ebe6dba`.
+Every other anchor — `implement`, `implement-same-session`,
+`summarize-implementation`, `review`, `finalize`, `publish` — is still
+INHERITED UNCHANGED from `build-base` and is overridden by its own sibling
+acceptance criterion. REQUIREMENTS.md records each such claim as PENDING until
+it lands, so the ledger never asserts evidence that does not exist.
 """
 formula = "sy-build-from-prd"
 version = 1
@@ -53,6 +55,10 @@ review_modes = ["report", "agent", "interactive"]
 [vars.prd_id]
 description = "Numeric switchyard PRD id to build. The PRD must already be approved in the app."
 required = true
+
+[vars.pool_lease_seconds]
+description = "Lease length taken on each claimed switchyard pool bead, in seconds. Defaults to the server's 1-hour cap (settled by PRD 269 q179: claim at the cap and heartbeat, rather than adding a longer lease class for factory claims). A larger value is silently clamped to the cap by the server."
+default = "3600"
 
 # --- fetch-prd: the switchyard-specific source stage ------------------------
 # Inserted between `prepare` and the `requirements` anchor. It does not replace
@@ -108,3 +114,37 @@ title = "Record the app-side approval as plan-review evidence"
 needs = ["plan"]
 metadata = { "gc.run_target" = "gc.review-synthesizer" }
 description_file = "../assets/workflows/sy-build-from-prd/plan-review.md"
+
+# --- decompose -------------------------------------------------------------
+# RESTATED IN FULL, like every other override here: `extends` merges steps by
+# id and gascity's parser does WHOLE-STEP REPLACEMENT (formula/parser.go
+# mergeSteps: `result[idx] = cs`), so declaring only the changed fields would
+# silently drop the parent's `gc.run_target`, its artifact metadata and its
+# check block. Only `title` and `description_file` differ from `build-base`;
+# `gc.run_target`, both artifact metadata keys, `needs`, and the check block
+# are the base's own and must stay that way.
+#
+# Renaming the stage is not an override, it is an ADDITION — the base id would
+# survive alongside it and run its generic prose anyway. That is why this is
+# `id = "decompose"` with a switchyard title, not `id = "map-pool-to-convoy"`:
+# the stage's human name lives in `title` and in its asset filename, and the id
+# belongs to the base contract.
+#
+# The artifact contract is unchanged — this stage still produces a
+# `gc.build.decomposition.v1` artifact at the recorded decomposition path,
+# still gated by build-artifact-valid.sh. What changes is where the work items
+# come from: switchyard's claim pool, not an LLM's reading of the plan.
+[[steps]]
+id = "decompose"
+title = "Map the PRD's pool beads to a phase-ordered convoy"
+needs = ["plan-review"]
+metadata = { "gc.run_target" = "gc.task-decomposer", "gc.build.artifact_schema" = "gc.build.decomposition.v1", "gc.build.artifact_path_keys" = "gc.build.decomposition_path,gc.var.decomposition_path" }
+description_file = "../assets/workflows/sy-build-from-prd/map-pool-to-convoy.md"
+
+[steps.check]
+max_attempts = 3
+
+[steps.check.check]
+mode = "exec"
+path = ".gc/scripts/checks/build-artifact-valid.sh"
+timeout = "5m"

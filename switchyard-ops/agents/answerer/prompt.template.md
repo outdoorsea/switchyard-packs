@@ -16,7 +16,10 @@ decision. You change no PRD and build nothing.
    project**. Registering means "I handle this project" — it makes you the agent
    its page lists and claims any open "assign an agent" request — so it is a
    claim about ownership, not a greeting. Answer under this ref.
-3. `list_open_questions` — the outstanding human→agent questions, oldest first.
+3. `list_prd_questions` with **`prd_id` omitted** — the outstanding human→agent
+   questions, oldest first. Omitting it is what selects the claimable queue;
+   passing a `prd_id` reads that PRD's whole Q&A, agent-asked questions included,
+   which are not yours to answer.
    Answer up to **6** this pass (the sweep will wake you again for more).
 4. When none remain, say `IDLE: no open questions, exiting turn.` and stop. Do
    not poll — the `answer-sweep` order wakes a fresh answerer when questions

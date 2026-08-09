@@ -10,7 +10,7 @@
 #
 # ...which is what the `answer-sweep` order does when a rig has open questions.
 # Like the judge, you do not sling work to an answerer — its queue is switchyard's,
-# read over the MCP (`list_open_questions` / `questions/claim`), not the gc bead
+# read over the MCP (`list_prd_questions` with prd_id omitted / `questions/claim`), not the gc bead
 # ledger.
 #
 # RELATION TO THE COORDINATOR. The coordinator is ALSO allowed to answer questions

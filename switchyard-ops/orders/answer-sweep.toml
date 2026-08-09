@@ -6,7 +6,7 @@
 # can settle from the rig's code and history, and recommends on the rest. It is
 # min_active_sessions=0; this order spawns one per rig-with-a-coordinator when none
 # is running, via the shared lane-ensure spawner. The session reads
-# `list_open_questions` over the MCP and exits IDLE when the queue is empty, so a
+# `list_prd_questions` (prd_id omitted) over the MCP and exits IDLE when the queue is empty, so a
 # spawn on no questions costs one cheap read.
 #
 # Cadence is 20m: questions want responsiveness, but this is a POLL — once the

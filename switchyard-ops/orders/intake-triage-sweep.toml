@@ -1,0 +1,27 @@
+# Keep an intake triager alive for each rig that drives a switchyard project, so
+# untriaged issues get a category and a priority within the hour instead of
+# waiting on the 4h coordinator nudge — and without a `switchyard-companion`
+# running to do it (switchyard PRD #327).
+#
+# The triager (agents/intake-triage) claims the next untriaged issue, categorizes
+# the ones the evidence settles, and RELEASES the ones it cannot decide back to
+# the queue. It is min_active_sessions=0; this order spawns one per
+# rig-with-a-coordinator when none is running, via the shared lane-ensure spawner,
+# which reads the rig's `/intake` queue first and leaves a drained rig alone.
+#
+# RELATION TO intake-sweep. `intake-sweep` (4h) nudges the COORDINATOR to triage
+# its own intake, and stays exactly as it is. This lane does not replace it: it
+# drains the mechanical cases fast and hands the ambiguous ones back, which is
+# precisely the set the coordinator's judgment block is for. The two cannot
+# collide on a row because this lane claims per-issue before deciding.
+#
+# Cadence is 1h — slower than the answerer's 20m because an untriaged issue is
+# less latency-sensitive than an open question blocking a PRD, and faster than the
+# 4h nudge because intake that sits is intake nobody routes. Like the other
+# sweeps this is a POLL; once an event bridge lands, a triager can be woken when
+# an issue arrives and this poll becomes the safety net rather than the trigger.
+[order]
+description = "Spawn one intake triager per rig with a switchyard coordinator when none is live and its intake queue is non-empty; it categorizes what the evidence settles and releases the rest"
+trigger = "cooldown"
+interval = "1h"
+exec = "$PACK_DIR/assets/scripts/lane-ensure.sh intake-triage intake-triage"

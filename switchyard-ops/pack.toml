@@ -8,6 +8,7 @@
 #   dupe-sweep     — start a dupe-scout for a rig with open issues (6h)
 #   loop-health    — pinned coordinators alive + status probe honest (30m)
 #   intake-sweep   — nudge coordinators to triage switchyard intake (4h)
+#   intake-triage-sweep — keep an intake triager categorizing untriaged issues (1h)
 #   nightly-retro  — nudge the retro agent to draft daily reports (24h)
 #   stray-reaper   — detect sessions from foreign/stale city paths (6h)
 #   config-drift   — config-as-code guard (6h; no-ops if the city isn't a repo)
@@ -52,6 +53,12 @@
 #                    Takes NO claim (proposals are idempotent server-side), so a
 #                    re-scan is safe and the cadence is the slowest of the lane
 #                    sweeps. Started by dupe-sweep.
+#   intake-triage  — the ISSUE AUTO-TRIAGE lane (PRD #327). Claims untriaged
+#                    issues, categorizes the ones the evidence settles and
+#                    RELEASES the rest back to the queue, so the pack no longer
+#                    needs a switchyard-companion to triage. Complements
+#                    intake-sweep (which nudges the coordinator) rather than
+#                    replacing it. Started by intake-triage-sweep.
 #   security-scout — the SECURITY-REVIEW lane, run on an INDEPENDENT PROVIDER
 #                    (kimi) so it does not share the blind spots of the model it
 #                    reviews. Scans the diff since its last pass, files findings

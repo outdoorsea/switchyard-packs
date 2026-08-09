@@ -119,6 +119,20 @@ case "$AGENT" in
     LANE_QUEUE_SUFFIX="/questions/open"
     LANE_QUEUE_COUNT_JQ='if (.questions|type) == "array" then (.questions|length) else empty end'
     ;;
+  intake-triage)
+    # The unified intake queue — untriaged ideas AND issues (switchyard PRD #327).
+    # The triager only acts on the issues, but the endpoint is the queue the
+    # coordinator's own intake sweep reads, and a rig with untriaged ideas and no
+    # untriaged issues is still a rig worth waking: the pass costs one read and
+    # exits IDLE. Overcounting here can only cause a cheap no-op spawn, whereas
+    # undercounting silently unstaffs the lane.
+    #
+    # `items` is the response's real array key, confirmed against a live project
+    # rather than assumed — the whole point of the strictness described above is
+    # lost if the key is guessed, since a wrong name reads as a drained queue.
+    LANE_QUEUE_SUFFIX="/intake"
+    LANE_QUEUE_COUNT_JQ='if (.items|type) == "array" then (.items|length) else empty end'
+    ;;
   dupe-scout)
     LANE_QUEUE_SUFFIX="/issues/open"
     LANE_QUEUE_COUNT_JQ='if (.issues|type) == "array" then (.issues|length) else empty end'

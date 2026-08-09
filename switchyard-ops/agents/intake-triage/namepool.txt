@@ -1,0 +1,19 @@
+# Railway classification & waybilling occupations — themed session names for the
+# intake-triage pool. Kin to brakeman (trades), judge (inspectors) and answerer
+# (dispatchers), drawn from the roles that SORT and CLASSIFY what arrives: the
+# yard clerks who read a waybill and decide which track a car belongs on, which
+# is exactly what this lane does to an untriaged issue.
+#
+# `gc` draws one name per concurrent session, so this pool must hold at least
+# max_active_sessions entries (intake-triage runs one). Single-word, lowercase — a
+# name is a session identifier, not a title.
+clerk
+sorter
+checker
+weigher
+tallyman
+classifier
+waybiller
+routeman
+carder
+markman

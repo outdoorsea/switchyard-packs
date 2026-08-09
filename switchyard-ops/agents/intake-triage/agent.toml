@@ -1,0 +1,48 @@
+# intake-triage — the switchyard issue auto-triage lane, as a Gas City agent.
+#
+# An intake-triage agent claims the next UNTRIAGED issue, decides its category
+# and priority from the issue text and the rig's code, and posts that verdict
+# back — or, when it cannot decide, RELEASES the stake so a human or a better-
+# informed session gets it. It is the pack-native replacement for the
+# `switchyard-companion` triage loop (switchyard PRD #327): the companion is a
+# second runtime to install, credential and supervise, and this lane removes the
+# reason to run one.
+#
+#   gc session new <rig>/switchyard-ops.intake-triage --no-attach
+#
+# ...which is what the `intake-triage-sweep` order does when a rig's intake queue
+# is non-empty. Like the judge and the answerer, you do not sling work to it — its
+# queue is switchyard's, read over the MCP (`list_intake_queue` / `claim`), not
+# the gc bead ledger.
+#
+# RELATION TO intake-sweep. The existing `intake-sweep` order NUDGES a coordinator
+# to triage its own intake; the judgment happens inside that coordinator session
+# at a 4h cadence. This lane does not replace that — it makes the mechanical case
+# (an issue whose category and priority are evident from its text) fast, and
+# leaves the genuinely ambiguous ones for the coordinator by releasing them. It
+# claims per-issue, so it never races the coordinator onto the same row.
+#
+# RELEASING IS A FIRST-CLASS OUTCOME HERE, not a failure. A triage guess banked
+# with false confidence is worse than no triage: the row leaves the untriaged
+# queue, so nobody looks at it again, and a mis-prioritised security issue is
+# indistinguishable from a triaged one. Releasing puts it back where a human will
+# see it.
+scope = "rig"
+
+# fresh: each pass triages from the current issue text and code; there is no state
+# to carry between issues.
+wake_mode = "fresh"
+
+# Read-only except for the verdicts it posts over MCP. It reads the rig's code to
+# ground a category; it never edits, branches, or commits.
+work_dir = ".gc/worktrees/{{.Rig}}/intake-triage/{{.AgentBase}}"
+
+nudge = "Run one triage pass now: claim untriaged issues, categorize the ones you can decide from the text and code, release the rest, then exit."
+
+idle_timeout = "30m"
+
+# min 0 / max 1: per-issue claims already prevent two triagers from colliding, but
+# one is enough for the volume and keeps spend predictable. Widen only if intake
+# piles up faster than one session drains it.
+min_active_sessions = 0
+max_active_sessions = 1

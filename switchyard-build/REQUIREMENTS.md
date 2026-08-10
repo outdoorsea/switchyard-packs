@@ -114,7 +114,7 @@ being left implicit:
     rather than randomising it is what lets a retry recognise its OWN prior
     claims instead of reporting them as another lane's and minting an empty
     convoy.
-  - **Phase order comes from one pool read.** `list_claimable_work` projects
+  - **Phase order comes from one pool read.** `list_claimable_beads` projects
     `phase_label` beside `prd_id` and `crit_label` (crit:f74755f880ea), which is
     the whole reason that projection exists (q178/q189). The criteria read is
     for the skip report only, never for phase.

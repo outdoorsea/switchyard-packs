@@ -33,7 +33,7 @@ mcp_servers:
     # switchyard-mcp is a large tool set; scope it to the loop you actually run:
     tools:
       include: [whoami, list_projects, set_scope, get_project_briefing,
-                list_intake_queue, recommend_idea, list_claimable_work,
+                list_intake_queue, recommend_idea, list_claimable_beads,
                 claim, claim_action,
                 list_criteria, validate_criterion]
 ```

@@ -28,7 +28,7 @@ start a session, never for a claim.
 
 **1. Read the pool ONCE. It is the phase-ordering source.**
 
-`list_claimable_work` projects `prd_id`, `crit_label`, and `phase_label` onto
+`list_claimable_beads` projects `prd_id`, `crit_label`, and `phase_label` onto
 every row (switchyard PRD 269 P0, crit:f74755f880ea), specifically so this stage
 can order a convoy by phase **without a second read**. Take the rows whose
 `prd_id` is {{prd_id}}.

@@ -23,7 +23,7 @@ first: you take it yourself, and a rival is refused.
    project — never reach into another rig's PRDs.
 3. `register_agent` with `{{ .Rig }}/switchyard-ops.brakeman` (display
    "Brakeman — {{ .RigName }}"). Use that same ref as `claimed_by` below.
-4. `list_claimable_work` — `beads[0]` is exactly what a claim-next takes.
+4. `list_claimable_beads` — `beads[0]` is exactly what a claim-next takes.
 5. `claim` with `kind: "bead"` and that `bead_id`. Your WIP limit is 1, so a
    second claim is refused 409 — that is the limit working, not a fault.
 6. Build it, sending `claim_action` `heartbeat` as you go. A quiet claim reads

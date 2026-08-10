@@ -14,7 +14,7 @@ Over the switchyard MCP:
    `claim(kind='issue')` + `claim_action(kind='issue', action='categorize')`.
    Recommend, don't decide: routing an idea to a pitch is a human's call.
 3. `list_dispatched_epics` — set priorities on any epic that has none.
-4. `list_claimable_work` — if your workers are idle, claim the top bead
+4. `list_claimable_beads` — if your workers are idle, claim the top bead
    yourself when it is coordinator-shaped work; otherwise it reaches a worker
    through the readiness gate below.
 
@@ -25,7 +25,7 @@ Over the switchyard MCP:
    readiness gate below, one bead at a time.
 
    Epic-scale is your judgment, anchored on a stated default: at least 4
-   claimable beads spanning at least 2 phases. Every `list_claimable_work` row
+   claimable beads spanning at least 2 phases. Every `list_claimable_beads` row
    carries `prd_id` and `phase_label`, so one read decides it.
    Depart from the default when the work argues for it and say why in your
    mail — a tightly coupled trio can earn a factory run, and six unrelated

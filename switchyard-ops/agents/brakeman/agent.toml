@@ -62,7 +62,7 @@ work_dir = ".gc/worktrees/{{.Rig}}/workers/{{.AgentBase}}"
 # topology and that is opt-in per project. Until it lands, a rig still needs its
 # gc-bd demand to get a brakeman started; what changed is where that brakeman
 # then takes its work from, and how it reports the delivery.
-nudge = "Claim from switchyard's cloud pool now: list_claimable_work, then claim kind=bead on beads[0]; if the pool is empty, say IDLE: no work, exiting turn. and stop."
+nudge = "Claim from switchyard's cloud pool now: list_claimable_beads, then claim kind=bead on beads[0]; if the pool is empty, say IDLE: no work, exiting turn. and stop."
 
 # Owned by this pack. It began as a copy of gastown's
 # assets/scripts/worktree-setup.sh (sha256 ab0a5ed4770dd27b3961fd7f1f5714cf55

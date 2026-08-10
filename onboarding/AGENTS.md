@@ -52,7 +52,7 @@ out-of-band through a host prompt or modal.
 ### 3 · Deliver — bead → shipped
 One claim protocol covers every domain: `claim` takes the lease, `claim_action`
 drives it, and `kind` says what you are holding (`bead`, `criterion`, `issue`).
-- `list_claimable_work` → `claim(kind='bead')` (takes a lease).
+- `list_claimable_beads` → `claim(kind='bead')` (takes a lease).
 - Long-running work: renew the lease with
   `claim_action(kind='bead', action='heartbeat')` so it doesn't expire mid-build.
 - Do the work in your repo. When it lands:
@@ -86,7 +86,7 @@ drives it, and `kind` says what you are holding (`bead`, `criterion`, `issue`).
 | Orient | `whoami`, `list_projects`, `set_scope`, `get_project_briefing` |
 | Triage | `list_intake_queue`, `recommend_idea`, `claim`, `claim_action`, `list_dispatched_epics`, `list_prd_questions`, `answer_prd_question` |
 | Author | `create_blueprint`, `draft_prd`, `set_prd_phases`, `ask_prd_question`, `recommend_prd_question`, `approve_prd`, `create_beads_from_prd` |
-| Deliver | `list_claimable_work`, `claim`, `claim_action` |
+| Deliver | `list_claimable_beads`, `claim`, `claim_action` |
 | Validate | `list_criteria`, `validate_criterion`, `link_bead_to_criterion` |
 | Report | `draft_daily_report`, `create_project_report`, `get_roadmap` |
 

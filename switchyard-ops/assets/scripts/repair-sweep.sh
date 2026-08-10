@@ -1,0 +1,403 @@
+#!/bin/sh
+# repair-sweep: notice a real judgment rejection and put exactly one worker on it
+# (switchyard PRD #330, crit:b6ea44d544e6).
+#
+# WHY THIS EXISTS. PRD #315 made a rejection DURABLE — the judge's reason is
+# required, stored, and folded into retry guidance — and said in its own
+# out-of-scope that it would not ROUTE. Nothing has since. So a `fail` verdict
+# resets the criterion to `outstanding`, writes the reason onto the delivering
+# bead, and then waits for a human to notice. This order is the routing half: it
+# reads the rejections the ledger already recorded and hands each one to a
+# worker, once.
+#
+# JUDGMENT LIVES IN THE SESSION, NOT HERE. Like intake-sweep, this script only
+# decides WHO to wake and about WHICH criterion. What a repair should actually
+# change is decided inside the brakeman session that receives the assignment,
+# which has the switchyard MCP and can read the verdict, the diff and the
+# lineage. This file must never grow a judgment about the code under repair.
+#
+# ONLY A RECORDED `fail` COUNTS. The sweep keys on the verdict ledger's
+# verdict == "fail", never on criterion status. That distinction is the whole
+# point: a criterion that is merely unvalidated, deferred, or contract-failed is
+# `outstanding` with a closed bead too, so a status-based sweep would route
+# repair work for criteria nobody has judged at all. `verdict` is the only
+# recorded field that separates "a judge looked and refused this" from "nobody
+# has looked yet" — a rejected criterion is otherwise byte-identical to an
+# unjudged one on every read the API offers.
+#
+# EXACTLY ONE ASSIGNMENT PER REJECTED CRITERION, AND NEVER A SECOND WHILE THE
+# FIRST IS LIVE. Two independent guards, because they answer different questions
+# and either alone leaks:
+#
+#   * a LIVE CLAIM on the criterion means a worker already holds the repair —
+#     it does not matter whether we are the sweep that routed them;
+#   * a LIVE ASSIGNMENT MARKER means WE routed a worker who has not yet taken
+#     the claim, which no read of the criterion can show (a dispatched worker
+#     that has not called claim yet is indistinguishable from an idle one).
+#
+# A cycle that routed nobody must leave nothing live, so the marker is written
+# ONLY after the nudge actually succeeds. Writing it first would let a failed
+# dispatch suppress its own retry — the criterion would read as "assigned"
+# forever with no worker on it, which is the silent drop this sweep exists to
+# remove.
+#
+# THE ASSIGNMENT CARRIES ITS OWN BRIEF (crit:d1c12adefee0). Routing a worker to a
+# rejected criterion and telling them to go find out why is a handoff with the
+# expensive half missing: the judge's reason lives on the DELIVERING BEAD as a
+# `judgment_fail` handoff (AttachJudgmentFailGuidance writes the rationale into
+# its broken_or_unverified), which the worker only sees once they have claimed
+# and re-opened the right bead — i.e. after they have already committed to the
+# repair. So the sweep reads it HERE and puts it in the message, together with
+# what the judge reviewed when they refused it.
+#
+# THE BRIEF NEVER GATES THE ROUTING. Every read behind it fails open to an empty
+# string, and an assignment whose brief could not be assembled still goes out
+# saying so, naming where to look. A sweep that withheld a repair because an
+# audit read 404'd would convert a degraded brief into the exact silent stall
+# this order removes — and the brief is an enrichment of the assignment, never a
+# precondition for it.
+set -u
+
+. "$(dirname "$0")/../lib/roster.sh"
+. "$(dirname "$0")/../lib/switchyard-api.sh"
+
+# The pool a repair is routed to. A rig's worker pool is
+# `<rig>/switchyard-ops.brakeman` — the same suffix pool-spawn staffs, because a
+# repair is ordinary pool work with a known target, not a new kind of worker.
+POOL_SUFFIX=".brakeman"
+
+# How long a routed assignment stays LIVE, in seconds. Defaults to one order
+# interval: an assignment that has not become a held claim within its own cycle
+# has not been consumed, and the next cycle is free to route it again.
+REPAIR_ASSIGNMENT_TTL="${REPAIR_ASSIGNMENT_TTL:-3600}"
+
+command -v jq >/dev/null 2>&1 || exit 0
+
+token="$(sy_api_token)"
+[ -n "$token" ] || exit 0
+projects="$(sy_api_projects "$token")"
+[ -n "$projects" ] || exit 0
+
+# The RIGS to sweep, not the agents. sy_roster emits QUALIFIED AGENT NAMES
+# (`rigA/switchyard-ops.brakeman`, optionally with a `:tmux-prefix` suffix), and
+# what this sweep needs is the rig segment: sy_project_for_rig matches a rig name
+# against a project SLUG, so passing a qualified name would match no project on
+# any city and the sweep would route nothing, everywhere, in silence.
+#
+# Entries with no `/` are city-scoped and name no rig, so they are dropped rather
+# than passed through as a rig that cannot exist.
+#
+# A city with no rigs is a legitimate state, not a fault. Say nothing.
+rigs="$(sy_roster | sed 's/:.*$//' | grep '/' | sed 's#/.*##' | sort -u | awk 'NF')"
+[ -n "$rigs" ] || exit 0
+
+markers="$(sy_state_dir)/repair-assignments"
+mkdir -p "$markers" 2>/dev/null || exit 0
+
+now="$(date -u +%s)"
+routed=0
+failed=""
+TAB="$(printf '\t')"
+
+# prev_day DATE — the calendar day before DATE (YYYY-MM-DD), or empty.
+#
+# GNU and BSD `date` disagree on relative arithmetic and neither accepts the
+# other's spelling, so both are tried and an unparseable answer is empty rather
+# than wrong. Empty is safe here: it costs the boundary read below, not
+# correctness of the reads that did work. An empty argument returns empty rather
+# than falling through to GNU's "now minus a day", which would answer a question
+# about the host clock that nobody asked.
+prev_day() {
+  [ -n "${1:-}" ] || return 0
+  date -u -d "$1 -1 day" +%Y-%m-%d 2>/dev/null && return 0
+  date -u -j -f %Y-%m-%d -v-1d "$1" +%Y-%m-%d 2>/dev/null && return 0
+  return 0
+}
+
+# fails ROLLUP_JSON — the rejections in one day's rollup, as `prd_id<TAB>label`.
+#
+# `.retro.validations` is the ONLY exposed read carrying a verdict discriminator
+# (internal/db/daily_report.go: "Verdict ("done" | "fail") distinguishes the
+# two"), so it is what "a real rejection" is read from. An empty or malformed
+# body yields nothing, which fails open exactly like every other read here.
+fails() {
+  printf '%s' "$1" | jq -r '
+      (.retro.validations // [])[]
+      | select((.verdict // "") == "fail")
+      | select((.crit_label // "") != "" and ((.prd_id // 0) > 0))
+      | "\(.prd_id)\t\(.crit_label)"' 2>/dev/null
+}
+
+# verdict_for ROLLUPS PRD LABEL — the NEWEST recorded `fail` for that PRD and
+# label across the day rollups already read this cycle, as
+# `validator<TAB>evidence_ref<TAB>validated_at<TAB>provenance`. Empty when the
+# criterion carries no fail, which fails open like every other read here.
+#
+# KEYED ON THE PAIR, AND ON BOTH HALVES. A single cycle routinely refuses more
+# than one criterion, and an UNKEYED pick hands every brief the newest verdict in
+# the rollup — attributing one judge's rejection to another criterion. That is
+# not an incomplete brief but a false one, stating a checkable-looking fact that
+# is wrong, which is the failure the whole assembly exists to avoid. The PRD is
+# the other half of the key because `crit_label` hashes the criterion TEXT: two
+# PRDs in one project sharing a boilerplate acceptance line share a label, and
+# this rollup is project-wide, so the label alone is not unique in it. The
+# routing loop already holds the authoritative PRD, so narrowing costs nothing.
+# Compared as a STRING (`tostring`, never `--argjson`) so a rollup encoding
+# prd_id either way still matches, and a malformed value degrades this one brief
+# instead of erroring jq out of it.
+#
+# A LOOKUP, NOT A WIDER `fails()` RECORD — and that is load-bearing rather than
+# stylistic. The routing set is deduped with `sort -u` over `prd<TAB>label`, so
+# adding per-verdict columns to what `fails()` emits would make a criterion
+# rejected TWICE (or rejected on both days this sweep reads) two distinct lines,
+# and the sibling guarantee this order already ships — exactly one assignment per
+# rejected criterion, crit:b6ea44d544e6 — would break silently in the one case it
+# exists for. Keeping the brief out of the dedup key means the two cannot
+# interact at all.
+#
+# Read from the rollups ALREADY IN HAND, never re-fetched: they are the very
+# documents the rejection was noticed in, so the brief cannot end up describing a
+# different verdict than the one that routed the assignment. Slurped (`-s`)
+# because the two days arrive as two separate JSON documents; `last` after
+# sort_by picks the newest when a criterion was refused more than once.
+verdict_for() {
+  printf '%s' "$1" | jq -rs --arg p "$2" --arg l "$3" '
+      [ .[]
+        | (.retro.validations // [])[]
+        | select((.verdict // "") == "fail")
+        | select((.crit_label // "") == $l)
+        | select(((.prd_id // 0) | tostring) == $p) ]
+      | sort_by(.validated_at // "")
+      | last
+      | if . == null then empty
+        else [ (.validator // ""), (.evidence_ref // ""),
+               (.validated_at // ""), (.verdict_provenance // "") ] | @tsv
+        end' 2>/dev/null | head -n1
+}
+
+# repair_brief PROJECT TOKEN PRD LABEL ROLLUPS — the assignment's brief: WHY this
+# criterion was refused, and WHAT the judge was looking at when they refused it.
+# Always prints something; an unreadable source degrades to a line saying so.
+#
+# THE RATIONALE IS NOT ON ANY CRITERION READ. `prd_criterion_validations` stores
+# it, but neither the rollup (DailyReportValidation) nor `/criteria` exposes that
+# column — the only read that surfaces it is the delivering bead's handoff chain,
+# where AttachJudgmentFailGuidance mirrors it into `broken_or_unverified` on a
+# `judgment_fail` row. Hence the delivery-evidence audit read, which also carries
+# the rest of the prior delivery's grounds (its PRs and its verification run) in
+# the same response, so the brief costs ONE call.
+#
+# THE BEAD ID IS DERIVED, NOT DISCOVERED. A criterion's pool bead is
+# deterministically `prd-{prd}-{hash}` (internal/prddispatch/pool_enqueue.go's
+# poolBeadID, documented deterministic so a criterion always maps to the same
+# primary key). `satisfying_bead_id` on /criteria is NOT the handle to use: it is
+# populated only by an explicit link_bead_to_criterion and is empty for the
+# ordinary pool bead. A criterion delivered through the RIG lane carries an `sw-`
+# id this derivation cannot produce — that read simply 404s and the brief
+# degrades, which is why the reason is reported as unavailable rather than
+# assumed absent.
+#
+# Every local is `_rb_`-prefixed: POSIX sh has no `local`, this runs INSIDE the
+# routing loop, and a bare `prd`/`label`/`target` here would overwrite the loop's
+# own and route the wrong criterion.
+repair_brief() {
+  _rb_project="$1"
+  _rb_token="$2"
+  _rb_prd="$3"
+  _rb_label="$4"
+  _rb_validator=""
+  _rb_ref=""
+  _rb_at=""
+  _rb_prov=""
+
+  _rb_line="$(verdict_for "$5" "$_rb_prd" "$_rb_label")"
+  if [ -n "$_rb_line" ]; then
+    _rb_validator="$(printf '%s\n' "$_rb_line" | cut -f1)"
+    _rb_ref="$(printf '%s\n' "$_rb_line" | cut -f2)"
+    _rb_at="$(printf '%s\n' "$_rb_line" | cut -f3)"
+    _rb_prov="$(printf '%s\n' "$_rb_line" | cut -f4)"
+  fi
+
+  _rb_bead="prd-$_rb_prd-$(printf '%s' "$_rb_label" | sed 's/^crit://')"
+  _rb_ev="$(sy_api_get "/api/v1/projects/$_rb_project/beads/$_rb_bead/delivery-evidence" "$_rb_token")"
+  _rb_reason=""
+  _rb_prs=""
+  _rb_verify=""
+  if [ -n "$_rb_ev" ]; then
+    # Newest first (bead_handoffs is ordered created_at DESC), so `.[0]` is the
+    # rejection that routed THIS assignment rather than a superseded one. Rows
+    # with an empty account are dropped before the pick: a bare marker would
+    # otherwise shadow the real rationale behind it.
+    _rb_reason="$(printf '%s' "$_rb_ev" | jq -r '
+        [ (.handoffs // [])[]
+          | select((.action // "") == "judgment_fail")
+          | select((.broken_or_unverified // "") != "") ]
+        | .[0].broken_or_unverified // empty' 2>/dev/null)"
+    _rb_prs="$(printf '%s' "$_rb_ev" | jq -r '
+        [ (.prd_prs // [])[] | (.url // "") | select(. != "") ]
+        | .[0:5] | join(", ")' 2>/dev/null)"
+    _rb_verify="$(printf '%s' "$_rb_ev" | jq -r '
+        if (.verification // null) == null then empty
+        else "\(.verification.command // "?") (exit \(.verification.exit_code))"
+        end' 2>/dev/null)"
+  fi
+
+  if [ -n "$_rb_reason" ]; then
+    printf 'WHY IT WAS REJECTED\n%s\n' "$_rb_reason"
+  else
+    printf 'WHY IT WAS REJECTED\n(the rejecting handoff could not be read from %s — read the verdict with\nget_prd / list_criteria before you change anything, and do NOT assume the prior\ndelivery was merely unfinished.)\n' "$_rb_bead"
+  fi
+
+  [ -n "$_rb_validator" ] && printf '\nRejected by: %s%s%s\n' \
+    "$_rb_validator" "${_rb_at:+ at $_rb_at}" "${_rb_prov:+ (verdict: $_rb_prov)}"
+  [ -n "$_rb_ref" ] && printf 'Reviewed: %s\n' "$_rb_ref"
+  [ -n "$_rb_prs" ] && printf 'Prior delivery PRs: %s\n' "$_rb_prs"
+  [ -n "$_rb_verify" ] && printf 'Prior verification run: %s\n' "$_rb_verify"
+  return 0
+}
+
+for rig in $rigs; do
+  project="$(sy_project_for_rig "$rig" "$projects")"
+  [ -n "$project" ] || continue
+
+  today="$(sy_api_get "/api/v1/projects/$project/daily-report-draft" "$token")"
+  [ -n "$today" ] || continue
+
+  # TODAY AND THE DAY BEFORE IT. The rollup buckets one PROJECT-LOCAL calendar
+  # day, so a rejection recorded at 23:50 leaves today's window the moment
+  # midnight rolls over — a sweep reading only "today" would drop every late
+  # rejection on the floor and never route it. The previous day is anchored on
+  # the rollup's OWN `.date`, which is the project's local day, rather than on
+  # the host's UTC clock, so a city in a different zone than its project still
+  # reads the two days that actually adjoin.
+  rejections="$(fails "$today")"
+  # The same documents are kept whole for the brief, so what an assignment says
+  # about a verdict comes from the read that noticed it (see verdict_for).
+  rollups="$today"
+  yday="$(prev_day "$(printf '%s' "$today" | jq -r '.date // empty' 2>/dev/null)")"
+  if [ -n "$yday" ]; then
+    prev="$(sy_api_get "/api/v1/projects/$project/daily-report-draft?date=$yday" "$token")"
+    [ -n "$prev" ] && rejections="$rejections
+$(fails "$prev")" && rollups="$rollups
+$prev"
+  fi
+  rejections="$(printf '%s\n' "$rejections" | awk 'NF' | sort -u)"
+  [ -n "$rejections" ] || continue
+
+  # The criterion read is fetched ONCE per rig and reused for every rejection in
+  # it: it is a network call, and re-reading it per criterion would also let a
+  # mid-cycle blip answer differently for two criteria in the same sweep.
+  criteria="$(sy_api_get "/api/v1/projects/$project/criteria" "$token")"
+
+  target=""
+  target_known=1
+  if ! target="$(sy_live_session_for "$rig/switchyard-ops$POOL_SUFFIX")"; then
+    target=""
+    target_known=0
+  fi
+
+  # A HERE-DOC, NOT A PIPE. `printf ... | while read` runs the loop body in a
+  # SUBSHELL, so every `routed`/`failed` this loop records would be discarded at
+  # the `done` — the failure mail below would then be unreachable and a sweep
+  # that routed nothing would exit 0 in silence, which is the exact failure mode
+  # the silent-failure invariant exists to prevent.
+  while IFS="$TAB" read -r prd label; do
+    [ -n "${prd:-}" ] && [ -n "${label:-}" ] || continue
+    key="prd$prd-$(printf '%s' "$label" | tr -c 'A-Za-z0-9' '-')"
+    marker="$markers/$key"
+
+    # GUARD 1 — a live claim. The criteria read surfaces a claim only while its
+    # lease is unexpired ("Only LIVE claims appear"), so a non-empty claimed_by
+    # IS a worker holding this criterion right now. Routing a second one would
+    # put two workers on one repair.
+    #
+    # An UNREADABLE criteria body skips the guard rather than the criterion:
+    # this whole path fails open, and withholding a repair on a bad read is the
+    # stall the sweep exists to remove.
+    #
+    # NARROWED ON (prd, label), NOT THE LABEL ALONE, for the same reason
+    # verdict_for is: crit_label hashes the criterion TEXT, and this read is
+    # project-wide, so two PRDs sharing a boilerplate acceptance line share a
+    # label. Matching on the label alone let a live claim on ONE PRD's criterion
+    # make a different PRD's rejected criterion read as held — its repair never
+    # routed, and silently, because the criterion is skipped before the `failed`
+    # accumulation below. api_v1_criteria.go says it outright: uniqueness is
+    # (prd_id, crit_label), never crit_label alone.
+    if [ -n "$criteria" ]; then
+      held="$(printf '%s' "$criteria" | jq -r --arg l "$label" --arg p "$prd" '
+          (.criteria // [])
+          | map(select((.crit_label // "") == $l)
+                | select(((.prd_id // 0) | tostring) == $p))
+          | .[0].claimed_by // empty' 2>/dev/null | awk 'NF' | head -n1)"
+      [ -n "$held" ] && continue
+    fi
+
+    # GUARD 2 — an assignment we already routed that has not aged out. Nothing
+    # on the criterion can show this: a worker nudged one minute ago has not
+    # claimed yet and reads exactly like a worker nobody has told.
+    if [ -f "$marker" ]; then
+      at="$(awk 'NR==1{print $1}' "$marker" 2>/dev/null)"
+      case "${at:-}" in
+      *[!0-9]* | "") at=0 ;;
+      esac
+      [ "$((now - at))" -lt "$REPAIR_ASSIGNMENT_TTL" ] && continue
+    fi
+
+    if [ "$target_known" -eq 0 ]; then
+      failed="$failed $rig/$label(session-lookup-failed)"
+      continue
+    fi
+    if [ -z "$target" ]; then
+      failed="$failed $rig/$label(no-live-worker)"
+      continue
+    fi
+
+    # Assembled only for a criterion that IS being routed — after both guards, so
+    # a suppressed rejection costs no extra call — and never allowed to fail the
+    # dispatch: repair_brief always succeeds, degrading its content instead.
+    brief="$(repair_brief "$project" "$token" "$prd" "$label" "$rollups")"
+
+    if gc session nudge "$target" "REPAIR $label (PRD #$prd, project $project)
+
+A judge recorded a \`fail\` on this criterion: it was delivered, reviewed, and
+refused. It is repair work, not new work.
+
+$brief
+Take the criterion claim before you build — claim { kind: \"criterion\", prd_id:
+$prd, crit_label: \"$label\", lane: \"pool\" } — so a second worker is not routed
+onto the same repair. The rejection above is the brief: take a materially
+different approach rather than re-submitting the prior delivery, and land the
+repair as a pull request." </dev/null >/dev/null 2>&1; then
+      # Marker AFTER the nudge, never before: see the header. A failed dispatch
+      # must leave nothing live so the next cycle retries it.
+      printf '%s %s\n' "$now" "$target" >"$marker" 2>/dev/null || true
+      routed=$((routed + 1))
+    else
+      failed="$failed $rig/$label(nudge-failed)"
+    fi
+  done <<REJECTIONS
+$rejections
+REJECTIONS
+done
+
+# SILENT-FAILURE INVARIANT (same contract as intake-sweep, pool-spawn and
+# lane-ensure): a rejection nobody was routed to is a criterion sitting refused
+# with no worker on it and nobody watching — precisely the stall this order
+# removes — so it becomes mail within the cycle. Routing every rejection is the
+# quiet path.
+if [ -n "$failed" ]; then
+  gc mail send mayor \
+    -s "repair-sweep: could not route $(printf '%s' "$failed" | wc -w | tr -d ' ') repair assignment(s)" \
+    -m "repair-sweep read a recorded judgment \`fail\` for each of these criteria and could not put a worker on it:$failed
+
+Routed $routed repair assignment(s) successfully this cycle.
+
+session-lookup-failed means 'gc session list --json' could not be run or its output could not be parsed, so whether that rig has a live worker is UNKNOWN. Do not spawn on this one — check gc and jq first.
+no-live-worker means the roster was read fine and that rig has no live brakeman session to route to: check pool-spawn is running and the rig is not suspended.
+nudge-failed means the session alias resolved but gc session nudge returned non-zero.
+
+Until this clears, those criteria stay rejected with nobody repairing them." \
+    >/dev/null 2>&1
+fi
+
+exit 0

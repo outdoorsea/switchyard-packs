@@ -1,0 +1,30 @@
+# Put a worker on every rejected criterion, once (switchyard PRD #330).
+#
+# PRD #315 made a rejection durable — the judge's reason is required, stored and
+# folded into retry guidance — and stated in its own out-of-scope that it would
+# not ROUTE. Nothing has since, so a `fail` verdict has been resetting the
+# criterion to `outstanding`, writing the reason onto the delivering bead, and
+# then waiting for a human to notice. This order closes that gap: it reads the
+# rejections the verdict ledger already recorded and hands each one to a
+# brakeman, exactly once.
+#
+# CADENCE, AND WHY IT IS COUPLED TO THE TTL. A rejection is produced by the
+# 30m judge sweep, so an hourly repair sweep costs at most one extra judge cycle
+# of latency on work that has, by construction, already been built once. The
+# assignment liveness window (REPAIR_ASSIGNMENT_TTL, default 3600s) is ONE
+# interval deliberately: an assignment suppresses re-routing for exactly one
+# cycle, so a worker that never picked it up is re-routed on the next pass
+# rather than stranding the criterion. Changing this interval without changing
+# that default breaks the pairing in one of two ways — a shorter interval
+# double-routes nothing but delays every retry, a longer one re-routes a repair
+# that is still being worked.
+#
+# Judgment lives in the session, not in the script: the sweep decides only WHICH
+# criterion and WHO to wake. What the repair should actually change is decided
+# by the brakeman that receives the assignment, which has the switchyard MCP and
+# can read the rejecting verdict, the delivering diff and the lineage.
+[order]
+description = "Route exactly one repair assignment per judge-rejected criterion to a live brakeman, and never a second while the first is live"
+trigger = "cooldown"
+interval = "1h"
+exec = "$PACK_DIR/assets/scripts/repair-sweep.sh"

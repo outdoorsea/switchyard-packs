@@ -12,6 +12,8 @@ packs/onboarding/         first-run: pick your surface, connect it, drive switch
 packs/switchyard-ops/     Layer 3 — the city's 24-hour heartbeat (timed orders)
                                   + brakeman (workers), answerer, judge
                                   + sy-item-work, the build+publish formula
+                                  + template-fragments/, prompt sections shared
+                                    across agents
 packs/switchyard-mcp/     Layer 2 — overlay: switchyard MCP into a rig's crew
 packs/examples/city/      a reference pack.toml + city.toml to copy
 packs/docs/OPERATING-MODEL.md   roles, layering, token economy, gotchas
@@ -85,6 +87,10 @@ server's separation-of-duties rules key on — is a separate and weaker property
 two refs can be one runtime. The server-side complement refuses a judgment whose
 recorded runtime matches the builder's. Both halves, and the `[[patches.agent]]`
 opt-out for a city that has not wired kimi, are documented in that agent.toml.
+The pin itself is held by the **`judge runtime-diversity self-test`** CI job
+(`bash scripts/judge-runtime-diversity.test.sh`). A different runtime is only
+half of independence, though — what the judge *does* with it is
+[The judge: how a criterion gets read](#the-judge-how-a-criterion-gets-read).
 
 **There is also no always-on watcher.** gastown's `witness`, `deacon` and `boot`
 have no gascity equivalent, so a quiet city is much cheaper to run — and nothing
@@ -186,7 +192,7 @@ eight orders, and a number in prose is the part nobody updates.
 | `judge-sweep` | 30m | Keep one judging-validator alive per rig whose judgment queue is non-empty; reaps its own finished sessions first |
 | `loop-health` | 30m | Pinned coordinators alive; escalate when the status probe lies |
 | `pr-gate` | 30m | Report open item PRs aging past the review SLA, and integration PRs awaiting PRD acceptance |
-| `intake-sweep` | 4h | Nudge coordinators to triage their switchyard project |
+| `intake-sweep` | 4h | Nudge coordinators to triage their switchyard project, and enrich a bead from its PRD before slinging it |
 | `stray-reaper` | 6h | Sessions rooted at a stale city path |
 | `config-drift` | 6h | Config-as-code guard (no-ops if the city isn't a git repo) |
 | `scratch-reaper` | 6h | Report/prune orphaned `gc`-scratch dirs left at the city root — drained sessions' `work_dir`s, gated so a live one is never removed |
@@ -429,6 +435,98 @@ Two consequences worth internalising if you know the gastown lane:
 
 The agent is ours, and now so is the method.
 
+### Green is not the whole bar
+
+`sy-item-work` decides when a bead may *close*. It says nothing about whether the
+change is *finished*, so a worker that has satisfied the formula can still open a
+PR no judge could honestly pass. Two prompt-side rules close that gap.
+
+**The handoff is the PR body, written against a definition of done.** The judge
+reviewing the criterion reads what the worker wrote, not its reasoning, so the
+brakeman prompt withholds the PR until four things hold — and states each one in
+the body:
+
+- **the whole criterion** — implemented end to end, not the easy half;
+- **a test per behavioral change** — none is needed where behavior is unchanged;
+- **a green suite** — build, vet and tests, run *after* the last commit;
+- **files touched** — the paths changed, so the judge can cite the list.
+
+A gap the worker could not close is **named**, never omitted: an admitted gap is
+reviewable, and a silent one is what a false `done` verdict is made of. Held by
+the **`brakeman dod-gate self-test`** job (`bash scripts/brakeman-dod-gate.test.sh`).
+
+**How the suite got green is TDD Discipline** — gastown's fragment, vendored
+verbatim (see [Shared prompt fragments](#shared-prompt-fragments)):
+red-green-refactor per behavioral change, and no reaching for green by deleting
+or disabling the test that is failing. *Tests failing is not "done"* says where to
+arrive; this says how, and rules out the shortcut. Held by the **`brakeman
+tdd-gate self-test`** job (`bash scripts/brakeman-tdd-gate.test.sh`).
+
+Both are pinned by a self-test rather than left to review for the same reason
+`publish-gate` exists: a rule that lives only as prose is one an agent can talk
+itself past, and one an edit can quietly drop. The gates assert the rule is still
+*in* the prompt — which review of a several-hundred-line template reliably
+misses, because a deletion there reads as a shorter diff, not a lost invariant.
+
+## The judge: how a criterion gets read
+
+`judge` drains the awaiting-validation backlog: for each criterion carrying a
+merged, attached PR it posts `validate_criterion` with
+`verdict_provenance="judgment"`, the `code_locations` it actually read, and a
+rationale. The server refuses a judgment verdict whose `code_locations` are empty
+(400), and that citation bar is the floor everything below is measured against.
+
+Three rules shape the read, because the failure mode here is not a wrong verdict.
+It is a **false `done`** — which retires a criterion nobody will look at again.
+
+**Depth is sized before it is spent.** How deep a criterion deserves to be read is
+not a constant, and treating it as one burns a pass out on a rename and then waves
+through three lines of lease handling. Delivery size sets the baseline — *small*
+(every changed line, plus the callers of anything whose contract moved), *medium*
+(every changed line and the seam it sits on), *large* (the parts THIS criterion
+names in full, the rest skimmed, and the rationale saying it was read that way).
+Four risk keywords — **auth**, **leases**, **dispatch**, **migrations** — then
+ratchet that baseline up one band, never down, because their three-line versions
+are the dangerous ones and line count is a terrible proxy for any of them. At
+`large` there is no band left to climb, so the ratchet changes what a **verdict**
+may be instead: a large delivery on a risk-bearing seam is read in full, or the
+verdict is `decline` naming the parts that could not be reached. It is never a
+`done` over a skim. Held by the **`judge review-depth-gate self-test`** job
+(`bash scripts/judge-review-depth-gate.test.sh`).
+
+**A `done` is earned adversarially.** Before any `done`, the judge constructs the
+*single most plausible* failure scenario for the delivery — concrete inputs or
+state leading to a concrete wrong outcome — and checks the delivery against it.
+Reading a diff rewards you for seeing what the author intended, which is exactly
+the reflex that passes work with a hole in it, so this step asks the opposite
+question while the verdict can still change. One scenario, not a survey: a
+checklist of remote possibilities costs a full pass and finds less than one honest
+attempt at the likeliest break. A delivery that does **not** handle it is a
+**`fail`** — not a decline, and not a `done` with a caveat in the rationale.
+Decline is for evidence that could not be read; a gap found and understood is a
+verdict owed. Held by the **`judge adversarial-gate self-test`** job
+(`bash scripts/judge-adversarial-gate.test.sh`).
+
+**Findings are ordered, and the floor hiding the rest is anchored.** An
+*acceptance* finding names a clause of the criterion the delivery does not
+satisfy; a *quality* finding is true of the code but not required by the
+criterion. Every acceptance finding is reported first, in the criterion's own
+clause order, never interleaved — the rework agent reads the rationale to decide
+what to change, and a quality finding sitting above an acceptance one gets fixed
+first and sometimes fixed *instead*. A finding clears the confidence floor only
+with both halves of the citation bar: a `path:line-range` that could survive being
+cited, **and** the thing it is anchored to (the quoted clause, or the concrete
+consequence that would make it bite). The floor governs findings and never the
+verdict — an acceptance finding below the floor is unfinished reading, so the
+answer is to go read and then `fail` or `decline`. It never converts "I am not
+sure this is satisfied" into "this is satisfied."
+
+That last rule is a
+[shared fragment](switchyard-ops/template-fragments/sy-review-findings.template.md)
+rather than prose in the judge prompt, because it governs the judge *and any
+future review guidance in this pack* — stated once, it cannot drift between
+reviewers.
+
 ## No roster to maintain
 
 The pack names no agent. `loop-health` and `intake-sweep` derive the coordinator
@@ -453,6 +551,45 @@ What a coordinator actually *does* during a sweep lives in
 [`assets/prompts/`](switchyard-ops/assets/prompts), versioned and reviewable —
 not buried in a shell heredoc. The scripts decide *who* to nudge; the prompts
 decide *what* they do.
+
+`intake-sweep.md` is the worked example, and it carries the pack's **readiness
+gate**: a coordinator enriches a bead *before* it slings, never after. A dispatch
+is under-specified unless it names all three of the `crit:<hash>` and PRD number
+being delivered, the surface it may touch (the contract's `fair_game` and
+`hands_off`), and how done is judged (`done_means`, or the criterion's
+`verify_command`). Gaps are filled from that bead's **own** PRD and nowhere else
+— enrich only: never re-scope a bead, never invent a requirement its PRD does not
+state, and NAME a gap the PRD cannot fill rather than guessing at it. Then write
+what you gathered to a doc and sling with `--var requirements_path=<doc>`, because
+a bare `gc sling` **drops the bead's description**, so enrichment left in the bead
+alone never reaches the worker. Held by the **`intake readiness-gate self-test`**
+job (`bash scripts/intake-readiness-gate.test.sh`).
+
+### Shared prompt fragments
+
+A section that must read identically to more than one agent lives in
+[`template-fragments/`](switchyard-ops/template-fragments) and is pulled in with a
+`{{ template "<name>" . }}` action, so the rule is written once and cannot drift
+between prompts. The pack ships two: `sy-review-findings` (the judge's finding
+order and confidence floor) and `tdd-discipline` (the brakeman's, vendored from
+gastown with its upstream sha256 recorded in the file).
+
+**Naming here is load-bearing, not cosmetic.** `gc` loads every imported pack's
+`template-fragments/` into **one namespace**, so a generic name collides across
+packs — and a `{{ template }}` action naming a template that is not defined does
+not degrade to a missing section. `renderPrompt`'s `Execute` fails and returns the
+**raw template body**, handing the agent a prompt with `{{ .RigRoot }}` and every
+other action still in braces. Two conventions prevent that, and which one applies
+depends on where the fragment came from:
+
+- **Ours takes an `sy-` prefix** — `sy-review-findings`, not `review-findings` —
+  so it resolves from this pack's own directory whatever else a city imports.
+- **Upstream's is vendored, never referenced.** This pack requires `gascity`, not
+  `gastown`, and a city may import `switchyard-ops` alone, so a cross-pack
+  reference to `tdd-discipline` would resolve only by luck. The copy records
+  its upstream path, commit pin and sha256 in the file's own header, and its
+  body is byte-identical to upstream so a re-copy is a clean diff — re-verify
+  that sha256 when bumping the gastown pin.
 
 ## Requirements
 

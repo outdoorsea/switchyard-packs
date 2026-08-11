@@ -63,6 +63,46 @@
 # COORDINATORS="<rig>/<coordinator> <rig>/<coordinator>"
 
 # ---------------------------------------------------------------------------
+# RIG_PROJECTS — explicit rig-to-project bindings, when the rig NAME is not the
+# project SLUG.
+#
+# Unset (the default) means a rig is matched to the project whose slug EQUALS the
+# rig name, which is what this pack has always done and what still happens for
+# every rig not named here. This file staying absent changes nothing.
+#
+# Set it when slug equality cannot be satisfied or is not wanted:
+#
+#   * THE NAMES SIMPLY DIFFER. Rig `switchyard-forge` drives a project slugged
+#     `forge`. Nothing is wrong with either name, they are just not equal, and the
+#     rig resolves to NOTHING until one of them is bound or renamed.
+#   * THE SLUG IS AMBIGUOUS. A slug present in two of this token's workspaces
+#     (`ideapop` is) cannot be resolved by rig name alone and is deliberately
+#     treated as not-found. Naming the rig here says which workspace is meant.
+#
+# WHY YOU WANT THIS RATHER THAN RENAMING THE PROJECT. Renaming the cloud slug to
+# match the rig works, but it makes a cloud-side identifier permanently
+# load-bearing for a local rig name, and it leaves the same trap armed for the
+# next rig added under a name nobody thought to reserve as a slug.
+#
+# HOW BADLY IT FAILS WHEN UNSET AND UNMATCHED — measured 2026-08-11 on a city
+# whose forge rig had no matching slug: FIVE lanes (answerer, dupe-scout,
+# golden-journey, judge, intake-triage) resolved to nothing simultaneously. The
+# lane-queue probes FAIL OPEN, so those rigs were still spawned into and each
+# session exited IDLE for want of a project to scope to — every lane reporting as
+# running while doing nothing. Cloud-pool dispatch (CLOUD_POOL_RIGS) fails CLOSED
+# on the same lookup and spawns nothing instead. One binding fixes both paths.
+#
+# The value is the same `<tenant-slug>/<project-slug>` a scope takes, NOT a bare
+# project slug — the tenant is what disambiguates a slug shared across workspaces,
+# so leaving it off would reintroduce the ambiguity this key exists to resolve.
+# A rig named here whose target this token cannot reach is an operator error, not
+# a fallback; see sy_project_for_rig in assets/lib/switchyard-api.sh.
+#
+# Format: space-separated <rig>=<tenant-slug>/<project-slug>
+#
+# RIG_PROJECTS="switchyard-forge=software-factory/forge"
+
+# ---------------------------------------------------------------------------
 # CLOUD_POOL_RIGS — the rigs cut over to switchyard's CLOUD claim pool.
 #
 # Unset (the default) means every rig dispatches from its local `bd` ledger, the

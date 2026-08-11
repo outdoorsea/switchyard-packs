@@ -90,25 +90,109 @@ sy_api_projects() {
   sy_api_get "/api/v1/projects" "$1"
 }
 
+# RIG_PROJECTS — optional explicit `<rig>=<tenant-slug>/<project-slug>` bindings,
+# space-separated, from the city's roster.conf.
+#
+# Defaulted HERE rather than in sy_load_conf because the consumer is
+# sy_project_for_rig, which is shared by all three orders that source this lib
+# (lane-ensure, pool-spawn, repair-sweep). CLOUD_POOL_RIGS is defaulted in
+# pool-spawn.sh instead, for the stated reason that roster.sh is shared by a
+# dozen orders whose hermetic tests should not absorb a global they ignore —
+# that reasoning points here, not there, when the reader is the shared lib. Keep
+# the default beside the code that reads it.
+RIG_PROJECTS="${RIG_PROJECTS:-}"
+
+# sy_rig_project_override RIG — the operator-declared `<tenant>/<project>` for
+# RIG, or empty when RIG is not named in RIG_PROJECTS.
+#
+# First exact match wins; a repeated rig is an operator typo, and taking the
+# first is at least deterministic across a cycle.
+sy_rig_project_override() {
+  [ -n "${RIG_PROJECTS:-}" ] || return 0
+  for _srpo_entry in $RIG_PROJECTS; do
+    case "$_srpo_entry" in
+      "$1"=?*) printf '%s' "${_srpo_entry#*=}"; return 0 ;;
+    esac
+  done
+  return 0
+}
+
 # sy_project_for_rig RIG PROJECTS_JSON — the `<tenant-slug>/<project-slug>` a rig
 # drives, or EMPTY when that cannot be answered confidently.
 #
-# The rig name is matched against the project SLUG. That convention is what
-# already holds in practice (rig `switchyard` drives project `switchyard`), and
-# it is the only mapping available: the pack is deliberately city-agnostic and
-# names no rig, the rig's MCP overlay binds only a base URL, and an agent's
-# project comes from a `set_scope` call in its PROMPT, which an order cannot
-# read. Inventing a city-local mapping file was the alternative and is worse —
-# the guard would ship inert on every city until a human installed one.
+# TWO LAYERS, override first:
 #
-# EXACTLY ONE MATCH, or nothing. A duplicate slug across workspaces is real and
-# present (`ideapop` exists in two of this token's three tenants), and a token
-# reaching both cannot tell which one a rig means. Guessing there would answer
+#   1. DECLARED — RIG_PROJECTS in roster.conf, when it names RIG.
+#   2. DERIVED  — the rig name matched against the project SLUG.
+#
+# The slug convention holds in practice (rig `switchyard` drives project
+# `switchyard`) and remains the default, so this pack still ships LIVE on a city
+# that has never written a roster.conf. That was the original objection to a
+# city-local mapping — "the guard would ship inert until a human installed one" —
+# and it is answered by making the map an OVERRIDE rather than the only path: with
+# no RIG_PROJECTS set, every line below behaves exactly as it did before.
+#
+# What forced the override: slug equality is not a convention an operator can
+# always satisfy. Measured 2026-08-11 on this city — rig `switchyard-forge` drives
+# project 25, whose slug is `forge`. No project in any workspace this token reaches
+# carries the slug `switchyard-forge`, so FIVE lanes (answerer, dupe-scout,
+# golden-journey, judge, intake-triage) resolved to nothing at once. The sibling rig
+# `switchyard` bound correctly only because project 2 happens to be slugged
+# `switchyard` — coincidence, not design. Renaming the cloud slug to match would fix
+# it, but makes a cloud-side identifier permanently load-bearing for a local rig
+# name and leaves the same trap armed for the next rig anyone adds.
+#
+# EXACTLY ONE MATCH, or nothing (derived layer). A duplicate slug across workspaces
+# is real and present (`ideapop` exists in two of this token's three tenants), and a
+# token reaching both cannot tell which one a rig means. Guessing there would answer
 # the queue question about the WRONG project — and a wrong "empty" silently
 # unstaffs a lane that has work, which is the one failure this whole path must
 # not produce. Ambiguity is therefore not-found, and not-found fails open.
+# Naming that rig in RIG_PROJECTS is now the way to resolve such an ambiguity.
 sy_project_for_rig() {
+  # An unreadable project list stays UNREACHABLE, ahead of any mapping. Callers
+  # classify that fault separately from a scope fault (lane_reach_fault reports
+  # 'unreachable' vs 'scope'), and a map cannot repair a network that is down.
   [ -n "${2:-}" ] || return 0
+
+  _spfr_mapped="$(sy_rig_project_override "$1")"
+  if [ -n "$_spfr_mapped" ]; then
+    # Confirm the declared target is actually reachable by this token before
+    # handing it to a caller. An unvalidated map turns an operator typo into a
+    # 404 on every probe, which downstream reads as "unreadable" — and in
+    # lane-ensure that fails OPEN, i.e. the exact silent-idle failure this
+    # mapping exists to remove.
+    _spfr_ok="$(printf '%s' "$2" | jq -r --arg m "$_spfr_mapped" '
+        (if type=="array" then . else (.projects // []) end)
+        | [ .[] | select((((.tenant_slug // "") + "/" + (.slug // "")) == $m)) ]
+        | if length == 1 then $m else empty end' 2>/dev/null | awk 'NF' | head -n1)"
+    if [ -n "$_spfr_ok" ]; then printf '%s\n' "$_spfr_ok"; return 0; fi
+
+    # DECLARED BUT UNREACHABLE — rc=3. RIG_PROJECTS names this rig, but the
+    # target it names is not reachable by this token: a typo, a revoked grant,
+    # or the wrong tenant.
+    #
+    # This is a THIRD answer, and it does not share an exit code with either of
+    # the other two. "No binding" and "the binding is wrong" demand opposite
+    # actions from an operator — write an entry, versus correct the entry that is
+    # already there — and collapsing them is how the caller ends up advising a
+    # fix for a problem nobody has. Same contract, and the same reason, as
+    # sy_live_session_for above: different answers must not share an exit code.
+    #
+    # NO FALLBACK TO THE SLUG RULE. A declared binding is an assertion; if it is
+    # false, resolving to some OTHER project that happens to match by slug would
+    # honour neither the map nor the convention, and would drive work into a
+    # project the operator never named. The lane stays down until the entry is
+    # corrected, which is what the 'binding' fault mail promises.
+    #
+    # EMITS NOTHING on this path, deliberately. Callers that only test for empty
+    # output (pool-spawn, repair-sweep) therefore keep working untouched: they
+    # take their existing cannot-answer branch, so pool-spawn still fails CLOSED
+    # and repair-sweep still skips the rig. Only lane-ensure reads the rc, to
+    # separate 'binding' from 'scope' in what it mails the mayor.
+    return 3
+  fi
+
   printf '%s' "$2" | jq -r --arg r "$1" '
       (if type=="array" then . else (.projects // []) end)
       | [ .[] | select((.slug // "") == $r) ]

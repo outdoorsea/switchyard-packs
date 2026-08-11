@@ -653,7 +653,15 @@ lane_reach_fault() {
   [ -n "$LANE_QUEUE_SUFFIX" ] || return 0
   [ -n "$lane_token" ]        || { printf 'credential';  return 0; }
   [ -n "$lane_projects" ]     || { printf 'unreachable'; return 0; }
-  [ -n "$(sy_project_for_rig "$1" "$lane_projects")" ] || printf 'scope'
+  # Read rc IMMEDIATELY after the assignment. Any command in between — `[`
+  # included — overwrites $?, and a binding fault would silently degrade into a
+  # scope fault, which is precisely the misdiagnosis this class exists to end.
+  # An UNHANDLED rc=3 is safe everywhere else: sy_project_for_rig emits nothing
+  # on that path, so callers that only test for empty output still take their
+  # cannot-answer branch exactly as before.
+  _lrf_project="$(sy_project_for_rig "$1" "$lane_projects")"
+  [ $? -ne 3 ] || { printf 'binding'; return 0; }
+  [ -n "$_lrf_project" ] || printf 'scope'
 }
 
 # lane_agent_probe — did `gc agent list --json` ANSWER, as distinct from what it
@@ -748,6 +756,7 @@ handshake=""
 reach_credential=""
 reach_unreachable=""
 reach_scope=""
+reach_binding=""
 uncovered=""
 
 # ONE ROSTER READ FOR THE WHOLE CYCLE — see the bounding note above.
@@ -849,6 +858,7 @@ for rig in $rigs; do
     credential)  reach_credential="$reach_credential $rig" ;;
     unreachable) reach_unreachable="$reach_unreachable $rig" ;;
     scope)       reach_scope="$reach_scope $rig" ;;
+    binding)     reach_binding="$reach_binding $rig" ;;
   esac
 
   # AN EMPTY QUEUE MEANS THERE IS NOTHING TO START A SESSION FOR.
@@ -963,7 +973,20 @@ fi
 if [ -n "$reach_scope" ]; then
   gc mail send mayor \
     -s "$AGENT-sweep: $SUBJECT lane has no switchyard project" \
-    -m "switchyard answered and the token is good, but no single project matches the rig name for:$reach_scope, so the $SUBJECT lane's queue could not be read for them. These rigs were still spawned into — the check fails open — but a session with no project to scope to exits IDLE, so the lane is running and doing nothing. A rig is matched to the project whose SLUG equals the rig name, and exactly one match is required, so this is either no match (this token cannot reach that project: wrong workspace, or an access grant it has not been given) or more than one (the slug exists in several of its workspaces, and a rig name cannot say which). Grant the token access to the intended project, or rename so the slug is unique across its workspaces. This is a scope fault: the credential itself is working, which is why it is not reported under \"$AGENT-sweep: no switchyard credential\"." \
+    -m "switchyard answered and the token is good, but no single project matches the rig name for:$reach_scope, so the $SUBJECT lane's queue could not be read for them. These rigs were still spawned into — the check fails open — but a session with no project to scope to exits IDLE, so the lane is running and doing nothing. A rig NOT named in RIG_PROJECTS is matched to the project whose slug EQUALS the rig name, and exactly one match is required. So this is either no match or more than one. NO MATCH IS USUALLY NOT AN ACCESS PROBLEM: the likeliest cause by far is that the intended project is perfectly reachable and simply carries a different slug — rig \`switchyard-forge\` does not match slug \`forge\`, because the rule is EQUALITY, not resemblance and not uniqueness. Confirm what this token can actually see before chasing a grant it may already have. MORE THAN ONE means the slug exists in several of its workspaces and a rig name cannot say which. THE FIX FOR BOTH, AND IT NEEDS NO RENAME: bind the rig explicitly in the city's roster.conf — RIG_PROJECTS=\"<rig>=<tenant-slug>/<project-slug>\" — which also resolves the ambiguous case a rename cannot. Renaming the project slug to equal the rig name works too, but makes a cloud-side identifier load-bearing for a local rig name. This is a scope fault: the credential itself is working, which is why it is not reported under \"$AGENT-sweep: no switchyard credential\"." \
+    >/dev/null 2>&1
+fi
+
+# THE BINDING FAULT IS THE OPERATOR'S OWN CONFIG, and is deliberately NOT folded
+# into the scope fault above. The two demand opposite actions: a scope fault asks
+# you to CREATE a binding, a binding fault says the one you already wrote is
+# wrong. Reporting the second as the first would send an operator to add a
+# RIG_PROJECTS entry that is already sitting there — the same wrong-cause chase
+# the scope text above was just corrected to stop.
+if [ -n "$reach_binding" ]; then
+  gc mail send mayor \
+    -s "$AGENT-sweep: $SUBJECT lane has a broken RIG_PROJECTS binding" \
+    -m "switchyard answered and the token is good, and the city's roster.conf DOES bind these rigs — but the project each binding names is not reachable by this token, so the $SUBJECT lane's queue could not be read for:$reach_binding. These rigs were still spawned into — the check fails open — but a session with no project to scope to exits IDLE, so the lane is running and doing nothing. Unlike the scope fault, nothing here is missing: RIG_PROJECTS names a target and the target does not answer. Check the entry for a typo in either half of \`<tenant-slug>/<project-slug>\`, that the value is the FULL tenant-qualified pair rather than a bare project slug, and that this token still holds a grant on that project — a revoked or expired grant presents exactly this way. The binding is honored as written and is never silently replaced by a slug match, so the lane stays down until the entry is corrected. This is a broken binding, NOT the absent one reported under \"$AGENT-sweep: $SUBJECT lane has no switchyard project\"." \
     >/dev/null 2>&1
 fi
 

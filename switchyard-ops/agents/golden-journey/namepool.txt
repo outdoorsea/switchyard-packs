@@ -1,0 +1,20 @@
+# Railway road-proving occupations — themed session names for the golden-journey
+# pool. Kin to brakeman (trades), judge (inspectors), answerer (dispatchers) and
+# intake-triage (yard clerks), drawn from the roles that RIDE THE ROAD AND PROVE
+# IT FIT FOR TRAFFIC: the pilot who takes an engine over unfamiliar track and the
+# patrolman who walks the line after a change, which is exactly what this lane
+# does to a freshly-deployed build.
+#
+# `gc` draws one name per concurrent session, so this pool must hold at least
+# max_active_sessions entries (golden-journey runs one). Single-word, lowercase —
+# a name is a session identifier, not a title.
+pilot
+patrolman
+trackwalker
+roadmaster
+flagman
+lampman
+sounder
+gager
+keyman
+proofer

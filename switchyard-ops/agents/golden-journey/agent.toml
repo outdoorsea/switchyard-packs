@@ -1,0 +1,70 @@
+# golden-journey — the switchyard ship-stage verification lane, as a Gas City
+# agent.
+#
+# A golden-journey agent reads the project's pending-verification queue (succeeded
+# deploys carrying no grade yet), RUNS the golden journeys registered for each
+# deploy's environment, and posts the per-journey verdicts back. Posting grades the
+# deploy, which drops it out of the queue. It is the pack-native replacement for
+# the `switchyard-companion journeys` loop (switchyard PRD #327): the companion is
+# a second runtime to install, credential and supervise, and this lane removes the
+# reason to run one for this verb.
+#
+#   gc session new <rig>/switchyard-ops.golden-journey --no-attach
+#
+# ...which is what the `golden-journey-sweep` order does when a rig's
+# pending-verification queue is non-empty. Like the judge and the answerer, you do
+# not sling work to it — its queue is switchyard's, read over the MCP
+# (`list_deploys_pending_verification` / `report_journey_run`), not the gc bead
+# ledger.
+#
+# THIS LANE IS THE EXECUTOR THE SERVER DELIBERATELY IS NOT. `db.GoldenJourney`
+# stores a `runner_command` and says of it, verbatim, "switchyard never executes
+# it" — the registry records what to run and refuses to run it. Nothing verified a
+# deploy unless the companion was installed. That is the gap this lane closes.
+#
+# ⚠ CONCURRENCY IS BOUNDED HERE, NOT ON THE SERVER — READ THIS BEFORE WIDENING
+# max_active_sessions. This PRD's Risks section asks the shipper to "take a
+# server-side claim rather than rely on process memory", and no such claim exists:
+# the unified claim protocol's kinds are bead|criterion|issue|validation, and a
+# deploy claim's home would be a table under `internal/db/**`, which PRD #327
+# lists as hands_off. Question #282 put that contradiction to the owner, who ruled
+# (2026-08-09) to drop the claim clause from this criterion and split the deploy
+# claim into its own PRD. So until that PRD lands, two concurrent runs against one
+# deploy are prevented by THREE weak bounds and no strong one:
+#
+#   1. max_active_sessions = 1 — the binding constraint. Do not raise it.
+#   2. the pre-spawn queue probe — a drained queue never spawns a session at all.
+#   3. grading drops the deploy from the queue, so a LATER pass cannot repeat it.
+#
+# None of those survives two rigs pointed at one project, and none is a lease.
+# `UNIQUE(deploy_id, journey)` is NOT the missing guard either: it would dedupe the
+# verdict WRITE while both runs still spend a full journey suite, and it would
+# collapse `deploy_journey_runs` from a history table to latest-only, breaking
+# re-runs. When the deploy claim lands, take it here and delete this note.
+scope = "rig"
+
+# fresh: each pass verifies whatever is ungraded right now. There is no cursor and
+# no verified-deploy set to carry — the queue itself is the state, and a graded
+# deploy leaves it.
+wake_mode = "fresh"
+
+# Read-only against the repo except for the verdicts it posts over MCP. It runs
+# journeys — HTTP probes against a deployed URL, or the project's own registered
+# runner command — but it never edits, branches or commits, so its cwd is a plain
+# scratch dir rather than a build worktree.
+work_dir = ".gc/worktrees/{{.Rig}}/golden-journey/{{.AgentBase}}"
+
+nudge = "Run one ship-verification pass now: read the pending-verification queue, run each deploy's registered journeys, post the per-journey verdicts, then exit."
+
+idle_timeout = "30m"
+
+# min 0 / max 1: one is enough for the volume, and here it is also the ONLY thing
+# bounding duplicate model spend on the same deploy — see the concurrency note
+# above. Widening this without a server-side deploy claim lets two sessions run the
+# same journey suite and grade the same deploy twice.
+min_active_sessions = 0
+max_active_sessions = 1
+
+# No default_sling_formula and no pre_start worktree setup: the golden-journey lane
+# runs no gastown formula and is slung no gc beads — its work list is switchyard's
+# pending-verification queue, reached over the MCP. The prompt IS the method.

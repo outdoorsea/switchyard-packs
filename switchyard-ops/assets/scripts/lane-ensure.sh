@@ -137,6 +137,24 @@ case "$AGENT" in
     LANE_QUEUE_SUFFIX="/issues/open"
     LANE_QUEUE_COUNT_JQ='if (.issues|type) == "array" then (.issues|length) else empty end'
     ;;
+  golden-journey)
+    # The ship stage's verification queue: succeeded deploys carrying no grade yet
+    # (switchyard PRD #327). Grading a deploy drops it from this queue, so the
+    # depth is the real backlog rather than a running total.
+    #
+    # `deploys` is the response's real array key, read off the handler
+    # (internal/api/api_v1_ship.go, `jsonOK(w, map[string]any{"deploys": out})`)
+    # rather than assumed — the strictness described above buys nothing if the key
+    # is guessed, since a wrong name parses as a drained queue and silently
+    # unstaffs the lane forever.
+    #
+    # This endpoint OMITS a deploy whose environment has no registered journey,
+    # because no run could ever clear it. So a project that reports deploys but has
+    # registered no journeys reads as zero here and is correctly left alone: there
+    # is genuinely nothing this lane could do for it.
+    LANE_QUEUE_SUFFIX="/deploys/pending-verification"
+    LANE_QUEUE_COUNT_JQ='if (.deploys|type) == "array" then (.deploys|length) else empty end'
+    ;;
 esac
 
 # Session states that count as a live session — mirrors pool-spawn's

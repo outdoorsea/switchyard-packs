@@ -1,0 +1,31 @@
+# Keep a golden-journey verifier alive for each rig that drives a switchyard
+# project, so a deploy that has shipped gets its journeys run and graded without a
+# `switchyard-companion` running to do it (switchyard PRD #327).
+#
+# The verifier (agents/golden-journey) reads the pending-verification queue —
+# succeeded deploys carrying no grade, each bundled with the journeys registered
+# for its environment — runs them, and posts the per-journey verdicts. Grading
+# drops the deploy out of the queue. It is min_active_sessions=0; this order spawns
+# one per rig-with-a-coordinator when none is running, via the shared lane-ensure
+# spawner, which reads the rig's `/deploys/pending-verification` queue first and
+# leaves a rig with nothing to verify alone.
+#
+# WHY THIS LANE IS WORTH A SWEEP AT ALL. `db.GoldenJourney` stores a journey and
+# says of its runner command, verbatim, "switchyard never executes it". The
+# registry records what to run and refuses to run it, so before this lane a
+# project's journeys were verified only if an operator had installed the companion
+# — and a deploy nobody verified looks exactly like a deploy that passed.
+#
+# Cadence is 30m — the same tier as the judge, and for the same reason: an
+# unverified production deploy is a live risk window, and the whole point of
+# grading is to shorten it. It is not faster because deploys arrive far less often
+# than issues or questions do, and the pre-spawn probe already makes a quiet
+# project free: on a rig with nothing pending this order costs one HTTP GET and
+# spawns nothing. Like the other sweeps this is a POLL; once an event bridge lands,
+# a verifier can be woken by the deploy report itself and this poll becomes the
+# safety net rather than the trigger.
+[order]
+description = "Spawn one golden-journey verifier per rig with a switchyard coordinator when none is live and its pending-verification queue is non-empty; it runs each ungraded deploy's registered journeys and posts the per-journey verdicts"
+trigger = "cooldown"
+interval = "30m"
+exec = "$PACK_DIR/assets/scripts/lane-ensure.sh golden-journey golden-journey"

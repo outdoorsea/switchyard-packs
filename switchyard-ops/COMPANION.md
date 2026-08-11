@@ -47,7 +47,7 @@ keep the companion installed.
 | Issue auto-triage | `triage` | intake-triage lane | `PENDING` |
 | Duplicate-merge proposals | `dedup` | duplicate-detection lane | `PENDING` |
 | Covered-by proposals | `covered-by` | duplicate-detection lane | `PENDING` |
-| Golden-journey ship verification | `journeys` | golden-journey lane | `PENDING` |
+| Golden-journey ship verification | `journeys` | `agents/golden-journey` + `orders/golden-journey-sweep.toml` (30m) | `PACK-LANE` |
 | Config/token/reachability preflight | `doctor` | reachability check that escalates | `PENDING` |
 | Contract re-run against merged main | `validate` | none — see Why `validate` stays | `COMPANION-REQUIRED` |
 | SSE event bridge → session wake | `watch` | none — see Why `watch` stays | `COMPANION-REQUIRED` |

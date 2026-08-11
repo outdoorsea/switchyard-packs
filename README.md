@@ -192,6 +192,7 @@ eight orders, and a number in prose is the part nobody updates.
 | `judge-sweep` | 30m | Keep one judging-validator alive per rig whose judgment queue is non-empty; reaps its own finished sessions first |
 | `loop-health` | 30m | Pinned coordinators alive; escalate when the status probe lies |
 | `pr-gate` | 30m | Report open item PRs aging past the review SLA, and integration PRs awaiting PRD acceptance |
+| `integration-lane` | 2h | Bundle the currently-mergeable PRs onto one integration branch, test the **combination**, and hand the mayor one reviewable merge — it never merges |
 | `intake-sweep` | 4h | Nudge coordinators to triage their switchyard project, and enrich a bead from its PRD before slinging it |
 | `stray-reaper` | 6h | Sessions rooted at a stale city path |
 | `config-drift` | 6h | Config-as-code guard (no-ops if the city isn't a git repo) |
@@ -287,6 +288,97 @@ straight to it fails loudly.
 > publish step resolves the forge from `git remote get-url origin` and uses `gh`
 > or `glab` accordingly; an unrecognised host escalates to the mayor rather than
 > closing the bead.
+
+### The combination is the only thing nobody measures
+
+Every CI gate in this repo measures a pull request's **head**, never the merge
+result. Two PRs that are each green against their own base can be broken
+together, and nothing looks at that until it is on `main` — which Railway
+auto-deploys. `pr-gate` and `publish-gate` both *detect* stuck work; neither
+*integrates*. `integration-lane` is the one that does.
+
+It is the hand method from PRs #1483 and #1490 made into an order. A run collects
+the currently-mergeable PRs, merges them onto one integration branch with
+`--no-ff`, verifies the **combination**, pushes the branch and opens one pull
+request. Two defects found this way in bundle #1490 were "neither visible on any
+PR alone": a rename that git merges perfectly cleanly and then fails to build,
+and a `schemaVersion` collision between two PRs that each bumped to the same
+number.
+
+**The lane never merges.** Decided in PRD #340 question 305 and pinned by a
+criterion, and it is a positive choice rather than a half-built step. The value
+is the combination test, which is fully delivered without touching the production
+gate. A fully green run still ends by mailing the mayor a link and stopping — the
+merge is a person's decision and stays one. There is no `gh pr merge` in the
+script and the self-test fails if one appears.
+
+What it hands a human is one pull request whose checks are the only ones in the
+repo that measure a merge **result**, plus a report naming every PR it excluded
+and why. Nothing falls out of a bundle silently: a draft, a failing check, an
+empty check rollup (PR #1346 read green on *zero* checks, so an empty rollup is
+refused rather than rounded up), a conflict with the rest of the set, a
+`schemaVersion` collision, or simply not fitting the bundle size — each is
+reported with its reason. A run that finds fewer than two mergeable PRs has no
+combination to test, so it creates no branch and sends no mail.
+
+> **Merge the bundle with a MERGE COMMIT, never a squash.** Each constituent's
+> own head commit is reachable from the branch, and that reachability is the
+> entire mechanism by which GitHub auto-closes every constituent when the bundle
+> lands. A squash flattens those commits away: the bundle merges and leaves eight
+> PRs open, each looking unmerged with its code already on `main`. This
+> repository allows squash merging, so the wrong button is right there — the
+> bundle's own body says so too.
+
+When the combination fails, the lane ejects its prime suspect and re-verifies, so
+one bad PR delays *itself* rather than the whole set, and the report attributes
+the break to the pull requests that **interacted** rather than to the bundle as a
+whole. A `mkdir` lock (atomic, unlike test-then-create on a lock file) keeps two
+runs from bundling overlapping sets and racing on the branch.
+
+**A `schemaVersion` bump is measured against the pull request's own merge-base,
+never against the base tip**, and it must be *strictly above* what the base
+stamps. Both halves matter and each was wrong once. Comparing to the tip asks
+"does this branch differ from `main` today?", which is true of every branch cut
+before the last bump even when it never touched `dolt.go` — on the live queue
+that excluded 7 of 10 open PRs for a bump none of them made. And a bump to
+*exactly* the value the base already stamps merges without a conflict and is then
+short-circuited by `migrate()`'s `ver >= schemaVersion`, so the migration never
+runs; that is the outage `scripts/check-schema-version-bump.sh` exists for, and
+"differs from the tip" is blind to it precisely when it matters most.
+
+Configuration lives in `roster.conf`; `INTEGRATION_LANE_BUNDLE_SIZE` defaults to
+8 and every run reports the size it used, so a small bundle is never ambiguous
+between a short queue and a changed setting. The cap takes the **oldest**
+candidates, so a queue durably above the cap actually drains instead of starving
+its tail every run. `INTEGRATION_LANE_VERIFY` defaults to
+`go build ./... && go vet ./...` — the fast half that catches the observed defect
+class, deliberately not `go test ./...`, which here inherits a known
+`internal/dashboard` hang against a reachable Dolt. The pushed bundle PR runs the
+repo's full CI against the combination regardless; the local verify is the
+attributable pre-flight that makes ejection possible.
+`INTEGRATION_LANE_REQUIRE_APPROVAL` (default off) is the one policy knob: by
+default the lane *refuses* a `CHANGES_REQUESTED` PR but does not *require* an
+approval, because review quality is out of scope for this lane and
+`reviewDecision` is a latch that outlives the fix.
+
+`INTEGRATION_LANE_PREPARE` (default `auto`) is what makes the scratch worktree
+buildable before the verify can mean anything. `*_templ.go` is gitignored here, so
+a fresh worktree has none and `go build` fails on `undefined: ProjectSpecRow`
+before reaching a line either constituent wrote — `auto` generates templ views at
+the **go.mod-pinned** version, exactly as `ci.yml` does, and does nothing on a rig
+with no `.templ` sources. **A failure during preparation is a fault in the LANE,
+not evidence about any pull request**: it ejects nobody, fabricates no
+attribution, and is reported as "the lane is not running" rather than as a
+combination failure. Without that separation a missing prepare step made every
+run red and blamed innocent PRs by name, which is worse than having no lane.
+
+Self-test: `bash packs/switchyard-ops/assets/scripts/integration-lane.test.sh`
+(and `LANE_TEST_SH=dash …` for the POSIX pass) — both run in CI as the
+`integration-lane self-test` job. It runs against a real git repository with real
+conflicting branches — only `gc` and `gh` are stubbed — because the claims under
+test are claims about git. Its fixture **advances `main` after cutting branches**,
+which is what makes "head vs base tip" and "head vs merge-base" distinguishable;
+a fixture that leaves `main` still cannot see either schema defect above.
 
 ### Pruning scratch is a safety boundary
 

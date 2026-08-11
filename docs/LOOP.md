@@ -56,6 +56,7 @@ executes → escalate to mayor on anomaly. No agent exists merely to run a clock
 | `answer-sweep` | 20m | Reap finished answerers, then keep one alive per rig whose open-question queue is non-empty |
 | `judge-sweep` | 30m | Reap finished judging-validators, then keep one alive per rig whose judgment queue is non-empty |
 | `loop-health` | 30m | Verify every pinned session has a live process **and** the status probe answers; wake what's down; escalate if the probe itself lies |
+| `integration-lane` | 2h | Bundle the currently-mergeable PRs onto one branch, test the **combination** the per-PR checks never measure, and hand a human one reviewable merge — it never merges itself |
 | `intake-sweep` | 4h | Nudge each coordinator to triage its project's intake and dispatched epics |
 | `nightly-retro` | 24h | Nudge the retro agent to draft daily reports and propose improvements |
 | `stray-reaper` | 6h | Flag sessions whose `GC_CITY` is not this city (relocated-root leftovers writing to the wrong store) |

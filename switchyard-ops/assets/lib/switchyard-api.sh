@@ -177,7 +177,8 @@ sy_project_for_rig() {
     # actions from an operator — write an entry, versus correct the entry that is
     # already there — and collapsing them is how the caller ends up advising a
     # fix for a problem nobody has. Same contract, and the same reason, as
-    # sy_live_session_for above: different answers must not share an exit code.
+    # sy_live_session_for (lib/roster.sh): different answers must not share an
+    # exit code.
     #
     # NO FALLBACK TO THE SLUG RULE. A declared binding is an assertion; if it is
     # false, resolving to some OTHER project that happens to match by slug would

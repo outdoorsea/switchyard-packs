@@ -70,6 +70,27 @@ SUBJECT="${2:-$AGENT}"          # human label for the escalation mail
 . "$(dirname "$0")/../lib/pane-state.sh"
 . "$(dirname "$0")/../lib/switchyard-api.sh"
 
+# Load the city's roster.conf. REQUIRED, not optional: sy_project_for_rig (in
+# lib/switchyard-api.sh) resolves a rig to its project via RIG_PROJECTS, and
+# RIG_PROJECTS is set ONLY by sourcing roster.conf, which happens ONLY inside
+# sy_load_conf. Without this call RIG_PROJECTS is always empty here, so the
+# explicit binding added in #1515 never takes effect and a rig whose name does
+# not equal its project slug resolves to nothing.
+#
+# The failure is silent in both directions: the lane still spawns (the scope
+# check fails open), the session finds no project and exits IDLE, so the lane
+# reads as running while doing nothing -- and the diagnostic this script mails
+# tells the operator to add the RIG_PROJECTS entry that is already sitting in
+# roster.conf, unread. Measured on a live city 2026-08-11: five lanes down at
+# once with a correct roster.conf in place.
+#
+# The variable is never exported and orders exec this script directly, so it
+# cannot be inherited from a parent either. Of the pack's order scripts only
+# this one and repair-sweep.sh omitted the call; pool-spawn.sh, the third
+# consumer of sy_project_for_rig, has always made it.
+sy_load_conf
+
+
 QUALIFIED="switchyard-ops.$AGENT"
 
 # THE LANE'S QUEUE, per agent — the read that answers "is there anything for a

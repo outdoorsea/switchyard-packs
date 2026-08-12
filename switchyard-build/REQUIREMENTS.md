@@ -14,7 +14,7 @@ that will satisfy it — this ledger never asserts evidence that does not exist.
 
 | Field | Value |
 | --- | --- |
-| Status | Manifest, ledger, `sy-build-from-prd`'s source stage (`fetch-prd` and the three anchors it feeds), the `decompose` (pool → convoy) override, and the `build-base` publish override (completion summary) |
+| Status | Manifest, ledger, `sy-build-from-prd`'s source stage (`fetch-prd` and the three anchors it feeds), the `decompose` (pool → convoy) override, the `build-base` publish override (completion summary), and the publish preflight override |
 | Scope | switchyard's factory execution path for epic-scale approved PRDs |
 | Base contract | `gascity/REQUIREMENTS.md` (`gc.build-methodology-base.requirements.v1`) |
 | Base formula | `build-base` |
@@ -220,6 +220,24 @@ written in three places — the manifest's `[imports.gc]`, the `Pinned base` row
 above, and the `PIN=` line below — and an upgrade moves the first, leaving this
 ledger vouching for a commit the pack no longer imports.
 
+- **Publish contract** (`crit:c8bee483d06e`). `assets/workflows/publish/preflight.md`
+  overrides the base publish preflight through the asset path-shadow seam:
+  `gc`'s formula parser resolves a `description_file` written in the documented
+  `../assets/…` form against every search-path layer and keeps the last match
+  (`internal/formula/parser.go`, `readDescriptionFile`), so this pack's copy wins
+  while `gascity/formulas/publish.formula.toml` stays inherited and unforked —
+  no `extends`, no step rename, no edit to the pin. The override enforces
+  **PR-only publishing** (a direct push to the default or any protected branch is
+  refused *even when* `push` is authorized, because the factory always holds push
+  authorization to write its topic branch) and requires **both the PRD and pool
+  bead ids in the PR title**, with the `PRD #N` ref bounded to exactly one
+  occurrence across title, body and branch so a factory PR cannot trip the
+  repository's own `prd-ref guard` and end up auto-linked to no PRD. Unevaluable
+  checks fail closed. Because a shadow *replaces* the base file rather than
+  merging with it, the override restates every inherited base check; the
+  `publish preflight-gate` CI job asserts each one is still present, so a rewrite
+  cannot silently install a weaker gate at the stronger one's path.
+
 ### Pending
 
 Each row lands with the switchyard PRD #269 acceptance criterion named beside
@@ -228,8 +246,7 @@ it. Until then the claim is not made.
 | Claim | Lands with |
 | --- | --- |
 | **Formula contract** — `sy-build-from-prd` declares `extends = ["build-base"]` and preserves the inherited anchor order, overriding steps under their base ids without renaming, skipping, or reordering an anchor | the `sy-build-from-prd` step criteria below, collectively |
-| **Publish contract** — the publish preflight override enforces PR-only publishing with the PRD and bead ids in the PR title | `crit:c8bee483d06e` |
-| **End-to-end evidence** — an interactive factory run on a small approved PRD lands reviewed PRs and completes its beads with PRs attached | `crit:707a711e70df` |
+
 
 ## Evidence Commands
 
@@ -325,6 +342,19 @@ bash scripts/completion-summary-gate.test.sh
 
 # The same suite runs in CI as the `completion-summary-gate self-test` job.
 grep -n 'completion-summary-gate' .github/workflows/ci.yml
+
+# Publish contract (crit:c8bee483d06e): the override sits at the shadow path,
+# retains every inherited base check, and binds PR-only publishing, the two-id
+# title rule and fail-closed refusal inside their own sections. 22 assertions.
+#
+# The path is part of the assertion, not a filing preference: gc resolves the
+# base formula's `../assets/workflows/publish/preflight.md` across search-path
+# layers and keeps the LAST match, so the same file one directory across
+# overrides nothing and fails silently. The suite checks the path first.
+bash scripts/publish-preflight-gate.test.sh
+
+# The same suite runs in CI as the `publish preflight-gate self-test` job.
+grep -n 'publish-preflight-gate' .github/workflows/ci.yml
 
 # Ledger anchors the upstream evidence chain (expect all five).
 for f in GC-METH-012 '## Compatibility Claims' '## Evidence Commands' \

@@ -1,0 +1,27 @@
+# Keep stalled pull requests current with the branch they target, so a PR that
+# waited still addresses the tree it will actually merge into.
+#
+# Under the staging flow (docs/branch-policy.md) work combines on an
+# integration branch. A PR that sits while siblings merge drifts: its CI ran
+# against a base that no longer exists, and the longer it waits the harder the
+# eventual conflict. pr-gate (30m) makes the WAITING loud; this order fixes the
+# DRIFT — a PR more than PR_REFRESH_MIN_BEHIND commits behind its target is
+# rebased onto the target's tip and force-pushed (with lease) so its CI re-runs
+# against reality. "Stalled" is measured in commits behind, deliberately: that
+# is the thing a rebase fixes, and it needs no unportable date arithmetic.
+#
+# THE ORDER NEVER MERGES, never touches the target branch, and never rewrites a
+# branch a human marked draft. A rebase that conflicts is aborted untouched and
+# mailed ONCE per (PR, head) — a fresh push re-arms the alert, mirroring the
+# auto-release head_sha re-fire rule — because a conflicted stall is precisely
+# the state a human must resolve.
+#
+# OPT-IN via roster.conf's PR_REFRESH_RIGS. The refresh clone is the lane's own
+# (shared config with validate-sweep's VALIDATE_REPOS for the URL), never the
+# rig root. Cadence 6h: a rebase restarts the PR's CI, so refreshing more often
+# than reviews happen burns CI for nothing.
+[order]
+description = "Rebase stalled open PRs (>= PR_REFRESH_MIN_BEHIND commits behind their target, non-draft) onto the branch they target and force-push with lease; conflicts abort untouched and mail once per head"
+trigger = "cooldown"
+interval = "6h"
+exec = "$PACK_DIR/assets/scripts/pr-refresh.sh"

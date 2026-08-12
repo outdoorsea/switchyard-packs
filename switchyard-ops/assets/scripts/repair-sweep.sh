@@ -56,6 +56,24 @@
 # audit read 404'd would convert a degraded brief into the exact silent stall
 # this order removes — and the brief is an enrichment of the assignment, never a
 # precondition for it.
+#
+# ROUTING IS NOT DELIVERY (crit:77cdace10626). A nudge that exits 0 proves the
+# session accepted a message, not that any worker acted on it: a brakeman that is
+# wedged, mid-compaction, or simply not reading its inbox absorbs the assignment
+# and never takes the claim. So the sweep VERIFIES consumption instead of
+# assuming it, and consumption is RECORDED rather than inferred — the cycle that
+# observes a live claim stamps its marker `consumed`.
+#
+# Inferring it afterwards is not possible: once the window closes, "the worker
+# never claimed" and "the worker claimed, repaired it and released" are the same
+# read — no live claim — and the criteria endpoint exposes LIVE claims only, so
+# nothing on it remembers a lease that has already ended.
+#
+# An assignment whose window closes with no stamp was never consumed. It is
+# routed again AND mailed. Re-routing alone is not enough: the same dead worker
+# absorbs a fresh assignment every cycle, forever, and every one of those cycles
+# exits 0 having "routed" one — a criterion refused by a judge, with nobody on
+# it, and no signal anywhere. That is the silent drop this criterion names.
 set -u
 
 . "$(dirname "$0")/../lib/roster.sh"
@@ -118,6 +136,7 @@ mkdir -p "$markers" 2>/dev/null || exit 0
 now="$(date -u +%s)"
 routed=0
 failed=""
+dropped=""
 TAB="$(printf '\t')"
 
 # prev_day DATE — the calendar day before DATE (YYYY-MM-DD), or empty.
@@ -147,6 +166,28 @@ fails() {
       | select((.verdict // "") == "fail")
       | select((.crit_label // "") != "" and ((.prd_id // 0) > 0))
       | "\(.prd_id)\t\(.crit_label)"' 2>/dev/null
+}
+
+# marker_consumed FILE — was the assignment in FILE ever seen as a held lease?
+#
+# The stamp is a LINE, appended, never a rewrite of line 1. Line 1 carries the
+# routing timestamp the liveness window is measured from, and it is read by a
+# fixed `NR==1` parse, so appending leaves the window arithmetic — and any marker
+# written by a sweep that predates this check — parsing exactly as before. An
+# older marker simply carries no stamp, which reads as "not yet observed
+# consumed": that can cost one extra alarm, never a suppressed one.
+marker_consumed() {
+  [ -f "$1" ] || return 1
+  awk 'NR>1 && $1 == "consumed" { found = 1 } END { exit !found }' "$1" 2>/dev/null
+}
+
+# mark_consumed FILE — record that this assignment became a held lease.
+#
+# Idempotent: a repair held across several cycles is stamped once, so the marker
+# cannot grow without bound while a long repair runs.
+mark_consumed() {
+  marker_consumed "$1" && return 0
+  printf 'consumed %s\n' "$now" >>"$1" 2>/dev/null || true
 }
 
 # verdict_for ROLLUPS PRD LABEL — the NEWEST recorded `fail` for that PRD and
@@ -327,6 +368,13 @@ $prev"
     key="prd$prd-$(printf '%s' "$label" | tr -c 'A-Za-z0-9' '-')"
     marker="$markers/$key"
 
+    # Reset per rejection, never per rig: a criterion inheriting the previous
+    # one's verdict would report a drop against whichever criterion happened to
+    # be read next.
+    cstatus=""
+    unconsumed=0
+    prev_target=""
+
     # GUARD 1 — a live claim. The criteria read surfaces a claim only while its
     # lease is unexpired ("Only LIVE claims appear"), so a non-empty claimed_by
     # IS a worker holding this criterion right now. Routing a second one would
@@ -350,7 +398,44 @@ $prev"
           | map(select((.crit_label // "") == $l)
                 | select(((.prd_id // 0) | tostring) == $p))
           | .[0].claimed_by // empty' 2>/dev/null | awk 'NF' | head -n1)"
-      [ -n "$held" ] && continue
+      if [ -n "$held" ]; then
+        # THIS IS THE ONLY MOMENT CONSUMPTION IS OBSERVABLE. A lease shows up on
+        # the criteria read only while it is live, so a cycle that sees one and
+        # does not record it cannot recover the fact afterwards. Stamping here is
+        # what lets the expiry check below tell a worker that ignored its
+        # assignment from one that took it, repaired it and released.
+        [ -f "$marker" ] && mark_consumed "$marker"
+        continue
+      fi
+      # Consumption is also PROVEN by the criterion having moved on: a repair
+      # that reached a `done` verdict was plainly performed, whether or not any
+      # cycle happened to catch its lease in flight.
+      #
+      # Narrowed on (prd, label) for the same reason the claim read above is:
+      # crit_label hashes the criterion TEXT, so two PRDs sharing a boilerplate
+      # acceptance line share a label, and matching on the label alone would let
+      # one PRD's settled criterion silence another PRD's live rejection.
+      cstatus="$(printf '%s' "$criteria" | jq -r --arg l "$label" --arg p "$prd" '
+          (.criteria // [])
+          | map(select((.crit_label // "") == $l)
+                | select(((.prd_id // 0) | tostring) == $p))
+          | .[0].status // empty' 2>/dev/null | awk 'NF' | head -n1)"
+    fi
+
+    # THE REPAIR IS SETTLED. A criterion that reached `done` was repaired and
+    # re-judged; the `fail` that put it in this cycle's rollup is history. The
+    # rollup buckets a whole calendar day and is read for two days, so that
+    # stale verdict keeps reappearing for as long as 48 hours after the repair
+    # landed — and every one of those cycles would otherwise fall through to the
+    # nudge below and route a SECOND assignment for work already accepted.
+    #
+    # Its marker goes with it: leaving one behind means the next rejection of
+    # this same criterion reads as an assignment already live and is suppressed
+    # for a whole TTL. Checked BEFORE the unconsumed accounting so a settled
+    # repair is never reported as dropped either.
+    if [ "$cstatus" = "done" ]; then
+      rm -f "$marker" 2>/dev/null || true
+      continue
     fi
 
     # GUARD 2 — an assignment we already routed that has not aged out. Nothing
@@ -362,6 +447,28 @@ $prev"
       *[!0-9]* | "") at=0 ;;
       esac
       [ "$((now - at))" -lt "$REPAIR_ASSIGNMENT_TTL" ] && continue
+
+      # THE WINDOW CLOSED. Falling through re-routes it either way — the
+      # question this answers is whether the assignment was ever consumed, and
+      # so whether its disappearance is worth waking a human over.
+      #
+      # A stamp means a worker did hold it; its lease ending afterwards is an
+      # expired claim, which is a different fault with its own handling, so it
+      # is re-routed quietly rather than reported as ignored.
+      #
+      # An UNREADABLE criteria body leaves cstatus empty and is counted as
+      # unconsumed. That direction is deliberate: this whole check exists to
+      # stop a rejection going quiet, so an unverifiable assignment is reported
+      # rather than assumed fine. It costs a duplicate alarm at worst.
+      if ! marker_consumed "$marker"; then
+        case "$cstatus" in
+        "" | outstanding)
+          unconsumed=1
+          prev_target="$(awk 'NR==1{print $2}' "$marker" 2>/dev/null)"
+          dropped="$dropped $rig/$label(nudged:${prev_target:-unknown})"
+          ;;
+        esac
+      fi
     fi
 
     if [ "$target_known" -eq 0 ]; then
@@ -378,6 +485,19 @@ $prev"
     # dispatch: repair_brief always succeeds, degrading its content instead.
     brief="$(repair_brief "$project" "$token" "$prd" "$label" "$rollups")"
 
+    # A RE-ROUTE SAYS SO. The retry is otherwise indistinguishable from a first
+    # assignment, and a worker that cannot tell it is the second attempt has no
+    # reason to report back rather than go quiet the same way.
+    note=""
+    if [ "$unconsumed" -eq 1 ]; then
+      note="
+
+This criterion was already routed once — to ${prev_target:-a worker that no longer
+resolves} — and no claim was ever taken on it, so the assignment was dropped
+rather than worked. You are the retry. If you cannot take this repair, say so
+instead of leaving it: that silence is what cost this rejection a cycle."
+    fi
+
     if gc session nudge "$target" "REPAIR $label (PRD #$prd, project $project)
 
 A judge recorded a \`fail\` on this criterion: it was delivered, reviewed, and
@@ -388,11 +508,21 @@ Take the criterion claim before you build — claim { kind: \"criterion\", prd_i
 $prd, crit_label: \"$label\", lane: \"pool\" } — so a second worker is not routed
 onto the same repair. The rejection above is the brief: take a materially
 different approach rather than re-submitting the prior delivery, and land the
-repair as a pull request." </dev/null >/dev/null 2>&1; then
+repair as a pull request.$note" </dev/null >/dev/null 2>&1; then
       # Marker AFTER the nudge, never before: see the header. A failed dispatch
       # must leave nothing live so the next cycle retries it.
-      printf '%s %s\n' "$now" "$target" >"$marker" 2>/dev/null || true
-      routed=$((routed + 1))
+      #
+      # A MARKER THAT DID NOT PERSIST IS A ROUTING FAILURE, not a detail to
+      # swallow. The nudge has already gone out, so the work IS assigned — but
+      # with nothing on disk recording it, GUARD 2 cannot suppress anything and
+      # the next cycle routes a second worker onto the same repair, then a third.
+      # Reporting it is the only way that duplication is ever visible; the old
+      # `|| true` made an unwritable state directory look like a clean cycle.
+      if printf '%s %s\n' "$now" "$target" >"$marker" 2>/dev/null; then
+        routed=$((routed + 1))
+      else
+        failed="$failed $rig/$label(marker-write-failed)"
+      fi
     else
       failed="$failed $rig/$label(nudge-failed)"
     fi
@@ -416,8 +546,43 @@ Routed $routed repair assignment(s) successfully this cycle.
 session-lookup-failed means 'gc session list --json' could not be run or its output could not be parsed, so whether that rig has a live worker is UNKNOWN. Do not spawn on this one — check gc and jq first.
 no-live-worker means the roster was read fine and that rig has no live brakeman session to route to: check pool-spawn is running and the rig is not suspended.
 nudge-failed means the session alias resolved but gc session nudge returned non-zero.
+marker-write-failed means the worker WAS nudged and the assignment could not be recorded, so nothing suppresses a duplicate: the next cycle will route a second worker onto the same repair until the state directory is writable again.
 
 Until this clears, those criteria stay rejected with nobody repairing them." \
+    >/dev/null 2>&1
+fi
+
+# AN IGNORED ASSIGNMENT IS ITS OWN ALARM, AND A SEPARATE ONE. The mail above
+# reports a dispatch that could not be made; this reports a dispatch that was
+# made and then absorbed — the nudge succeeded, and the worker never claimed.
+# They are different faults with different fixes (find a worker vs. find out why
+# the one we have is not working), so folding them into one subject would hide
+# the second behind the first every time both fire.
+#
+# Without this, the re-route is silent by construction: a wedged brakeman can eat
+# one assignment per cycle indefinitely while every cycle exits 0 reporting a
+# successful route, which is precisely the drop this criterion forbids.
+#
+# THE ALARM MUST NOT OVERSTATE THE RETRY. A criterion is added to `dropped` when
+# its window closes unconsumed, which is BEFORE the re-route is attempted — and
+# that retry can still fail four ways (session lookup, no live worker, the nudge
+# itself, the marker write). Claiming "each has been routed again" unconditionally
+# would report the worst case — never consumed AND now unassigned — as if it were
+# handled, which is the same false all-clear this check exists to remove, just
+# moved one cycle later. So the retry is described conditionally and the reader is
+# pointed at the companion mail, which names exactly those the retry could not reach.
+if [ -n "$dropped" ]; then
+  gc mail send mayor \
+    -s "repair-sweep: $(printf '%s' "$dropped" | wc -w | tr -d ' ') repair assignment(s) were never consumed" \
+    -m "repair-sweep routed a repair assignment for each of these criteria in an earlier cycle, the nudge succeeded, and no claim was ever taken on it. Each has been re-routed this cycle EXCEPT any also named in a 'repair-sweep: could not route' mail — for those the retry could not be dispatched either, and the criterion is now rejected with nobody on it:$dropped
+
+The name after 'nudged:' is the session the dropped assignment went to; 'unknown' means the marker recorded no target.
+
+A worker that is nudged and never claims is usually wedged, mid-compaction, or out of context — check it with 'gc session peek' before assuming the routing is at fault. If that session is dead, the retry has gone to whoever is live now.
+
+This is not the same fault as 'could not route': there, no worker could be reached at all. Here one was reached and did not act. A criterion in BOTH mails has hit both faults in sequence and is the most urgent case in this report.
+
+Routed $routed repair assignment(s) this cycle in total." \
     >/dev/null 2>&1
 fi
 

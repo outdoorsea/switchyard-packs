@@ -491,6 +491,30 @@ lane_adhoc_sessions() {
         | [ $ref, (.session_name // "") ] | @tsv' 2>/dev/null
 }
 
+# lane_live_sessions RIG — live sessions that speak for this lane on RIG.
+#
+# Matches the SAME identity rule lane_live_count and lane_role_state use: the
+# bare template session (`<rig>/<qualified>`), plus any `-adhoc-` instances the
+# sweep itself spawned. Only states in LANE_LIVE_STATES are returned, because a
+# session that is already asleep or closed is not a lever target.
+lane_live_sessions() {
+  _lls_raw="$(lane_roster)"
+  [ -n "$_lls_raw" ] || return 0
+  _lls_states_json="$(printf '%s' "$LANE_LIVE_STATES" | jq -Rc 'split(" ")')"
+  printf '%s' "$_lls_raw" \
+    | jq -r --arg q "$1/$QUALIFIED" --argjson live "$_lls_states_json" '
+        (.sessions // [])[]
+        | select( ((.closed // false) | not) )
+        | (.agent // .agent_name // .qualified_name // "") as $n
+        | select( (.template // "") == $q
+                  or $n == $q
+                  or ($n | startswith($q + "-adhoc-")) )
+        | select( (.state // "") as $st | ($live | index($st)) != null )
+        | ((.alias // .id // .name // "")) as $ref
+        | select( $ref != "" )
+        | [ $ref, (.session_name // "") ] | @tsv' 2>/dev/null
+}
+
 # lane_reap RIG — close every adhoc session of this lane on RIG whose pane says
 # it has finished. Echoes the ref of each session it closed, one per line.
 #
@@ -685,6 +709,262 @@ lane_reach_fault() {
   [ -n "$_lrf_project" ] || printf 'scope'
 }
 
+# ===========================================================================
+# THE IDLE-BUT-LIVE LADDER (switchyard PRD #329, crit:349ce4b5f0ee)
+# ===========================================================================
+#
+# THE FAILURE. Everything above answers "is a session THERE?" and nothing asks
+# "is it WORKING?". A headless session exits when its pass ends and settles as
+# `asleep`, so the two questions coincide and the pane/state machinery above is
+# sound. An `opencode` TUI does not: it finishes its pass, returns to its prompt,
+# and sits in `active` forever. lane_live_count then reports 1, the main loop
+# takes its `already running → leave it` arm, and the lane is declared staffed by
+# a session that will never take another item. Measured on gc-fremont-fresh: the
+# judging lane did nothing from 2026-08-04 to 2026-08-07 while `gc status`, tmux
+# and the switchyard agent roster all read healthy. Unstuck by hand it validated
+# 32 criteria in one afternoon, so the lane was never the problem — only the
+# predicate that decides it is staffed.
+#
+# WHY A SIGNAL AND NOT A TIMER. Session state and pane text both describe the
+# session's SHELL, which is exactly what stays lively while the work stops. The
+# heartbeat is the only signal that moves when work moves: the agent stamps it
+# over MCP as it claims and completes, so a stale heartbeat is the absence of
+# WORK rather than the absence of a process. Reading it costs nothing new to
+# build — the server already classifies it (see lane_role_state).
+#
+# WHY A LADDER AND NOT A KILL. The rungs are ordered by what they destroy:
+#
+#   nudge       delivers a message to a running session. Destroys nothing; a
+#               session that is genuinely mid-thought ignores it. This is the
+#               rung that makes acting on a MERELY SUSPECTED stall safe.
+#   reset+wake  restarts the session, preserving its bead, and clears holds.
+#               Discards context, so it is not first. `reset` alone is not
+#               enough: it leaves the session `asleep` when fresh creates are
+#               budget-constrained, so the pair is the rung, not `reset`.
+#   spawn       a new session alongside. Last, because it is the only rung that
+#               spends a fresh session slot.
+#
+# ONE RUNG PER CYCLE, AND THE RECOVERY TEST IS THE HEARTBEAT ITSELF. The next
+# cycle re-reads the signal: recovered ⇒ the ladder resets and nothing further
+# happens; still stale ⇒ the next rung. So the escalation is driven by whether
+# the lever WORKED, not by a fixed schedule, and a nudged session that goes back
+# to work is never reset.
+#
+# IT FAILS CLOSED, WHICH IS THE OPPOSITE OF EVERY OTHER GATE IN THIS FILE. The
+# queue check, the suspended-rig guard and the reaper all fail OPEN — they act
+# when unsure — because their error costs a surplus session and their silence
+# costs a stalled lane. This ladder inverts that: its lever lands on a session
+# that may be WORKING, and interrupting a judge mid-criterion destroys work that
+# no later cycle recovers. So every uncertainty here — an unreadable briefing, a
+# role with no liveness row, a queue that cannot be counted — declines to
+# escalate and leaves the session alone. The cost of that silence is bounded and
+# visible: one more cycle of a lane that is already stalled, and the stall itself
+# is what the rung log below makes legible.
+
+# lane_role_state RIG — this lane's liveness on RIG: `fresh`, `stale`,
+# `suspended`, or EMPTY when it cannot be answered confidently.
+#
+# The classification is the SERVER'S, not ours. `briefing.liveness.agents[].state`
+# is already computed against that project's own `stale_after_minutes`, so the
+# threshold lives with the project that owns it and this script never reimplements
+# staleness arithmetic in shell — where it would drift from the dashboard's answer
+# and from every other reader's.
+#
+# ANY fresh WINS. A lane may carry more than one registered ref (a bare template
+# name and an adhoc one, or two sessions mid-handover), and one heartbeating agent
+# means the lane IS being worked whatever the other rows say. Collapsing to the
+# healthiest row is the fail-closed direction: it withholds the ladder.
+#
+# `suspended` is returned rather than folded into stale because it is an
+# INTENTIONAL pause — a rig the mayor stopped — and escalating against a human
+# decision is the false alarm this pack has already had to unlearn once.
+lane_role_state() {
+  [ -n "$lane_token" ] || return 0
+  _lrs_project="$(sy_project_for_rig "$1" "$lane_projects")"
+  [ -n "$_lrs_project" ] || return 0
+
+  _lrs_body="$(sy_api_get "/api/v1/projects/$_lrs_project/briefing" "$lane_token")"
+  [ -n "$_lrs_body" ] || return 0
+
+  # Matched on the SAME identity rule lane_live_count uses, so "which sessions
+  # count as this lane" and "whose heartbeat speaks for this lane" cannot drift
+  # apart: the exact ref the agents' prompts register (`<rig>/switchyard-ops.<agent>`),
+  # plus the `-adhoc-` instances the sweep itself spawns.
+  printf '%s' "$_lrs_body" | jq -r --arg q "$1/$QUALIFIED" '
+      [ (.liveness.agents // [])[]
+        | (.agent_ref // "") as $r
+        | select( $r == $q or ($r | startswith($q + "-adhoc-")) )
+        | (.state // "") | select(. != "") ]
+      | if   length == 0            then empty
+        elif index("fresh")     then "fresh"
+        elif index("suspended") then "suspended"
+        elif index("stale")     then "stale"
+        else empty end' 2>/dev/null \
+    | awk 'NF' | head -n1
+}
+
+# lane_rung_file RIG — where RIG's current ladder position is remembered.
+#
+# Keyed per AGENT *and* per rig: two lanes on one rig, and one lane across two
+# rigs, are independent stalls, and sharing a marker would let a recovery on one
+# silently reset the ladder on another. The rig is sanitised into the filename
+# because it reaches this script from `gc rig list` rather than from a literal
+# here, and one `/` in it would otherwise write outside the state directory.
+lane_rung_file() {
+  printf '%s/lane-ensure.%s.%s.rung' "$(sy_state_dir)" \
+    "$(printf '%s' "$AGENT" | tr -c 'A-Za-z0-9._-' '_')" \
+    "$(printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_')"
+}
+
+lane_rung_read() {
+  awk 'NF{print;exit}' "$(lane_rung_file "$1")" 2>/dev/null
+}
+
+# lane_rung_clear RIG — the lane recovered; the NEXT stall starts at `nudge`.
+#
+# Without this the ladder is a ratchet: a lane that stalls, is nudged back to
+# life, and stalls again a week later would be reset+woken on the strength of a
+# rung earned by an unrelated episode. Recovery has to be forgettable for the
+# cheapest rung to keep being tried first.
+lane_rung_clear() {
+  rm -f "$(lane_rung_file "$1")" 2>/dev/null || true
+}
+
+# lane_rung_next LAST — the rung that follows LAST. Unrecognised or exhausted
+# input pins at `spawn`: a corrupt marker must not silently restart the ladder at
+# the bottom and leave a lane looping on nudges forever. The terminal marker
+# `spawn-done` is written after the first top-rung spawn so later cycles decline
+# instead of spawning a replacement on every sweep.
+lane_rung_next() {
+  case "${1:-}" in
+    '')          printf 'nudge' ;;
+    nudge)       printf 'reset-wake' ;;
+    reset-wake)  printf 'spawn' ;;
+    spawn-done)  printf 'exhausted' ;;
+    *)           printf 'spawn' ;;
+  esac
+}
+
+# lane_record_rung RIG RUNG DETAIL — RECORD WHICH RUNG WAS TAKEN.
+#
+# Two records, because they answer different questions and neither substitutes
+# for the other:
+#
+#   stdout   is the operator's answer to "what did the sweep DO about it?". It
+#            is the order's output, so it lands in the supervisor log beside the
+#            `order exec` line, which is where someone triaging a quiet lane is
+#            already looking. This is the criterion's own requirement — a rung
+#            taken silently is indistinguishable from the four-day stall this
+#            PRD exists to end.
+#   the file is the LADDER's memory, and the reason it can escalate at all: the
+#            next cycle reads it to learn that a nudge has already been spent.
+#
+# The marker is written even if the lever failed. A rung that could not be pulled
+# is still a rung TRIED, and retrying it forever is the loop this ladder replaces.
+lane_record_rung() {
+  printf '%s-sweep: %s lane on %s is idle-but-live (heartbeat stale, %s) — escalated to rung %s\n' \
+    "$AGENT" "$SUBJECT" "$1" "$3" "$2"
+  mkdir -p "$(sy_state_dir)" 2>/dev/null || return 0
+  printf '%s\n' "$2" >"$(lane_rung_file "$1")" 2>/dev/null || true
+}
+
+# lane_escalate_idle RIG — the whole ladder for one rig on one cycle.
+#
+# Ordered cheapest-evidence-first, so a healthy city pays nothing: the rung is
+# only ever reached by a rig that already has a live session, a countable backlog
+# and a confidently stale heartbeat.
+lane_escalate_idle() {
+  # A lane with no queue mapping has no backlog this script can confirm, so it
+  # has no idle to detect. Declining here (rather than escalating blind) keeps a
+  # lane added to this pack later inert until it declares its queue, matching the
+  # rule the spawn path already follows.
+  [ -n "$LANE_QUEUE_SUFFIX" ] || return 0
+
+  # NOTHING TO DO IS NOT A STALL. A session sitting quietly on a drained queue is
+  # correct behaviour, and nudging it would page a working city every cycle. Only
+  # a CONFIDENT count of real work qualifies — unlike the spawn path, an unknown
+  # queue declines, because here the doubt argues against acting.
+  _lei_depth="$(lane_queue_depth "$1")"
+  case "${_lei_depth:-}" in
+    '' | *[!0-9]*) return 0 ;;
+    0)             return 0 ;;
+  esac
+
+  # The briefing read is deliberately BELOW the queue check, so it is paid only
+  # for a rig that has both a live session and real work waiting. A drained or
+  # unstaffed lane costs no extra call at all.
+  _lei_state="$(lane_role_state "$1")"
+  case "${_lei_state:-}" in
+    fresh)
+      # WORKING. This is also the recovery path: whatever rung a previous cycle
+      # spent, the lever worked, so the ladder is forgotten.
+      lane_rung_clear "$1"
+      return 0
+      ;;
+    stale) : ;;
+    # `suspended` (a deliberate pause) and empty (no liveness row, an unreadable
+    # briefing, an unresolvable project) both decline. Neither is evidence of a
+    # stall, and acting on either lands a lever on a session that may be fine.
+    *) return 0 ;;
+  esac
+
+  _lei_rung="$(lane_rung_next "$(lane_rung_read "$1")")"
+
+  # The session to act on. The broad live-session predicate matches both the
+  # bare template session and adhoc spawns, using the SAME identity rule
+  # lane_live_count and lane_role_state use, so "counts as this lane" and
+  # "speaks for this lane" cannot drift apart. It is empty only when no live
+  # target exists; in that case nudge/reset cannot be delivered and the rung
+  # degrades to spawn, which creates one rather than addressing one.
+  _lei_ref="$(lane_live_sessions "$1" 2>/dev/null | awk -F"$LANE_TAB" 'NF{print $1; exit}')"
+  if [ -z "${_lei_ref:-}" ] && [ "$_lei_rung" != spawn ] && [ "$_lei_rung" != exhausted ]; then
+    _lei_rung=spawn
+  fi
+
+  case "$_lei_rung" in
+    nudge)
+      gc session nudge "$_lei_ref" \
+        "$SUBJECT lane: your heartbeat has gone stale while $_lei_depth item(s) wait. If your pass is finished, exit so the lane can be restaffed; if you are still working, ignore this." \
+        >/dev/null 2>&1 || true
+      lane_record_rung "$1" nudge "$_lei_depth waiting, session $_lei_ref"
+      ;;
+    reset-wake)
+      # PAIRED, NOT `reset` ALONE — see the ladder note above. `wake` runs even
+      # if `reset` reported failure: the pair exists to leave the session RUNNING,
+      # and a reset that half-succeeded still needs the hold cleared.
+      gc session reset "$_lei_ref" >/dev/null 2>&1 || true
+      gc session wake  "$_lei_ref" >/dev/null 2>&1 || true
+      lane_record_rung "$1" reset-wake "$_lei_depth waiting, session $_lei_ref"
+      ;;
+    exhausted)
+      # The ladder has already spent the top rung for this stall. Spawning again
+      # on every subsequent cycle would fill the rig with replacement sessions.
+      # Declining is bounded and visible: the lane stays on the log it already
+      # recorded, and recovery (fresh heartbeat) clears the marker.
+      return 0
+      ;;
+    spawn)
+      # THE TOP RUNG DELIBERATELY STACKS A SECOND SESSION. The guard that would
+      # normally forbid this counts the zombie as live, which is precisely the
+      # reading this ladder has spent two rungs disproving. The surplus is the
+      # cheaper error by this file's own standing argument: an extra session is
+      # visible in `gc session list` and the reaper closes it once its pane says
+      # it finished, whereas the lane it replaces is stalled invisibly.
+      #
+      # It is NOT reaped here. Closing a session the pane has not declared
+      # finished is the one action this pack refuses everywhere else, and a
+      # heartbeat is not pane evidence.
+      _lei_id="$(lane_spawn "$1")"
+      lane_record_rung "$1" spawn "$_lei_depth waiting, spawned ${_lei_id:-<identity unread>}"
+      # Pin the ladder at the terminal marker so later cycles decline instead of
+      # spawning a replacement on every sweep. The stdout report still says
+      # `spawn`; the file only remembers that the top rung is spent.
+      printf '%s\n' spawn-done >"$(lane_rung_file "$1")" 2>/dev/null || true
+      ;;
+  esac
+  return 0
+}
+
 # lane_agent_probe — did `gc agent list --json` ANSWER, as distinct from what it
 # answered? Echoes the agent count (possibly 0) when the probe returned a
 # parseable list, and nothing when the probe itself failed.
@@ -857,8 +1137,15 @@ for rig in $rigs; do
   n="$(lane_live_count "$rig" "$reaped")"
   case "$n" in
     ''|*[!0-9]*) continue ;;      # cannot confirm absent → do not stack a second
-    0) : ;;                       # confirmed none live → spawn below
-    *) continue ;;                # already running → leave it
+    0) lane_rung_clear "$rig" ;;  # confirmed none live → spawn below
+    # ALREADY RUNNING IS NOT THE SAME AS ALREADY WORKING (PRD #329).
+    #
+    # This arm used to `continue` unconditionally, and that is the silent stall:
+    # a finished `opencode` session stays `active` forever, so the lane reads
+    # staffed by a session that will never take another item. Ask the heartbeat
+    # before believing the roster — see the ladder above, which declines unless
+    # the lane has confirmed work AND a confidently stale heartbeat.
+    *) lane_escalate_idle "$rig"; continue ;;
   esac
 
   # WHY THE QUEUE MIGHT NOT BE READABLE, recorded for the escalation at the foot.

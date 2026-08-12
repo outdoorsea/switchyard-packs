@@ -1,0 +1,32 @@
+# Drain the CONTRACT half of the awaiting-validation backlog from inside the
+# city, with no `switchyard-companion` running (the second of COMPANION.md's two
+# COMPANION-REQUIRED rows, closed the same way PRD #327 closed the worker rows).
+#
+# A criterion that declares a runnable `[verify: …]` contract is validated
+# MECHANICALLY: re-run the command against merged main, post the exit code as
+# the verdict. No judgment is involved, so no LLM session is spawned — the order
+# script does the whole loop itself: claim (lane=contract) → run in a dedicated
+# clean checkout → post verdict → settle the stake (`done` completes it, a
+# `fail` RELEASES it, because a fail resets the criterion for re-work and that
+# re-work must be validatable again).
+#
+# The judge agent deliberately takes only criteria declaring NO command, so
+# without this lane a fully contract-bearing PRD is reachable by no validator at
+# all — the exact backlog `list_pending_decisions` reports as contract_bearing.
+#
+# OPT-IN PER RIG: roster.conf's VALIDATE_RIGS names the rigs whose projects this
+# lane validates; unset = the lane is off everywhere and this order exits
+# silently. The checkout it runs contracts in is the lane's own
+# `validate-repo.<rig>` under the pack state dir — NEVER the rig root, which
+# workers and agents read live.
+#
+# Cadence 15m: a verdict is latency-tolerant (a criterion waits minutes, not
+# seconds), and each cycle drains up to VALIDATE_MAX_PER_CYCLE criteria, so the
+# backlog converges without one cycle running unbounded. The event-pump order
+# can trigger it early on a validation-needed event; this cooldown is then the
+# safety net rather than the trigger.
+[order]
+description = "Mechanically validate delivered contract-bearing criteria for each rig in VALIDATE_RIGS: claim (lane=contract), re-run the verify_command in the lane's own clean checkout of merged main, post done/fail from the exit code"
+trigger = "cooldown"
+interval = "15m"
+exec = "$PACK_DIR/assets/scripts/validate-sweep.sh"

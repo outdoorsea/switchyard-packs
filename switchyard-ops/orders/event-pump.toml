@@ -1,0 +1,30 @@
+# Bridge switchyard's project event stream into the city's own orders, with no
+# `switchyard-companion watch` running — the second of COMPANION.md's two
+# COMPANION-REQUIRED rows (validate-sweep closes the first).
+#
+# Without a bridge, every lane runs at its sweep cadence: a question waits up to
+# 20m for answer-sweep, an untriaged idea up to 1h, a delivered criterion up to
+# 15m. The events feed already says the moment each of those lands. This order
+# drains that feed (SSE, Last-Event-ID cursor, bounded seconds per cycle) and
+# runs the ORDER that owns each event class — it never does the work itself and
+# never spawns a session, so a pump failure costs latency only: every cooldown
+# sweep it triggers early remains its own safety net.
+#
+# Kind → order (mirrors the companion watcher's classifier):
+#   prd.dispatched, prd.approved  → pool-spawn          (claimable work landed)
+#   prd.question_asked            → answer-sweep        (an answerer should wake)
+#   idea.imported                 → intake-triage-sweep (intake landed)
+#   prd.build_ready               → validate-sweep      (delivered, awaiting acceptance)
+#   deploy.reported               → golden-journey-sweep (a deploy needs grading)
+# message.posted is deliberately unmapped: the shaper wake target exists on the
+# API but no autonomous lane owns it yet (docs/agent-role-protocol.md).
+#
+# OPT-IN PER RIG via roster.conf's EVENT_PUMP_RIGS; unset = off everywhere.
+# Cadence 1m: each cycle costs one bounded HTTP read per rig, and a 1m tick
+# bounds worst-case wake latency at ~68s (tick + drain window) versus the sweeps'
+# 15m–1h.
+[order]
+description = "Drain each EVENT_PUMP_RIGS rig's switchyard event stream (SSE, cursor-resumed, bounded) and run the order that owns each event class early — the cooldown sweeps stay the safety net"
+trigger = "cooldown"
+interval = "1m"
+exec = "$PACK_DIR/assets/scripts/event-pump.sh"

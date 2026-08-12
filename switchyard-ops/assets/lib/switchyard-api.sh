@@ -86,6 +86,25 @@ sy_api_get() {
         "$(sy_api_base)$1" 2>/dev/null
 }
 
+# sy_api_post PATH TOKEN JSON — POST a JSON body to an API path, echoing the
+# response body. Same conventions as sy_api_get: empty on ANY failure including
+# a non-2xx (`-f`), and the token travels over a curl config on stdin, never
+# argv. The JSON body IS argv — it never carries a credential, only claim and
+# verdict fields — and callers must treat an empty answer as "refused or
+# unreachable", never as success: every consumer of this helper fails CLOSED
+# (skips the write's follow-up, releases the claim it holds) on empty.
+sy_api_post() {
+  [ -n "${2:-}" ] || return 0
+  command -v curl >/dev/null 2>&1 || return 0
+  printf 'header = "Authorization: Bearer %s"\n' "$2" \
+    | curl -fsS --config - \
+        --connect-timeout "$SY_API_CONNECT_TIMEOUT" \
+        --max-time "$SY_API_MAX_TIME" \
+        -H 'Content-Type: application/json' \
+        --data "${3:-{\}}" \
+        "$(sy_api_base)$1" 2>/dev/null
+}
+
 # sy_api_projects TOKEN — the project list this token can reach, as JSON. Empty
 # when unreadable. Fetch it ONCE per cycle and pass it to sy_project_for_rig:
 # it is a network call, and re-reading it per rig would also let a mid-cycle blip

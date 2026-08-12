@@ -441,8 +441,16 @@ sy_pool_brakeman_identity_for_alias() {
       ([.agent,.agent_name,.qualified_name,.template,.state,.alias,.name,.session_name,.id,.session_id]
        | all(.[]; .==null or type=="string")))' >/dev/null 2>&1 || return 2
   _states_json="$(printf '%s' "$POOL_LIVE_STATES" | jq -Rc 'split(" ")')"
-  printf '%s' "$_raw" | jq -r --arg q "$1/switchyard-ops.brakeman" --arg a "$2" --argjson live "$_states_json" '
-    [ (.sessions // [])[] | select((.alias // "") == $a) ] as $records
+  # $qa: current gc registers the requested alias QUALIFIED as
+  # `<rig>/switchyard-ops.<alias>`; older builds keep it bare. Both are this
+  # request's unique nonce, so both prove the record — and on modern gc the
+  # record's own `.name` IS that qualified alias, so the identity select's
+  # `. == $qa` arm is what accepts it. The select stays otherwise exact: an
+  # identity that is neither this request's alias (either form) nor an
+  # adhoc-shaped pool name is refused, because the shared roster is where an
+  # unrelated session could wear our alias.
+  printf '%s' "$_raw" | jq -r --arg q "$1/switchyard-ops.brakeman" --arg a "$2" --arg qa "$1/switchyard-ops.$2" --argjson live "$_states_json" '
+    [ (.sessions // [])[] | select((.alias // "") as $al | $al == $a or $al == $qa) ] as $records
     | if ($records | length) != 1 then empty
       else ($records[0]
         | (.agent // .agent_name // .qualified_name // "") as $n
@@ -452,8 +460,9 @@ sy_pool_brakeman_identity_for_alias() {
         | select((.state // "") as $st | ($live | index($st)) != null)
         | (.name // .session_name // .id // .session_id // .qualified_name // .agent // "")
         | select(type == "string")
-        | select(. == $a or (startswith($q + "-adhoc-") and
-                             ((ltrimstr($q + "-adhoc-")) | test("^[A-Za-z0-9_.-]+$")))))
+        | select(. == $a or . == $qa
+                 or (startswith($q + "-adhoc-") and
+                     ((ltrimstr($q + "-adhoc-")) | test("^[A-Za-z0-9_.-]+$")))))
       end' 2>/dev/null || return 2
 }
 
@@ -491,22 +500,40 @@ sy_pool_spawn_brakeman() {
   [ "${#_spawn_alias}" -le 64 ] || return 1
   # A timed-out client does not prove the server rejected the spawn. Regardless
   # of this command's exit status, reconcile its unique alias below.
+  # Current gc builds register an adhoc alias QUALIFIED — the response and the
+  # roster both carry `<rig>/switchyard-ops.<requested>` — while older builds
+  # echo it verbatim. Accept exactly those two forms and nothing else; the
+  # qualified form is still bound to this request's random nonce, so it is the
+  # same idempotency proof. (Measured 2026-08-12 on the live city: the bare-form
+  # assertion made every SUCCESSFUL spawn read as "no session identity", so
+  # pool-spawn spawned a worker per cycle, disowned each one, and mailed a
+  # dispatch failure while 116 claimable beads sat in the pool.)
+  _qualified_alias="$1/switchyard-ops.${_spawn_alias}"
   _out="$(sy_timeout "$POOL_SPAWN_TIMEOUT" gc session new "$1/switchyard-ops.brakeman" --alias "$_spawn_alias" --json --no-attach 2>/dev/null)" || _out=""
   _json_alias="$(printf '%s' "$_out" | jq -r '(if type=="object" then (.session // .) else empty end) | (.alias // "")' 2>/dev/null | head -n1)"
   _id="$(printf '%s' "$_out" | jq -r "$POOL_SESSION_ID_JQ" 2>/dev/null | awk 'NF' | head -n1)"
   # A JSON identity is usable immediately only when the response proves it came
-  # from THIS request's random alias. Otherwise roster reconciliation is the sole
-  # authority; a pool-shaped name in progress/error text is not enough.
-  [ "$_json_alias" = "$_spawn_alias" ] || _id=""
+  # from THIS request's random alias (bare or qualified). Otherwise roster
+  # reconciliation is the sole authority; a pool-shaped name in progress/error
+  # text is not enough.
+  case "$_json_alias" in
+    "$_spawn_alias"|"$_qualified_alias") ;;
+    *) _id="" ;;
+  esac
   case "$_id" in
-    "$_spawn_alias") ;;
+    "$_spawn_alias"|"$_qualified_alias") ;;
     "$1/switchyard-ops.brakeman-adhoc-"*)
       _suffix=${_id#"$1/switchyard-ops.brakeman-adhoc-"}
       printf '%s' "$_suffix" | grep -Eq '^[[:alnum:]_.-]+$' || _id="" ;;
-    *) _id="" ;;
+    *)
+      # The alias check above already proved the response is THIS spawn's, and
+      # current gc identifies the session by registry id (`gf-…` / `s-gf-…`),
+      # not by a pool-shaped name — so with the alias proven, any single sane
+      # token is an acceptable identity. Without that proof _id is already "".
+      printf '%s' "$_id" | grep -Eq '^[A-Za-z0-9/_.-]+$' || _id="" ;;
   esac
   if [ -z "$_id" ]; then
-    _id="$(printf '%s\n' "$_out" | tr ' \t' '\n\n' | awk -v a="$_spawn_alias" '$0==a {print; exit}')"
+    _id="$(printf '%s\n' "$_out" | tr ' \t' '\n\n' | awk -v a="$_spawn_alias" -v q="$_qualified_alias" '$0==a || $0==q {print; exit}')"
   fi
   if [ -n "$_id" ]; then
     printf '%s' "$_id"

@@ -17,10 +17,13 @@ satisfy it, in the same spirit as `packs/switchyard-build/REQUIREMENTS.md`.
 
 **The claim this ledger is built to state, and the one worth remembering:**
 
-> `validate` and `watch` are the only companion capabilities that still require the companion.
+> No companion capability still requires the companion: every verb is a pack lane, pending under PRD #327, or retires with the daemon.
 
-Everything else is either covered by a pack lane, landing under PRD #327, or
-disappears together with the daemon that hosts it.
+`validate` and `watch` were the last two `COMPANION-REQUIRED` rows; both gained
+pack orders on 2026-08-12 (`orders/validate-sweep.toml` and
+`orders/event-pump.toml` — see the rewritten sections below for how each of the
+original objections was answered). The token and its gate remain, so a row that
+re-acquires `COMPANION-REQUIRED` is still a reviewed decision, not a drift.
 
 ## How to read the Status column
 
@@ -49,8 +52,8 @@ keep the companion installed.
 | Covered-by proposals | `covered-by` | duplicate-detection lane | `PENDING` |
 | Golden-journey ship verification | `journeys` | `agents/golden-journey` + `orders/golden-journey-sweep.toml` (30m) | `PACK-LANE` |
 | Config/token/reachability preflight | `doctor` | reachability check that escalates | `PENDING` |
-| Contract re-run against merged main | `validate` | none — see Why `validate` stays | `COMPANION-REQUIRED` |
-| SSE event bridge → session wake | `watch` | none — see Why `watch` stays | `COMPANION-REQUIRED` |
+| Contract re-run against merged main | `validate` | `orders/validate-sweep.toml` (15m, opt-in via `VALIDATE_RIGS`) | `PACK-LANE` |
+| SSE event bridge → session wake | `watch` | `orders/event-pump.toml` (1m, opt-in via `EVENT_PUMP_RIGS`) | `PACK-LANE` |
 | Bridge daemon: control surface + reconcile loop | `serve` | none; cloud-pool dispatch removes the bridge | `RETIRES-WITH-DAEMON` |
 | Local `bd` dispatch bridge | `serve` (`local_dispatch`) | none; the managed pool needs no `bd` | `RETIRES-WITH-DAEMON` |
 | On-disk sync cursors | `cursors.json` (`state_path`) | none; the pool is claimed, not cursored | `RETIRES-WITH-DAEMON` |
@@ -66,50 +69,58 @@ keep the companion installed.
 <!-- ledger:end -->
 
 Enforced by `scripts/check-companion-capability-ledger.sh`, which fails if any
-row other than `validate` and `watch` is marked `COMPANION-REQUIRED` — so the
-headline claim above cannot quietly stop being true.
+row at all is marked `COMPANION-REQUIRED` — so the headline claim above cannot
+quietly stop being true, and re-acquiring the token is a reviewed decision.
 
-## Why `validate` stays
+## How `validate` became a pack lane
 
 `validate` re-runs a delivered criterion's own `verify_command` and posts a
 `done` on exit 0, a `fail` on anything else. Both verdicts are consequential: an
 automated `done` is terminal, and a `fail` **resets delivered work for re-work**.
-That is why it needs guarantees a wake-based pack agent cannot offer.
+This section used to argue a wake-based pack agent could not offer the
+guarantees that demands; `orders/validate-sweep.toml` answers each of those
+objections rather than waiving them:
 
-- **It needs a dedicated clean clone it controls.** `validate_workdir` is
-  hard-reset before each run, and the freshness gate refuses a dirty tree. A rig
-  checkout is dirty by construction — a worker's worktree is scoped to a bead —
-  so the lane cannot borrow one.
-- **It must be pointed at the branch the criteria actually land on.**
-  `validate_main_branch` defaults to `main`. Under a one-integration-branch-per-PRD
-  policy the code sits on `prd-<N>-<slug>` until the whole PRD merges, so the
-  default re-runs every contract against a tree without the code, fails them all,
-  and undoes delivered work while reporting success.
-- **Its precondition is met, so this is not theoretical.** Contract-bearing
-  coverage is no longer ~0; a fully contract-bearing PRD is today the *worst*
-  case for acceptance, because `judge` deliberately takes only criteria with **no**
-  command and declines every one of these. If no companion runs `validate`, that
-  backlog is reachable by no lane at all.
+- **"It needs a dedicated clean clone it controls."** The lane owns
+  `validate-repo.<rig>` under the pack state dir — never the rig root — cloned
+  on first run from `VALIDATE_REPOS`, fetched and hard-reset before every cycle,
+  and the cycle refuses to run (with mail) when the reset fails. A rig checkout
+  stays a worker's business.
+- **"It must be pointed at the branch the criteria actually land on."**
+  `VALIDATE_BRANCHES="<rig>=<branch>"` validates against an integration branch
+  instead of origin's default. And independently of that setting, a NON-ZERO
+  exit on a PRD with **no merged delivery on record** (empty `evidence_ref`)
+  banks no verdict at all — the stake is released, because "the code is not on
+  this tree yet" is not a judgment on the work. A pass still banks `done`; the
+  code being present and passing is evidence in itself. That asymmetry is what
+  stops the false-negative rework churn the old text warned about.
+- **"A wholesale-skipped suite exits 0 and banks a false done."** The per-rig
+  prep guard (`validate-prep.<rig>.sh` in the state dir) runs before any claim:
+  regenerate gitignored code, run a canary that proves the harness executes.
+  A refused guard validates nothing and mails — fail closed, loudly.
 
-Leave `validate_skip_repo_check` false. If you run this lane, run it from the
-companion, against a dedicated clone, on the integration branch.
+The `judge` agent still deliberately takes only criteria declaring **no**
+command, so without this lane a fully contract-bearing PRD is reachable by no
+validator at all; that is exactly the backlog this order drains.
 
-## Why `watch` stays
+## How `watch` became a pack lane
 
 `watch` subscribes to the project's SSE event stream and routes each event
-through log → classify → coalesce → hook, so a judge or answerer can be woken the
-instant a criterion is delivered or a question opens.
+through log → classify → coalesce → hook. The old objection was that it is a
+**held-open socket**, and no gc construct holds a connection open across a
+wake-based agent's exit.
 
-It is not a lane that does work; it is a **held-open socket**. It keeps a
-long-lived HTTP connection with jittered auto-reconnect and an in-memory
-`Last-Event-ID` cursor for resume. A pack agent is wake-based — it starts, acts
-and exits — and no gc construct holds a connection open across that boundary. An
-order polling on a cadence is the closest a pack gets, which is what
-`answer-sweep` (20m) and `judge-sweep` (30m) already are.
+`orders/event-pump.toml` drops the held-open socket rather than imitating it:
+each 1m cycle opens the stream with the stored `Last-Event-ID` cursor, drains
+for a bounded window (the stream flushes its backlog immediately on connect),
+maps every new event's kind onto the pack order that owns that class, runs each
+mapped order at most once, and advances the cursor. Same feed, same classifier
+mapping, no daemon.
 
-The consequence is a latency floor, not a coverage gap: **without `watch` the
-polls are the primary trigger rather than a safety net.** The backlog still
-drains; it drains on the sweep cadence.
+The consequence is a latency floor of roughly the 1m tick plus the drain
+window — versus the 20m–1h sweep cadences the polls impose alone — and the
+cooldown sweeps remain the delivery guarantee: a pump failure costs latency,
+never coverage.
 
 ## Never assume a lane is running
 

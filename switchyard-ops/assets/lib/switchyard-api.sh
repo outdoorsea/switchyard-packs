@@ -55,7 +55,11 @@ sy_api_token() {
   if [ -n "${SWITCHYARD_API_TOKEN:-}" ]; then printf '%s' "$SWITCHYARD_API_TOKEN"; return 0; fi
 
   command -v switchyard-mcp >/dev/null 2>&1 || return 0
-  _sat_path="$(switchyard-mcp token-path 2>/dev/null)" || return 0
+  if command -v sy_timeout >/dev/null 2>&1; then
+    _sat_path="$(sy_timeout "$SY_API_CONNECT_TIMEOUT" switchyard-mcp token-path 2>/dev/null)" || return 0
+  else
+    _sat_path="$(switchyard-mcp token-path 2>/dev/null)" || return 0
+  fi
   [ -n "$_sat_path" ] && [ -r "$_sat_path" ] || return 0
 
   # `..|.token?` rather than a fixed key path: tokens.json is keyed by instance

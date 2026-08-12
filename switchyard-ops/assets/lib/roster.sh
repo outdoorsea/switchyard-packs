@@ -32,21 +32,115 @@ set -u
 
 # sy_timeout SECS CMD... — run CMD with a wall-clock limit, portably.
 #
-# macOS ships NO `timeout` (and no `gtimeout` without coreutils). A bare
-# `timeout 90 gc status` there exits 127 "command not found", which reads as
-# "the probe failed" — so loop-health would mail a false probe-down notice on
-# every single run. Fall back to a watchdog subshell.
+# macOS ships NO `timeout` (and no `gtimeout` without coreutils). Prefer its system
+# Perl/POSIX module—or Linux `setsid`—to create one root process group plus
+# detached TERM→KILL watchdogs. Nested timeouts remain in that group so the outer
+# cycle owns every descendant. A host lacking both primitives fails closed; GNU
+# timeout is deliberately not used because nested instances create escaping groups.
 sy_timeout() {
   _secs="$1"; shift
-  if command -v timeout >/dev/null 2>&1; then timeout "$_secs" "$@"; return $?; fi
-  if command -v gtimeout >/dev/null 2>&1; then gtimeout "$_secs" "$@"; return $?; fi
-  "$@" &
-  _cmd=$!
-  ( sleep "$_secs"; kill -TERM "$_cmd" 2>/dev/null ) &
+  case "$_secs" in ''|0|*[!0-9]*|0[0-9]*) return 124 ;; esac
+  [ "$_secs" -le 3600 ] 2>/dev/null || return 124
+  # Nested GNU timeout instances create process groups that can kill each other
+  # with 137 or escape the outer cycle. Prefer our one-root-group supervisor on
+  # every host. Without either supervisor primitive, fail closed before launch.
+  if command -v perl >/dev/null 2>&1; then
+    _timeout_impl=perl
+  elif command -v setsid >/dev/null 2>&1; then
+    _timeout_impl=setsid
+  else
+    return 124
+  fi
+  # The first fallback owns a fresh process group. Nested calls stay in that
+  # SAME group, and a detached watchdog writes the root marker before
+  # killing it. Thus an inner timeout aborts (and is reported by) the outer
+  # cycle instead of escaping into a second session.
+  # Both variables are exported into every descendant, so any process in the tree
+  # can pass them on — including to an unrelated later caller. Validate the pair
+  # before trusting it: an unusable value falls through to the root path rather
+  # than writing beside a foreign marker and signalling a foreign process group.
+  # This is also a crash guard: the marker was read unguarded under `set -u`, so
+  # inheriting the group id WITHOUT the marker was an "unbound variable" death.
+  case "${SY_TIMEOUT_GROUP_ROOT:-}" in ''|*[!0-9]*) SY_TIMEOUT_GROUP_ROOT="" ;; esac
+  case "${SY_TIMEOUT_ROOT_MARKER:-}" in /*) : ;; *) SY_TIMEOUT_GROUP_ROOT="" ;; esac
+  if [ -n "${SY_TIMEOUT_GROUP_ROOT:-}" ] && kill -0 "-$SY_TIMEOUT_GROUP_ROOT" 2>/dev/null; then
+    _root_group="$SY_TIMEOUT_GROUP_ROOT"
+    _root_mark="$SY_TIMEOUT_ROOT_MARKER"
+    _timeout_mark="$_root_mark"   # one shared marker; a killed nested shell leaks none
+    _timeout_pending="$(mktemp "$(dirname "$_root_mark")/.expired.XXXXXX" 2>/dev/null)" || return 124
+    (umask 077 && printf 1 >"$_timeout_pending") || { rm -f "$_timeout_pending"; return 124; }
+    "$@" &
+    _cmd=$!
+    _is_root=0
+  else
+    _timeout_dir="$(mktemp -d "${TMPDIR:-/tmp}/sy-timeout.XXXXXX")" || return 124
+    chmod 700 "$_timeout_dir" || { rm -rf "$_timeout_dir"; return 124; }
+    _timeout_mark="$_timeout_dir/expired"
+    (umask 077 && : >"$_timeout_mark") || { rm -rf "$_timeout_dir"; return 124; }
+    _root_mark="$_timeout_mark"
+    _timeout_pending="$(mktemp "$_timeout_dir/.expired.XXXXXX" 2>/dev/null)" || { rm -rf "$_timeout_dir"; return 124; }
+    (umask 077 && printf 1 >"$_timeout_pending") || { rm -rf "$_timeout_dir"; return 124; }
+    if [ "$_timeout_impl" = perl ]; then
+      perl -MPOSIX -e 'POSIX::setsid() >= 0 or exit 126; my $m=shift @ARGV; $ENV{SY_TIMEOUT_GROUP_ROOT}=$$; $ENV{SY_TIMEOUT_ROOT_MARKER}=$m; exec @ARGV; exit 127' -- "$_root_mark" "$@" &
+    else
+      setsid sh -c 'export SY_TIMEOUT_GROUP_ROOT=$$ SY_TIMEOUT_ROOT_MARKER=$1; shift; exec "$@"' sh "$_root_mark" "$@" &
+    fi
+    _cmd=$!
+    _root_group="$_cmd"
+    _is_root=1
+  fi
+
+  # The watchdog starts a separate session so killing the root group cannot kill
+  # the process responsible for escalating TERM to KILL.
+  if [ "$_timeout_impl" = perl ]; then
+    perl -MPOSIX -MTime::HiRes=sleep -e '
+    POSIX::setsid() >= 0 or exit 126;
+    my ($secs,$pg,$pending,$root)=splice @ARGV,0,4;
+    $SIG{TERM}=sub{exit 0}; $SIG{INT}=sub{exit 0}; $SIG{HUP}=sub{exit 0};
+    for (1 .. int($secs * 10)) { sleep 0.1; exit 0 if -s $root }
+    exit 0 unless kill 0, -$pg;
+    rename($pending,$root);
+    kill "TERM", -$pg; sleep 2;
+    kill "KILL", -$pg if kill 0, -$pg;
+    ' -- "$_secs" "$_root_group" "$_timeout_pending" "$_root_mark" &
+  else
+    setsid sh -c '
+      secs=$1 pg=$2 pending=$3 root=$4
+      trap "exit 0" TERM INT HUP
+      sleep "$secs"
+      [ ! -s "$root" ] || exit 0
+      kill -0 "-$pg" 2>/dev/null || exit 0
+      /bin/mv "$pending" "$root" 2>/dev/null
+      kill -TERM "-$pg" 2>/dev/null; sleep 2
+      kill -KILL "-$pg" 2>/dev/null
+    ' sh "$_secs" "$_root_group" "$_timeout_pending" "$_root_mark" &
+  fi
   _watch=$!
   wait "$_cmd" 2>/dev/null; _rc=$?
-  kill -TERM "$_watch" 2>/dev/null
-  wait "$_watch" 2>/dev/null
+  if [ "$_is_root" -eq 1 ] && kill -0 "-$_root_group" 2>/dev/null; then
+    # A descendant still owns the group (and possibly our stdout pipe). Wait for
+    # the watchdog; it returns without a marker if the descendant exits in time.
+    wait "$_watch" 2>/dev/null
+  else
+    kill -TERM "$_watch" 2>/dev/null
+    wait "$_watch" 2>/dev/null
+  fi
+  rm -f "$_timeout_pending" 2>/dev/null
+  # `rm -rf`, not `rm -f` + `rmdir`: on expiry the watchdog KILLs the whole root
+  # group, so every nested frame dies before it can remove its own `.expired.*`
+  # pending file. `rmdir` then fails on the non-empty directory, its error is
+  # discarded, and the directory survives under TMPDIR — once per timed-out
+  # cycle, on a short cooldown. `_timeout_mark` and `_root_mark` are the same
+  # path in both branches, so one test suffices.
+  if [ -s "$_timeout_mark" ]; then
+    if [ "$_is_root" -eq 1 ] && kill -0 "-$_root_group" 2>/dev/null; then
+      sleep 2
+      kill -KILL "-$_root_group" 2>/dev/null
+    fi
+    [ "$_is_root" -eq 1 ] && rm -rf "$_timeout_dir" 2>/dev/null
+    return 124
+  fi
+  [ "$_is_root" -eq 1 ] && rm -rf "$_timeout_dir" 2>/dev/null
   return "$_rc"
 }
 

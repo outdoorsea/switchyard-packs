@@ -122,6 +122,13 @@ Two rules:
 well-evidenced proposals get read and decided; fifteen get skimmed and dropped,
 and you will be woken again next cycle anyway.
 
+**Set `target_path`** to the invariant target of the proposal — the file,
+package, or module the refactor would change (e.g.
+`internal/dashboard/dashboard.go`, `cmd/switchyard-mcp/tools.go`). The intake
+system deduplicates on this path, so a re-filing about the same target collapses
+onto the existing row instead of creating a duplicate. The `area` field is still
+free for the human-readable routing label (e.g. "dashboard handlers").
+
 Each filing states:
 
 1. **The cost today** — with the numbers. "17 of the last 40 bugfix commits touch

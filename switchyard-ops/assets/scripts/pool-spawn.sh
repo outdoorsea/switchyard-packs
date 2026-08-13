@@ -197,6 +197,16 @@ POOL_KNOWN_SESSION_STATES="$POOL_LIVE_STATES suspended closed asleep"
 POOL_GC_READ_TIMEOUT="${POOL_GC_READ_TIMEOUT:-30}"
 POOL_GC_WRITE_TIMEOUT="${POOL_GC_WRITE_TIMEOUT:-30}"
 POOL_SESSION_LOOKUP_TIMEOUT="${POOL_SESSION_LOOKUP_TIMEOUT:-15}"
+# The once-per-cycle capacity census, deliberately NOT sharing the budget above.
+# POOL_SESSION_LOOKUP_TIMEOUT bounds a lookup paid up to POOL_SPAWN_RECONCILE_
+# ATTEMPTS (7) times per spawn, so it has to stay small; this one is paid ONCE
+# for the whole cycle, so it can afford to be large enough to actually finish.
+# Measured 2026-08-13 on the live city under load ~55: `gc session list --json
+# --state all` took 38.6s, and 31.8s even with --template narrowing it to 3
+# rows -- the cost is gc's session enumeration, not the payload, so no filter
+# fixes it. At the 15s lookup budget that census could never once succeed, and
+# every rig fell to "capacity is UNKNOWN. No brakeman was spawned."
+POOL_SESSION_CENSUS_TIMEOUT="${POOL_SESSION_CENSUS_TIMEOUT:-60}"
 POOL_SPAWN_TIMEOUT="${POOL_SPAWN_TIMEOUT:-90}"
 POOL_SPAWN_RECONCILE_ATTEMPTS="${POOL_SPAWN_RECONCILE_ATTEMPTS:-7}"
 POOL_SPAWN_RECONCILE_DELAY="${POOL_SPAWN_RECONCILE_DELAY:-20}"
@@ -209,6 +219,7 @@ sy_pool_bounded_uint() {
 sy_pool_bounded_uint "$POOL_GC_READ_TIMEOUT" 1 300 || exit 0
 sy_pool_bounded_uint "$POOL_GC_WRITE_TIMEOUT" 1 300 || exit 0
 sy_pool_bounded_uint "$POOL_SESSION_LOOKUP_TIMEOUT" 1 300 || exit 0
+sy_pool_bounded_uint "$POOL_SESSION_CENSUS_TIMEOUT" 1 300 || exit 0
 sy_pool_bounded_uint "$POOL_SPAWN_TIMEOUT" 1 600 || exit 0
 sy_pool_bounded_uint "$POOL_SPAWN_RECONCILE_ATTEMPTS" 1 20 || exit 0
 sy_pool_bounded_uint "$POOL_SPAWN_RECONCILE_DELAY" 0 120 || exit 0
@@ -404,11 +415,17 @@ sy_pool_cloud_depth() {
   printf '%s' "$_pcd_n"
 }
 
-# sy_pool_brakeman_max RIG — the rig brakeman pool's max_active_sessions, from the
-# reconciler's own agent record. Returns 2 when the record is unreadable or
-# malformed so callers can fail closed AND surface the unknown capacity.
+# sy_pool_brakeman_max RIG AGENTS_JSON — RIG's configured brakeman pool ceiling,
+# read out of a roster payload the CALLER supplies. The rig is only a jq filter
+# here: `gc agent list` is city-wide and rig-independent, so fetching it inside
+# this function made every rig re-pay an identical read. It is hoisted to once
+# per cycle now, the same way and for the same reason as cloud_token below.
+# An empty payload still means "unreadable" and still returns 2, so a failed
+# hoisted fetch fails closed exactly as a failed per-rig fetch did. Returns 2
+# when the record is unreadable or malformed, so callers fail closed AND surface
+# the unknown capacity.
 sy_pool_brakeman_max() {
-  _raw="$(sy_timeout "$POOL_GC_READ_TIMEOUT" gc agent list --json 2>/dev/null)" || return 2
+  _raw="${2:-}"
   [ -n "$_raw" ] || return 2
   printf '%s' "$_raw" | jq -e 'type == "array" or (type == "object" and (.agents | type == "array"))' >/dev/null 2>&1 || return 2
   _max="$(printf '%s' "$_raw" | jq -r --arg q "$1/switchyard-ops.brakeman" '
@@ -442,7 +459,14 @@ sy_pool_brakeman_max() {
 sy_pool_brakeman_live() {
   _states_json="$(printf '%s' "$POOL_LIVE_STATES" | jq -Rc 'split(" ")')"
   _known_json="$(printf '%s' "$POOL_KNOWN_SESSION_STATES" | jq -Rc 'split(" ")')"
-  _raw="$(sy_timeout "$POOL_SESSION_LOOKUP_TIMEOUT" gc session list --json --state all 2>/dev/null)" || return 2
+  # SESSIONS_JSON is supplied by the caller — see sy_pool_brakeman_max above for
+  # why, and the hoist below for the freshness argument. Reusing one snapshot
+  # across rigs is sound because each rig spawns at most once per cycle (the
+  # `max > live` branch runs a single spawn, not a loop), so no spawn this cycle
+  # can invalidate a LATER rig's count: the jq filters by this rig's template.
+  # The reconcile lookups do NOT share it — they hunt a session this cycle just
+  # created, so they must read fresh and keep their own fetch.
+  _raw="${2:-}"
   [ -n "$_raw" ] || return 2
   printf '%s' "$_raw" | jq -e '
     type == "object" and (.sessions | type == "array") and
@@ -982,6 +1006,29 @@ if [ -n "${CLOUD_POOL_RIGS:-}" ]; then
   cloud_projects="$(sy_api_projects "$cloud_token")"
 fi
 
+# The capacity census, hoisted for the same reason as cloud_token above: both gc
+# reads are CITY-WIDE and rig-independent — the rig appears only as a `jq --arg`
+# filter inside the two functions — so issuing them per rig re-paid an identical
+# payload once for every rig in the roster.
+#
+# This is not only waste. Measured on the live city under load ~55 (2026-08-13):
+# `gc session list --json --state all` took 38.6s against a 15s per-rig budget,
+# so the census could never complete, every rig took the `live_rc != 0` branch,
+# and the cycle mailed "session census was unreadable or timed out, so pool
+# capacity is UNKNOWN. No brakeman was spawned." for all of them — a total
+# dispatch outage produced entirely by a budget that no longer fitted the call.
+#
+# Hoisting is what makes a budget that DOES fit affordable: the old worst case
+# was 4 rigs x (30s + 15s) = 180s of census against a 300s cycle; the new one is
+# 30s + 60s = 90s, paid once, with room left for the spawns themselves. A larger
+# timeout without the hoist would simply have multiplied.
+#
+# An empty payload is passed through deliberately: both functions treat it as
+# "unreadable" and return 2, so a failed hoisted read fails closed per rig
+# exactly as the per-rig read did, with the same escalation text.
+agents_census="$(sy_timeout "$POOL_GC_READ_TIMEOUT" gc agent list --json 2>/dev/null)" || agents_census=""
+sessions_census="$(sy_timeout "$POOL_SESSION_CENSUS_TIMEOUT" gc session list --json --state all 2>/dev/null)" || sessions_census=""
+
 report=""
 escalations=""    # per-rig silent failures to mail the mayor this cycle
 assigned_now=""   # `<rig> <bead>` hand-offs made this cycle, for next cycle's check
@@ -1016,7 +1063,7 @@ for rig in $rigs; do
 
     [ "$depth" -gt 0 ] || continue   # a confidently empty queue is the silent case
 
-    max="$(sy_pool_brakeman_max "$rig")"; max_rc=$?
+    max="$(sy_pool_brakeman_max "$rig" "$agents_census")"; max_rc=$?
     if [ "$max_rc" -ne 0 ]; then
       report="$report
 - $rig: $depth claimable cloud-pool bead(s), WIP slot UNKNOWN
@@ -1026,7 +1073,7 @@ for rig in $rigs; do
 - $rig: brakeman max-active capacity was unreadable, malformed, or timed out. No brakeman was spawned."
       continue
     fi
-    live="$(sy_pool_brakeman_live "$rig")"; live_rc=$?
+    live="$(sy_pool_brakeman_live "$rig" "$sessions_census")"; live_rc=$?
     if [ "$live_rc" -ne 0 ]; then
       report="$report
 - $rig: $depth claimable cloud-pool bead(s), WIP slot UNKNOWN
@@ -1098,7 +1145,7 @@ $rig $pb" ;;
     esac
   done
 
-  max="$(sy_pool_brakeman_max "$rig")"; max_rc=$?
+  max="$(sy_pool_brakeman_max "$rig" "$agents_census")"; max_rc=$?
   if [ "$max_rc" -ne 0 ]; then
     report="$report
 - $rig: $count claimable bead(s), WIP slot UNKNOWN; spawn-ready: none
@@ -1108,7 +1155,7 @@ $rig $pb" ;;
 - $rig: brakeman max-active capacity was unreadable, malformed, or timed out. No brakeman was spawned for demand: $ids."
     continue
   fi
-  live="$(sy_pool_brakeman_live "$rig")"; live_rc=$?
+  live="$(sy_pool_brakeman_live "$rig" "$sessions_census")"; live_rc=$?
   if [ "$live_rc" -ne 0 ]; then
     report="$report
 - $rig: $count claimable bead(s), WIP slot UNKNOWN; spawn-ready: none

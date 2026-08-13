@@ -111,7 +111,14 @@ proposing any cadence change.
 Over the switchyard MCP, into the **`switchyard` project** (this is city
 infrastructure, not a rig feature):
 
-1. `whoami`; `set_scope` to `groundspeak` / `switchyard` if unresolved.
+1. `whoami`. If scope is unresolved, resolve the tenant by **lookup, never by a
+   literal**: call `list_projects`, find the row whose `slug` is `switchyard`,
+   and `set_scope` with **that row's own `tenant_slug`** plus `switchyard`.
+   Do not hardcode a workspace name — these projects have already moved once
+   (out of `groundspeak`, on 2026-08-05), and a literal tenant silently resolves
+   to nothing rather than erroring, so the lane fails on its next run with no
+   signal. If no row has slug `switchyard`, that is itself the finding: stop and
+   mail the mayor rather than filing into whatever project you did reach.
 2. `register_agent` as `{{ .Rig }}/switchyard-ops.token-auditor` (display "Token auditor —
    {{ .CityName }}"). File under this ref.
 3. `submit_feedback` for each finding that clears the bar. Title it with the

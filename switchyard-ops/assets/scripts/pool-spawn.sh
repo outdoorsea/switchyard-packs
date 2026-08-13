@@ -550,9 +550,40 @@ sy_pool_spawn_brakeman() {
   _seq="${2:-1}"
   case "$_seq" in ''|*[!0-9]*) return 1 ;; esac
 
+  # Two DIFFERENT questions, deliberately answered by two different numbers.
+  # Collapsing them into one is what made the two previous attempts at this
+  # wrong in opposite directions:
+  #
+  #   "refuse this spawn?"        — must use the LIVE widths. Keying the refusal
+  #                                 on worst-case reserves permanently refuses
+  #                                 rigs whose alias actually fits (a 17-char rig
+  #                                 spawns on every reachable seq/PID today).
+  #   "will the refusal clear?"   — must use the BEST-CASE widths. Keying this on
+  #                                 the live ones calls a self-clearing fault
+  #                                 permanent and sends someone to rename a rig,
+  #                                 which is irreversible across anchor-keyed
+  #                                 worktrees, CLOUD_POOL_RIGS, RIG_PROJECTS and
+  #                                 every bead's gc.routed_to.
+  #
+  # `_seq` is `spawn_seq`, scoped to the LOCKED CYCLE and shared across rigs, so
+  # its width ticks 1 -> 2 at the tenth spawn of a cycle and resets next cycle:
+  # position-dependent, and therefore self-clearing. The default `_nonce_base` is
+  # `$$-$(date +%s)` = len(PID)+11, so it varies with PID width; its narrowest
+  # reachable value is 12 (a 1-digit PID). A PINNED nonce cannot vary at all.
   _nonce_base="${POOL_SPAWN_ALIAS_NONCE:-$$-$(date +%s)}"
   case "$_nonce_base" in ''|[!A-Za-z0-9]*|*[!A-Za-z0-9_.-]*) return 1 ;; esac
-  [ "${#_nonce_base}" -le 16 ] || return 1
+
+  # The narrowest this rig's variable fields can EVER be, without operator
+  # action: seq 1 (start of a cycle) and, for the default nonce, a 1-digit PID.
+  _nonce_floor=${#_nonce_base}
+  if [ -z "${POOL_SPAWN_ALIAS_NONCE:-}" ] && [ "$_nonce_floor" -gt 12 ]; then
+    _nonce_floor=12
+  fi
+
+  # `ps-<nonce>-<random>-<seq>`: 3 for `ps-`, 1 for each of the two separators.
+  _hexlen=$(( _alias_budget - 3 - ${#_nonce_base} - 1 - 1 - ${#_seq} ))
+  _hexbest=$(( _alias_budget - 3 - _nonce_floor - 1 - 1 - 1 ))
+  if [ "$_hexlen" -gt 16 ]; then _hexlen=16; fi
 
   # `ps-<nonce>-<random>-<seq>`. Two things were cut to make the budget: the rig
   # cksum and its separator (9-11 characters — `cksum` is 8-10 digits wide),
@@ -568,21 +599,30 @@ sy_pool_spawn_brakeman() {
   # concurrent controllers by PID, and stops separating them across PID reuse, a
   # same-second spawn on another host, or a pinned POOL_SPAWN_ALIAS_NONCE as the
   # tests use. So it is sized from whatever the budget leaves.
-  _hexlen=$(( _alias_budget - 3 - ${#_nonce_base} - 1 - 1 - ${#_seq} ))
-  if [ "$_hexlen" -gt 16 ]; then _hexlen=16; fi
   # Below 8 hex (32 bits) the token stops being a credible idempotency proof, so
-  # refuse the spawn rather than register one that could collide.
-  #
-  # Solving the line above, the floor lands at `_hexlen = 43 - len(rig) -
-  # len(nonce_base) - len(seq)`, so it is NOT a property of the rig name alone:
-  # with a 5-digit PID (nonce 16) it bites at a 19-character rig name, with a
-  # 4-digit PID (nonce 15) not until 20. A rig named right at that boundary would
-  # therefore spawn or refuse depending on the controller's PID that minute —
-  # intermittent, and worth naming rather than discovering. `switchyard-forge`
-  # (16) sits at 10 hex, two characters of rig name from the floor, so this is
-  # nearer than it reads. Surfacing that as a refusal is the point; papering over
-  # it with a weaker token is not.
-  [ "$_hexlen" -ge 8 ] || return 1
+  # refuse rather than register a spawn whose alias could collide. The refusal
+  # keys on `_hexlen` — the budget ACTUALLY free this cycle — so a rig whose
+  # alias fits today keeps spawning; nothing is narrowed.
+  if [ "$_hexlen" -lt 8 ]; then
+    # `_hexbest` answers the second question. Short even at the narrowest seq and
+    # PID this rig can reach means no amount of retrying helps and a human has to
+    # act; short only at THIS cycle's widths means the next cycle clears it, and
+    # saying otherwise is the false-permanent verdict this whole change exists to
+    # remove. Return 3 only for the first case; the second takes the transient
+    # rc 1 alongside every other self-clearing refusal here.
+    if [ "$_hexbest" -lt 8 ]; then
+      # Both remedies below are LIVE, because the refusal keys on the live nonce
+      # width: pinning a shorter POOL_SPAWN_ALIAS_NONCE genuinely raises
+      # `_hexlen`. (An earlier revision keyed the decision on a constant reserve,
+      # which silently made that remedy inert while still printing it, leaving
+      # the irreversible rename as the only thing that worked.) "Raise gc's
+      # alias limit" is NOT offered: the 64 is hard-coded in `_alias_budget`
+      # above, so it cannot move without editing this script.
+      printf '%s\n' "pool-spawn: $1: alias-budget refusal — the qualified alias \`${_qual_prefix}ps-<nonce>-<random>-<seq>\` cannot hold an 8-hex (32-bit) idempotency token inside gc's 64-character limit. budget=$_alias_budget after the ${#_qual_prefix}-character prefix; nonce=${#_nonce_base}, seq=${#_seq} leave $_hexlen hex against a floor of 8 — short by $(( 8 - _hexlen )). This does NOT clear on retry: at the narrowest seq and PID this rig can reach it still leaves $_hexbest. Remedy: free $(( 8 - _hexbest )) character(s) from the qualified alias — pin a shorter POOL_SPAWN_ALIAS_NONCE (currently ${#_nonce_base} characters; the default is \$\$-\$(date +%s), i.e. len(PID)+11, so it exceeds 12 whenever the PID has more than one digit) and/or shorten the rig name (currently ${#1} characters)." >&2
+      return 3
+    fi
+    return 1
+  fi
 
   _random="$(od -An -N8 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
   case "$_random" in ''|*[!0-9a-f]*) return 1 ;; esac
@@ -999,8 +1039,14 @@ for rig in $rigs; do
 
     if [ "$max" -gt "$live" ]; then
       spawn_seq=$((spawn_seq + 1))
-      sess="$(sy_pool_spawn_brakeman "$rig" "$spawn_seq")"
-      if [ -z "$sess" ]; then
+      sess="$(sy_pool_spawn_brakeman "$rig" "$spawn_seq")"; _spawn_rc=$?
+      if [ -z "$sess" ] && [ "$_spawn_rc" -eq 3 ]; then
+        # Distinct from the generic failure below: rc 3 is the alias-budget
+        # floor, which no retry can clear. Say so, or this reads as load.
+        action="spawn REFUSED (alias budget too small — needs a human)"
+        escalations="$escalations
+- $rig: brakeman spawn REFUSED — this rig's qualified alias cannot fit an 8-hex idempotency token in gc's 64-character limit, so no brakeman will spawn for it until a human pins a shorter POOL_SPAWN_ALIAS_NONCE or shortens the rig name. This will NOT clear on retry — it is short even at the narrowest cycle position and PID, so it is a naming/config fault rather than load. The stderr diagnostic from the same cycle carries the exact character deficit. $depth claimable cloud-pool bead(s) left unclaimed."
+      elif [ -z "$sess" ]; then
         action="spawn FAILED (no session identity captured)"
         escalations="$escalations
 - $rig: brakeman spawn returned no session identity — $depth claimable cloud-pool bead(s) left unclaimed."
@@ -1107,8 +1153,13 @@ $rig $pb" ;;
       action="none ($target already held by a live worker — no spawn)"
     else
       spawn_seq=$((spawn_seq + 1))
-      sess="$(sy_pool_spawn_brakeman "$rig" "$spawn_seq")"
-      if [ -z "$sess" ]; then
+      sess="$(sy_pool_spawn_brakeman "$rig" "$spawn_seq")"; _spawn_rc=$?
+      if [ -z "$sess" ] && [ "$_spawn_rc" -eq 3 ]; then
+        # See the cloud-pool caller above: rc 3 is permanent, not load.
+        action="spawn REFUSED (alias budget too small — needs a human)"
+        escalations="$escalations
+- $rig: brakeman spawn REFUSED — this rig's qualified alias cannot fit an 8-hex idempotency token in gc's 64-character limit, so no brakeman will spawn for it until a human pins a shorter POOL_SPAWN_ALIAS_NONCE or shortens the rig name. This will NOT clear on retry — it is short even at the narrowest cycle position and PID, so it is a naming/config fault rather than load. The stderr diagnostic from the same cycle carries the exact character deficit. $count claimable bead(s) left unclaimed (demand: $ids)."
+      elif [ -z "$sess" ]; then
         action="spawn FAILED (no session identity captured)"
         escalations="$escalations
 - $rig: brakeman spawn returned no session identity — $count claimable bead(s) left unclaimed (demand: $ids)."

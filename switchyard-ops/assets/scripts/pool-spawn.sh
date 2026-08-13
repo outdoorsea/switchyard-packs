@@ -522,21 +522,74 @@ POOL_SESSION_ID_JQ='
 # convention), so the plain-text fallback accepts only the exact unique alias or
 # a token that begins with `<rig>/` — never `[]`, a usage line, or human prose.
 sy_pool_spawn_brakeman() {
-  _rig_key="$(printf '%s' "$1" | cksum | awk '{print $1}')"
-  # `gc session new` rejects an over-long alias, and a rejected spawn is worse
-  # than a refused one: reconciliation searches for an alias that was never
-  # registered. Budget the parts so the total cannot exceed 64 characters —
-  # 11 ("pool-spawn-") + 10 (max cksum) + 16 (nonce) + 16 (random) + 4 (seq)
-  # + 3 separators = 60 — and still assert the result before spending a spawn.
-  _random="$(od -An -N8 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
-  case "$_random" in ''|*[!0-9a-f]*) return 1 ;; esac
-  [ "${#_random}" -eq 16 ] || return 1
+  # `gc session new` applies its 64-character limit to the QUALIFIED name it
+  # registers — `<rig>/switchyard-ops.<alias>` — NOT to the bare alias passed on
+  # the command line. Budgeting the bare string satisfies this function's own
+  # assertion and is then rejected by gc for EVERY rig, because the prefix alone
+  # is 26 characters for `switchyard` and 32 for `switchyard-forge`.
+  #
+  # A rejected spawn is worse than a refused one: reconciliation goes on to hunt
+  # an alias that was never registered. A rejection returns at once, so the 90s
+  # POOL_SPAWN_TIMEOUT is precisely what is NOT spent; what is spent is the whole
+  # reconcile budget below — 7 attempts, which sleep between attempts and so span
+  # 6 x POOL_SPAWN_RECONCILE_DELAY (120s), plus up to 7 x
+  # POOL_SESSION_LOOKUP_TIMEOUT (15s) in the lookups themselves. Per rig that
+  # reaches ~225s against a 300s POOL_SPAWN_CYCLE_TIMEOUT, and the line 221 guard
+  # bounds only ONE rig's budget, so two rigs can overrun it and the cycle is
+  # killed mid-sweep with the second rig never completing an attempt.
+  #
+  # (Measured 2026-08-13 on the live city: the bare-length budget emitted a
+  # 55-character alias for `switchyard` and 57 for `switchyard-forge` — the width
+  # varies because `cksum` is 8 digits for one rig and 10 for the other, and the
+  # PID inside the nonce is 1-5 digits — so every spawn for both rigs was
+  # rejected with "exceeds max length 64", on stderr, which this call discards.
+  # The claim pool sat at 138 for hours while each cycle either exited 0 on lock
+  # contention or died on the deadline.)
+  _qual_prefix="$1/switchyard-ops."
+  _alias_budget=$(( 64 - ${#_qual_prefix} ))
+  _seq="${2:-1}"
+  case "$_seq" in ''|*[!0-9]*) return 1 ;; esac
+
   _nonce_base="${POOL_SPAWN_ALIAS_NONCE:-$$-$(date +%s)}"
   case "$_nonce_base" in ''|[!A-Za-z0-9]*|*[!A-Za-z0-9_.-]*) return 1 ;; esac
   [ "${#_nonce_base}" -le 16 ] || return 1
-  _nonce="${_nonce_base}-${_random}"
-  _spawn_alias="pool-spawn-${_rig_key}-${_nonce}-${2:-1}"
-  [ "${#_spawn_alias}" -le 64 ] || return 1
+
+  # `ps-<nonce>-<random>-<seq>`. Two things were cut to make the budget: the rig
+  # cksum and its separator (9-11 characters — `cksum` is 8-10 digits wide),
+  # which was pure redundancy because the qualified name already namespaces the
+  # alias by rig, and 8 characters of the `pool-spawn-` prefix. On the tighter
+  # rig a third thing gives: `switchyard-forge` has to spend 6 of the random's
+  # 16 hex as well.
+  #
+  # What must survive that squeeze is the RANDOM part. Reconciliation matches on
+  # the WHOLE alias, not on the random alone (see the identity lookup below), but
+  # the random is what keeps the whole alias unique when the rest of it does not:
+  # `_nonce_base` defaults to `$$-$(date +%s)`, which already separates two
+  # concurrent controllers by PID, and stops separating them across PID reuse, a
+  # same-second spawn on another host, or a pinned POOL_SPAWN_ALIAS_NONCE as the
+  # tests use. So it is sized from whatever the budget leaves.
+  _hexlen=$(( _alias_budget - 3 - ${#_nonce_base} - 1 - 1 - ${#_seq} ))
+  if [ "$_hexlen" -gt 16 ]; then _hexlen=16; fi
+  # Below 8 hex (32 bits) the token stops being a credible idempotency proof, so
+  # refuse the spawn rather than register one that could collide.
+  #
+  # Solving the line above, the floor lands at `_hexlen = 43 - len(rig) -
+  # len(nonce_base) - len(seq)`, so it is NOT a property of the rig name alone:
+  # with a 5-digit PID (nonce 16) it bites at a 19-character rig name, with a
+  # 4-digit PID (nonce 15) not until 20. A rig named right at that boundary would
+  # therefore spawn or refuse depending on the controller's PID that minute —
+  # intermittent, and worth naming rather than discovering. `switchyard-forge`
+  # (16) sits at 10 hex, two characters of rig name from the floor, so this is
+  # nearer than it reads. Surfacing that as a refusal is the point; papering over
+  # it with a weaker token is not.
+  [ "$_hexlen" -ge 8 ] || return 1
+
+  _random="$(od -An -N8 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
+  case "$_random" in ''|*[!0-9a-f]*) return 1 ;; esac
+  [ "${#_random}" -eq 16 ] || return 1
+  _random="$(printf '%s' "$_random" | cut -c1-"$_hexlen")"
+  [ "${#_random}" -eq "$_hexlen" ] || return 1
+  _spawn_alias="ps-${_nonce_base}-${_random}-${_seq}"
   # A timed-out client does not prove the server rejected the spawn. Regardless
   # of this command's exit status, reconcile its unique alias below.
   # Current gc builds register an adhoc alias QUALIFIED — the response and the
@@ -547,7 +600,10 @@ sy_pool_spawn_brakeman() {
   # assertion made every SUCCESSFUL spawn read as "no session identity", so
   # pool-spawn spawned a worker per cycle, disowned each one, and mailed a
   # dispatch failure while 116 claimable beads sat in the pool.)
-  _qualified_alias="$1/switchyard-ops.${_spawn_alias}"
+  _qualified_alias="${_qual_prefix}${_spawn_alias}"
+  # Assert the string gc will actually validate, not the one we hand it. This is
+  # the assertion whose bare-string form caused the outage described above.
+  [ "${#_qualified_alias}" -le 64 ] || return 1
   _out="$(sy_timeout "$POOL_SPAWN_TIMEOUT" gc session new "$1/switchyard-ops.brakeman" --alias "$_spawn_alias" --json --no-attach 2>/dev/null)" || _out=""
   _json_alias="$(printf '%s' "$_out" | jq -r '(if type=="object" then (.session // .) else empty end) | (.alias // "")' 2>/dev/null | head -n1)"
   _id="$(printf '%s' "$_out" | jq -r "$POOL_SESSION_ID_JQ" 2>/dev/null | awk 'NF' | head -n1)"

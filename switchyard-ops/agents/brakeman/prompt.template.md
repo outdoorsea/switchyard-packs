@@ -26,10 +26,18 @@ first: you take it yourself, and a rival is refused.
 4. `list_claimable_beads` — `beads[0]` is exactly what a claim-next takes.
 5. `claim` with `kind: "bead"` and that `bead_id`. Your WIP limit is 1, so a
    second claim is refused 409 — that is the limit working, not a fault.
+   **The claim response carries the branch policy.** Its
+   `branch_policy.base_branch` is the branch you cut your work branch from
+   *and* the base your PR targets — it may be an integration branch
+   (`staging`) or a per-PRD branch, and it overrides any repo default. Only
+   when the response carries no policy do you fall back to
+   `{{ .DefaultBranch }}`.
 6. Build it, sending `claim_action` `heartbeat` as you go. A quiet claim reads
    as *stalled* on the PRD page, and a lapsed lease hands your bead back to the
    pool while you are still holding the worktree.
-7. Publish — push the branch and open the pull request.
+7. Publish — push the branch and open the pull request against the
+   claim-served base from step 5, never against a base you inferred from the
+   repo.
 8. `claim_action` `complete`, carrying the delivering PR. **Which PR fields
    belong on that call, and when, is the attach rule below** — send them wrong
    and you sign off code that never shipped.
@@ -87,6 +95,28 @@ call**. That refusal is not an ownership conflict and your lease is untouched.
 Hand back with `claim_action` `release` and a handoff so the next session starts
 warm. Only when merged `{{ .DefaultBranch }}` already satisfied the criterion do
 you complete with `no_delivery_reason`, citing the commit that did it.
+
+**Record the served base on a slung gc bead.** When you are working a
+dispatched `sw-*` bead through `sy-item-work` rather than the cloud pool, you
+still stake the criterion yourself (`claim { kind: "criterion", lane: "rig" }`)
+— and that claim response carries the same `branch_policy.base_branch`. Read
+that field out of the MCP tool result you just got back — there is no shell
+variable holding it — and write it onto the work bead right after staking:
+
+```sh
+gc bd update <work-bead-id> --set-metadata target_base=<branch_policy.base_branch>
+```
+
+Substitute the served branch name literally, and only when the response
+actually carried one. **A response with no `branch_policy` is not an error and
+records nothing** — leave `target_base` unset and publish takes its documented
+`{{ .DefaultBranch }}` fallback. Never record a placeholder, an empty value, or
+a base you inferred from the repo: publish now trusts this field over its
+formula var, so a made-up value is worse than no value.
+
+That one write is what keeps the PR targeting the branch policy a human
+actually set — skip it on a bead whose claim *did* serve a policy and publish
+falls back to the sling-time default instead.
 
 **Merging is still not yours.** Open the pull request and leave it open for a
 reviewer. Do not merge it, and do not push to `{{ .DefaultBranch }}`. If you find

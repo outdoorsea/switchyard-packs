@@ -10,10 +10,22 @@ depends on this one precisely so that a bead cannot reach closed without a PR.
 
 ---
 
-**1. Branch-shape gate (fails closed).**
+**1. Branch-shape gate (fails closed), and the PR base.**
 
 Confirm you are on the per-item branch the worktree step cut, not your agent
 home branch or a stray local checkout, and that the bead records it.
+
+The branch the PR targets is resolved at publish time, not baked in at sling
+time. Whoever staked the switchyard claim for this work received the served
+branch policy in the claim response (`branch_policy.base_branch` — it can be a
+per-PRD integration branch, which no static formula var can express) and
+recorded it on the bead as `target_base`. Prefer that; the `{{base_branch}}`
+formula var is only the fallback for a bead nothing recorded a base on.
+
+That fallback is reachable from exactly one condition — the bead recorded no
+base. A lookup that *failed* is a different outcome and stops the publish: a PR
+opened against a guessed base still reads as delivered everywhere, so guessing
+is the more expensive error.
 
 ```bash
 CONVOY_STATUS=$(gc convoy status {{convoy_id}} --json)
@@ -23,8 +35,35 @@ if [ -z "$WORK_BEAD_ID" ]; then
     exit 1
 fi
 
+# `gc bd show --json` returns a one-element ARRAY, so the record is `.[0]`, not
+# `.`. Indexing the array with a string makes jq exit 5 having written nothing
+# to stdout — TARGET_BASE comes back empty and the fallback fires on EVERY bead,
+# including the ones that recorded a base. That reads exactly like "nothing
+# recorded one", which is why this has to be read from the array element.
+BEAD_JSON=$(gc bd show "$WORK_BEAD_ID" --json 2>/dev/null)
+BEAD_SHOW_RC=$?
+TARGET_BASE=$(printf '%s' "$BEAD_JSON" | jq -r '.[0].metadata.target_base // empty' 2>/dev/null)
+TARGET_BASE_RC=$?
+
+# The lookup ERRORED — `gc bd show` non-zero, or output that is not the JSON
+# array this reads. That is NOT the same as "the bead recorded no base", and the
+# two must not share a branch: the fallback is only correct when the bead really
+# recorded nothing. Fails closed, like the branch-shape gate it sits inside.
+if [ "$BEAD_SHOW_RC" -ne 0 ] || [ "$TARGET_BASE_RC" -ne 0 ]; then
+    echo "PR BASE GATE FAILED"
+    echo "  could not read target_base from bead $WORK_BEAD_ID"
+    echo "  gc bd show rc=$BEAD_SHOW_RC  jq rc=$TARGET_BASE_RC"
+    echo "  Refusing to guess a base: the recorded policy may not be"
+    echo "  {{base_branch}}, and a PR opened against the wrong base"
+    echo "  reads as delivered."
+    exit 1
+fi
+
+# The bead genuinely recorded nothing: the documented fallback, not an error.
+[ -n "$TARGET_BASE" ] || TARGET_BASE="{{base_branch}}"
+
 CURRENT_BRANCH=$(git branch --show-current)
-if [ -z "$CURRENT_BRANCH" ] || [ "$CURRENT_BRANCH" = "{{base_branch}}" ]; then
+if [ -z "$CURRENT_BRANCH" ] || [ "$CURRENT_BRANCH" = "$TARGET_BASE" ]; then
     echo "BRANCH SHAPE GATE FAILED"
     echo "  current branch: ${CURRENT_BRANCH:-<detached>}"
     echo "  Refusing to open a PR from the base branch or a detached HEAD."
@@ -111,7 +150,7 @@ this. Keep the output, keep the status, and only accept a real URL.
 ```bash
 case "$FORGE" in
   gh)
-    CREATE_OUT=$(gh pr create --base "{{base_branch}}" --head "$CURRENT_BRANCH" \
+    CREATE_OUT=$(gh pr create --base "$TARGET_BASE" --head "$CURRENT_BRANCH" \
         --title "<title>" --body "<what changed, and how it was verified>" 2>&1)
     CREATE_RC=$?
     # An existing PR for this branch is success, not failure — look it up.
@@ -122,7 +161,7 @@ case "$FORGE" in
     fi
     ;;
   glab)
-    CREATE_OUT=$(glab mr create --target-branch "{{base_branch}}" --source-branch "$CURRENT_BRANCH" \
+    CREATE_OUT=$(glab mr create --target-branch "$TARGET_BASE" --source-branch "$CURRENT_BRANCH" \
         --title "<title>" --description "<what changed, and how it was verified>" --yes 2>&1)
     CREATE_RC=$?
     if [ "$CREATE_RC" -ne 0 ]; then
@@ -166,7 +205,7 @@ Only now record the result, and the target, on the bead:
 
 ```bash
 gc bd update "$WORK_BEAD_ID" \
-  --set-metadata target={{base_branch}} \
+  --set-metadata target="$TARGET_BASE" \
   --set-metadata pr_url="$PR_URL" \
   --notes "Published: <brief summary>"
 ```

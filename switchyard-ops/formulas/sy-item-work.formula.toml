@@ -87,7 +87,7 @@ description = "Optional per-item summary path."
 default = ""
 
 [vars.base_branch]
-description = "Branch the PR targets, and the branch the worktree was cut from."
+description = "Branch the worktree is cut from, and the publish step's FALLBACK PR target. At publish time the claim-served branch policy wins: the staking session records the claim response's branch_policy.base_branch on the bead as target_base, and publish prefers that over this var — so a branch-policy change (or a per-PRD integration branch) needs no city.toml formula_vars edit. This var only decides the PR base for a bead nothing recorded one on."
 default = "main"
 
 # prepare-worktree and implement are inherited from `implementation-base`

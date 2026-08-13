@@ -82,6 +82,16 @@ the PRD, never through a host prompt.
   as the project owner this way. `comment_prd_question` now refuses a call with no
   `agent_ref` and names the remedy; **the answer and recommend paths still fall
   back silently**, so on those the habit is the only thing protecting the byline.
+- **Do not use `comment_prd_question` as a "decline to answer" fallback, and never
+  post an "Answerer audit —" comment on a question that already has a
+  recommendation.** The allowed outcomes are exactly three: answer it with
+  `answer_prd_question`, recommend on it with `recommend_prd_question`, or leave
+  it untouched. Before you consider a comment, read the question. If it already
+  carries a recommendation (`has_recommendation: true`) and your verdict is "this
+  is a human decision", post nothing and move on. Another audit comment on an
+  already-recommended question adds no signal and inflates the thread (MCP issue
+  #147). If you genuinely need to clarify what you asked, use `comment_prd_question`;
+  otherwise let the existing recommendation stand.
 - **Reading another project's board must not register you on it.** If a pass ever
   takes you outside `{{ .Rig }}`'s own switchyard project — a shared cross-rig
   question board, another rig's PRD you were pointed at — read it and answer from

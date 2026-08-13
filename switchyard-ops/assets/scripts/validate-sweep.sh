@@ -237,6 +237,17 @@ for rig in $VALIDATE_RIGS; do
     out_file="$state/validate-sweep.run.$$"
     (cd "$repo" && sy_timeout "$VALIDATE_CMD_TIMEOUT" sh -c "$cmd") >"$out_file" 2>&1
     code=$?
+
+    # Issue 299: a `go test -run <pattern>` that matches NO tests exits 0 and
+    # prints "[no tests to run]". Treating that as a passing verdict banks a
+    # `done` on work that was never built. Flip it to a failing run so the
+    # criterion returns to the pool instead of being falsely signed off.
+    no_tests_matched=""
+    if [ "$code" -eq 0 ] && grep -qiF "no tests to run" "$out_file"; then
+      code=1
+      no_tests_matched="1"
+    fi
+
     excerpt="$(tail -c 2000 "$out_file" 2>/dev/null)"
     rm -f "$out_file" 2>/dev/null
 
@@ -261,7 +272,11 @@ for rig in $VALIDATE_RIGS; do
         continue
       fi
       verdict="fail"
-      outcome="failed (exit $code)"
+      if [ -n "$no_tests_matched" ]; then
+        outcome="failed (exit 0 but 'no tests to run' — the declared contract no longer exists)"
+      else
+        outcome="failed (exit $code)"
+      fi
     fi
     rationale="Automated validation (switchyard-ops validate-sweep). Re-ran the criterion's declared contract against merged $default_branch: \`$cmd\` — $outcome. The verdict is derived from the exit code alone; no judgment was applied."
 

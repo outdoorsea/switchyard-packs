@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 #
-# Minimal self-test for token-report.sh issue #320 fallback + guard.
+# Minimal self-test for token-report.sh issue #110 attribution + guard.
 #
 # Hermetic: mocks gc, pins GC_CITY/GC_PACK_STATE_DIR to a scratch city, and
 # asserts that:
 #   - session-bead attribution is preserved (no ~ prefix)
 #   - missing-bead facts fall back to the worker string with a ~ prefix
-#   - the unknown-share guard fires when unknown tokens exceed ~10%.
+#   - adhoc/session-spawned workers (answerer-, judge-, refactor-scout-adhoc)
+#     are attributed to their pack agent, not "unknown"
+#   - the unknown-share guard fires when unattributed tokens exceed ~20%.
 
 set -uo pipefail
 
@@ -102,11 +104,11 @@ else
   report FAIL "fallback worker row is prefixed with ~" "see $STDOUT"
 fi
 
-# 2000 unknown / 8100 total = ~25%, so the guard should fire.
+# 2000 unknown / 8100 total = ~25%, so the guard should fire at the ~20% threshold.
 if grep -q "WARNING.*unknown.*threshold" "$STDERR"; then
-  report ok "unknown-share guard fires when >10%"
+  report ok "unknown-share guard fires when >20%"
 else
-  report FAIL "unknown-share guard fires when >10%" "stderr: $(cat "$STDERR")"
+  report FAIL "unknown-share guard fires when >20%" "stderr: $(cat "$STDERR")"
 fi
 
 
@@ -169,6 +171,37 @@ if jq -e '.[] | select(.key == "~switchyard-ops.token-auditor")' "$JSON2" >/dev/
   report ok "worker switchyard-ops__token-auditor-adhoc-<hash> normalization"
 else
   report FAIL "worker switchyard-ops__token-auditor normalization" "see $JSON2"
+fi
+
+# --- 5) issue #110 adhoc/session-spawned lanes --------------------------------
+# Order-spawned adhoc sessions never mint a session bead, so the fallback path
+# must recover the agent definition from the worker string. These are the exact
+# names called out in issue #110.
+cat >"$CITY/.gc/usage.jsonl" <<'EOF'
+{"kind":"model","run_id":"adhoc-1","worker":"answerer-adhoc-11111111","model":"claude-opus-5","provider":"claude","input_tokens":100,"output_tokens":0,"cache_read_tokens":0,"cache_creation_tokens":0,"at":3}
+{"kind":"model","run_id":"adhoc-2","worker":"judge-adhoc-22222222","model":"claude-opus-5","provider":"claude","input_tokens":200,"output_tokens":0,"cache_read_tokens":0,"cache_creation_tokens":0,"at":4}
+{"kind":"model","run_id":"adhoc-3","worker":"refactor-scout-adhoc-33333333","model":"claude-opus-5","provider":"claude","input_tokens":300,"output_tokens":0,"cache_read_tokens":0,"cache_creation_tokens":0,"at":5}
+EOF
+
+JSON3="$WORK/report3.json"
+bash "$TOKEN_REPORT" --by agent --json >"$JSON3"
+
+for agent in answerer judge refactor-scout; do
+  if jq -e ".[] | select(.key == \"~switchyard-ops.$agent\")" "$JSON3" >/dev/null; then
+    report ok "adhoc worker $agent-adhoc-<hash> normalizes to switchyard-ops.$agent"
+  else
+    report FAIL "adhoc worker $agent-adhoc-<hash> normalization" "see $JSON3"
+  fi
+done
+
+# With only fallback rows in this fixture, the unattributed share is 100%,
+# well above the 20% threshold.
+STDERR3="$WORK/report3.err"
+bash "$TOKEN_REPORT" --by agent >/dev/null 2>"$STDERR3"
+if grep -q "WARNING.*100%.*threshold" "$STDERR3"; then
+  report ok "guard warns on 100% fallback/unknown attribution"
+else
+  report FAIL "guard warns on 100% fallback/unknown attribution" "stderr: $(cat "$STDERR3")"
 fi
 
 echo

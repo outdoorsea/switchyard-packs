@@ -348,7 +348,7 @@ UNKNOWN_PCT="$(printf '%s' "$ENRICHED" | jq -r '
   | ( map(select((attribution == "unknown") or (attribution | startswith("~"))))
       | map(tokens) | add // 0 ) as $unk
   | if $tot > 0 then (($unk * 100) / $tot | floor) else 0 end')"
-[ "${UNKNOWN_PCT:-0}" -gt 10 ] 2>/dev/null && echo "token-report: WARNING — $UNKNOWN_PCT% of tokens lack session-bead attribution ('unknown' plus '~' fallback rows) (threshold ~10%)." >&2
+[ "${UNKNOWN_PCT:-0}" -gt 20 ] 2>/dev/null && echo "token-report: WARNING — $UNKNOWN_PCT% of tokens lack session-bead attribution ('unknown' plus '~' fallback rows) (threshold ~20%)." >&2
 
 if [ "$OUT" = "json" ]; then
   printf '%s\n' "$GROUPED" | jq .

@@ -204,6 +204,32 @@ sy_state_dir() {
 sy_load_conf() {
   PINNED_EXTRA=""; RETRO_AGENT=""; COORDINATORS=""
   conf="$(sy_state_dir)/roster.conf"
+  # Seed the city-local roster from the shipped example on first use. The example
+  # has every setting commented out, so a freshly seeded file behaves exactly
+  # like a missing one — preserving the "no roster.conf means no behaviour change"
+  # safety invariant — while giving the operator a discoverable, documented file
+  # to edit. Seeding is silent; failing to write the state dir is not fatal.
+  #
+  # Locating the example is the whole trick. gc exports GC_PACK_DIR; $PACK_DIR is
+  # only the token gc substitutes into an order's `exec =` line, so it is UNSET
+  # inside the running process — keying the seed on it alone means the seed never
+  # fires once, in any order, with every test still green. Prefer GC_PACK_DIR,
+  # accept PACK_DIR if some caller does export it, and otherwise resolve relative
+  # to the CALLING script: roster.sh is sourced, so $0 is the caller, and every
+  # caller lives in assets/scripts/ (that is why they all source us as
+  # "$(dirname "$0")/../lib/roster.sh"). That last leg is what keeps a hand-run
+  # seeding the same file an order would — the manual-vs-order divergence
+  # sy_state_dir warns about above. A wrong guess just leaves the file absent,
+  # which is exactly today's behaviour, so every leg fails safe.
+  if [ ! -f "$conf" ]; then
+    _sy_example="${GC_PACK_DIR:-${PACK_DIR:-}}/assets/roster.conf.example"
+    [ -f "$_sy_example" ] || _sy_example="$(dirname "$0")/../roster.conf.example"
+    if [ -f "$_sy_example" ]; then
+      mkdir -p "$(dirname "$conf")" 2>/dev/null || :
+      cp "$_sy_example" "$conf" 2>/dev/null || :
+    fi
+    unset _sy_example
+  fi
   # shellcheck disable=SC1090
   [ -f "$conf" ] && . "$conf"
   return 0

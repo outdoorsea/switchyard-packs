@@ -64,16 +64,14 @@
 # PATH, `KIMI_API_KEY` in the session environment, and `[providers.kimi]`
 # registered in city.toml.
 #
-# ⚠ UNLIKE security-scout, THIS LANE HAS NO READINESS GUARD. `security-scan.sh`
-# checks those three prerequisites and stays quiet when they are unmet;
-# `judge-sweep` calls `lane-ensure.sh` directly, and lane-ensure's
-# silent-failure invariant mails the mayor whenever a spawn returns no session
-# identity. So in a city where kimi is NOT usable, this pin turns the 30m judge
-# sweep into a 30m spawn-fail notice and the awaiting-validation backlog stops
-# draining. Giving judge-sweep the security-scan readiness check is the right
-# fix and is deliberately NOT done here: PRD #271's `hands_off` names the sweep
-# orders and lane-ensure mechanics. Until that lands, a city without kimi should
-# take the documented opt-out below rather than let the lane fail loudly.
+# ⚠ PROVIDER READINESS. `judge-sweep` runs `judge-sweep.sh`, which checks the
+# same three prerequisites as `security-scan.sh` (provider registered, CLI on
+# PATH, API key present) AND performs a provider-spawn readiness probe. If the
+# provider's CLI rejects the flags gc's builtin provider passes — e.g. kimi
+# 0.35.0 rejecting --no-thinking — the sweep mails the mayor a specific
+# provider/cli skew notice instead of the generic "spawn did not come up" load
+# handshake alarm. A city without a usable kimi provider therefore stays quiet
+# (one notice per week) rather than burning a session every 30 minutes.
 #
 # To run the judge on the default provider instead — accepting that builder and
 # validator share a runtime brain, which is the whole point of this line — patch

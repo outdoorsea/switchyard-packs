@@ -18,4 +18,4 @@
 description = "Spawn one judging-validator per rig with a switchyard coordinator when none is live; it drains the awaiting-validation backlog with cited judgment verdicts"
 trigger = "cooldown"
 interval = "30m"
-exec = "$PACK_DIR/assets/scripts/lane-ensure.sh judge judging-validator"
+exec = "$PACK_DIR/assets/scripts/judge-sweep.sh"

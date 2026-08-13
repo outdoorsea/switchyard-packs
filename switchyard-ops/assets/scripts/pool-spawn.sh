@@ -182,7 +182,18 @@ POOL_SUFFIX=".brakeman"
 # the sibling reassign-guard (crit:65a9b77b2d30) uses, kept in one place so the
 # two never drift: a session in any of these is doing (or about to do) work.
 POOL_LIVE_STATES="active start-pending start_pending creating draining"
-POOL_KNOWN_SESSION_STATES="$POOL_LIVE_STATES suspended closed"
+# KNOWN is a different question from LIVE: LIVE asks "does this session occupy a
+# WIP slot", KNOWN asks "do I recognise this state at all". An unrecognised state
+# fails the census CLOSED (sy_pool_brakeman_live returns rc 2), so every state gc
+# can emit must appear here even when it does no work.
+#
+# `asleep` is exactly that case, and it belongs here and NOT in POOL_LIVE_STATES:
+# a drained session is not working, so counting it live would suppress the very
+# spawn its absence should trigger. Omitting it cost 12 dispatch cycles on
+# 2026-08-12/13 — four drained brakemen (three of them leftover manual spawns)
+# made `switchyard` and `switchyard-forge` fail the census every cycle for five
+# hours while the escalation mail blamed "unreadable or timed out".
+POOL_KNOWN_SESSION_STATES="$POOL_LIVE_STATES suspended closed asleep"
 POOL_GC_READ_TIMEOUT="${POOL_GC_READ_TIMEOUT:-30}"
 POOL_GC_WRITE_TIMEOUT="${POOL_GC_WRITE_TIMEOUT:-30}"
 POOL_SESSION_LOOKUP_TIMEOUT="${POOL_SESSION_LOOKUP_TIMEOUT:-15}"
@@ -209,20 +220,47 @@ sy_pool_bounded_uint "$POOL_SPAWN_CYCLE_TIMEOUT" 1 600 || exit 0
 _reconcile_budget=$((POOL_SPAWN_TIMEOUT + (POOL_SPAWN_RECONCILE_ATTEMPTS - 1) * POOL_SPAWN_RECONCILE_DELAY))
 [ "$_reconcile_budget" -le "$POOL_SPAWN_CYCLE_TIMEOUT" ] || exit 0
 
-# sy_pool_nonsuspended_rigs — the name of every rig gc is not suspending, one per
-# line. Mirrors publish-gate's rig enumeration, minus suspended rigs (checked two
-# ways so a differently-spelled suspend signal still excludes; excluding an
-# active rig only under-reports, which is the safe direction for detection).
+# sy_pool_nonsuspended_rigs — the name of every rig gc is not suspending AND that
+# can actually be addressed per-rig, one per line. Mirrors publish-gate's rig
+# enumeration, minus suspended rigs (checked two ways so a differently-spelled
+# suspend signal still excludes; excluding an active rig only under-reports,
+# which is the safe direction for detection).
+#
+# The HQ rig is excluded, and it is not a suspension case. `gc rig list` reports
+# the city itself as a rig (`"hq": true`), but it is NOT addressable through
+# `--rig`: `gc bd list --rig <hq-name>` exits 1 with `rig "<name>" not found`,
+# because HQ beads are addressed by OMITTING `--rig`. Enumeration and addressing
+# disagree, so every enumerated-then-addressed read fails for HQ and only HQ.
+#
+# That is a deterministic rejection in ~2s, but sy_pool_rig_demand can only
+# return rc 2, so the escalation reads "bead demand was unreadable, malformed, or
+# timed out" — none of which happened. It failed 17 of 17 cycles on 2026-08-12/13
+# and was invisible precisely because it looked like load. A 100% failure rate is
+# the tell: real timeouts are stochastic and leave gaps.
+#
+# Excluding is right rather than special-casing the read, because HQ hosts no
+# brakeman pool — it holds the city's own session/mail beads, which are never
+# pool demand. Keyed on the `hq` flag, never on the city's name.
 sy_pool_nonsuspended_rigs() {
   _raw="$(sy_timeout "$POOL_GC_READ_TIMEOUT" gc rig list --json 2>/dev/null)" || return 2
   [ -n "$_raw" ] || return 2
+  # The optional-boolean clauses below are `.x == null`, NOT `has("x")|not`.
+  # The two differ on exactly one input — the key PRESENT and JSON null — and
+  # that difference is the whole bug. `has("x")` is true for a null value, so
+  # `(has("x")|not) or (.x|type=="boolean")` is false||false = FALSE, the `all`
+  # collapses, and the function returns 2. rc 2 is reported as "rig roster was
+  # unreadable", NOTHING is enumerated and NO rig is spawned into — one null
+  # field takes down every healthy rig with it, behind the same misleading
+  # message this script exists to eliminate. `.x == null` is true for both the
+  # absent key and the null value, while still rejecting a wrong type.
   printf '%s' "$_raw" | jq -e '
     (if type=="array" then . elif type=="object" and (.rigs|type=="array") then .rigs else null end) as $r
     | ($r != null)
       and (all($r[];
         type=="object"
         and (.name|type=="string") and (.name|test("^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$"))
-        and ((has("suspended")|not) or (.suspended|type=="boolean"))
+        and ((.suspended == null) or (.suspended|type=="boolean"))
+        and ((.hq == null) or (.hq|type=="boolean"))
         and ((.state // .status // "")|type=="string")))
       and (($r|map(.name)|length) == ($r|map(.name)|unique|length))' >/dev/null 2>&1 || return 2
   printf '%s' "$_raw" | jq -r '
@@ -230,6 +268,7 @@ sy_pool_nonsuspended_rigs() {
     | .[]
     | select((.suspended // false) | not)
     | select((.state // .status // "") != "suspended")
+    | select((.hq // false) | not)
     | .name' 2>/dev/null || return 2
 }
 
@@ -1024,9 +1063,17 @@ $rig $pb" ;;
              assigned_now="$assigned_now
 $rig $target" ;;
           2) action="spawned $sess, REFUSED to reassign $target (raced by a live worker)" ;;
+          # The escalation deliberately omits $sess while `action` above keeps it.
+          # The alert fingerprint is a cksum over $escalations alone, and $sess is
+          # a fresh unique adhoc identity on every spawn — embedding it makes each
+          # cycle's fingerprint differ from the last, so the dedup below never
+          # matches and a persistent fault mails EVERY cycle instead of once. That
+          # is the exact "hides new incidents in noise" flood the dedup exists to
+          # prevent. Identity is not lost: it stays in `action`, which reaches the
+          # per-cycle report.
           *) action="spawned $sess, but direct-assign of $target FAILED"
              escalations="$escalations
-- $rig: spawned $sess but the direct-assign of $target was rejected — the fresh worker has nothing to claim." ;;
+- $rig: the direct-assign of $target was rejected — a freshly spawned worker has nothing to claim." ;;
         esac
       fi
     fi

@@ -38,6 +38,21 @@ set -u
 . "$(dirname "$0")/../lib/roster.sh"
 sy_load_conf
 
+# This pack's name and agent set, used to qualify worker-string fallbacks.
+# Under an order gc sets PACK_DIR to the installed pack path; when the script is
+# invoked by hand, derive it from the script location.
+if [ -n "${PACK_DIR:-}" ]; then
+  SY_PACK_NAME="$(basename "$PACK_DIR")"
+  SY_PACK_DIR="$PACK_DIR"
+else
+  SY_PACK_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
+  SY_PACK_NAME="$(basename "$SY_PACK_DIR")"
+fi
+SY_PACK_AGENTS="$(find "$SY_PACK_DIR/agents" -maxdepth 1 -mindepth 1 -type d 2>/dev/null \
+  | sed 's|.*/||' \
+  | jq -R . | jq -s 'map(select(length > 0))' 2>/dev/null)"
+[ -n "$SY_PACK_AGENTS" ] || SY_PACK_AGENTS='[]'
+
 CITY="$(sy_city)"
 USAGE="$CITY/.gc/usage.jsonl"
 MARKER="$(sy_state_dir)/token-report.alerted"
@@ -112,12 +127,27 @@ if [ "$(printf '%s' "$SESSIONS" | jq 'length')" -eq 0 ] && [ "$OUT" = "text" ]; 
 fi
 
 # --- the join ----------------------------------------------------------------
+# Session beads are authoritative. When a fact's run_id has no bead (wisp and
+# adhoc sessions never mint one), fall back to the fact's own worker string.
+# That is a heuristic: normalize it ("__" -> ".", strip "-adhoc-<hash>" or
+# trailing "-gv-<id>"), qualify bare pack-local names, and mark the row with a
+# leading "~" so a reader knows it did not come from a session bead.
 ENRICHED="$(jq -c -n \
     --slurpfile facts "$USAGE" \
     --argjson sessions "$SESSIONS" \
-    --argjson since "$SINCE_MS" '
+    --argjson since "$SINCE_MS" \
+    --arg pack_name "$SY_PACK_NAME" \
+    --argjson pack_agents "$SY_PACK_AGENTS" '
   ($sessions | map({key: .id, value: .}) | from_entries) as $byid
-  | [ $facts[]
+  | def normalize_worker:
+      ( gsub("__"; ".")
+        | sub("-adhoc-[0-9a-fA-F]+$"; "")
+        | sub("-gv-[A-Za-z0-9]+$"; "")
+      ) as $base
+      | if ($base | contains(".")) then $base
+        elif ($pack_agents | index($base)) then "\($pack_name).\($base)"
+        else $base end;
+  [ $facts[]
       | select(.kind == "model")
       | select(.at >= $since)
       | . as $f
@@ -140,17 +170,49 @@ ENRICHED="$(jq -c -n \
          elif ($wd | test("/\\.gc/agents/"))
          then "city"
          else "unknown" end) as $rig
+      | (if ($s.template // null) != null then
+           {
+             provider:  ($f.provider // $s.provider // "unknown"),
+             agent:     $s.template,
+             agent_name: ($s.agent_name // "unknown"),
+             rig:       $rig,
+             bead:      ($s.trigger // null),
+             prd:       ($s.sy_prd  // null)
+           }
+         else
+           ($f.worker // "") as $raw_worker
+           | if ($raw_worker | length) > 0 then
+               ($raw_worker | normalize_worker) as $fallback_agent
+               | {
+                   provider:  ($f.provider // "unknown"),
+                   agent:     ("~\($fallback_agent)"),
+                   agent_name: ("~\($raw_worker)"),
+                   rig:       "unknown",
+                   bead:      null,
+                   prd:       null
+                 }
+             else
+               {
+                 provider:  ($f.provider // "unknown"),
+                 agent:     "unknown",
+                 agent_name: "unknown",
+                 rig:       "unknown",
+                 bead:      null,
+                 prd:       null
+               }
+             end
+         end) as $attribution
       | {
           at:        $f.at,
           day:       ($f.at / 1000 | floor | gmtime | strftime("%Y-%m-%d")),
           run:       $f.run_id,
           model:     ($f.model    // "unknown"),
-          provider:  ($f.provider // $s.provider // "unknown"),
-          agent:      ($s.template   // "unknown"),
-          agent_name: ($s.agent_name // "unknown"),
-          rig:       $rig,
-          bead:      ($s.trigger  // null),
-          prd:       ($s.sy_prd   // null),
+          provider:  $attribution.provider,
+          agent:     $attribution.agent,
+          agent_name: $attribution.agent_name,
+          rig:       $attribution.rig,
+          bead:      $attribution.bead,
+          prd:       $attribution.prd,
           input:     ($f.input_tokens          // 0),
           output:    ($f.output_tokens         // 0),
           cache_r:   ($f.cache_read_tokens     // 0),
@@ -265,6 +327,28 @@ GROUPED="$(printf '%s' "$ENRICHED" | jq -c "
                      | round )
     })
   | sort_by(-.total)")"
+
+# Warn when a large share of spend is not authoritatively attributed.
+#
+# Computed from $ENRICHED, NOT $GROUPED. $GROUPED is keyed by whatever --by
+# asked for, so a group literally named "unknown" only exists in some modes:
+# the default --by model has no such key and this guard silently read 0%, while
+# --by agent read 10% and --by rig read 40% off the SAME facts. Grouping is a
+# presentation choice; attribution quality is a property of the facts.
+#
+# Heuristic rows COUNT as unattributed. A "~" agent was recovered from the
+# fact's own worker string rather than a session bead, so it can be wrong in
+# ways a bead-joined row cannot. Counting it as attributed would hide exactly
+# the regression this guard exists to catch — a join that breaks quietly and
+# gets papered over by the fallback.
+UNKNOWN_PCT="$(printf '%s' "$ENRICHED" | jq -r '
+  def tokens: (.input + .output + .cache_r + .cache_c);
+  def attribution: (.agent // "unknown" | tostring);
+  (map(tokens) | add // 0) as $tot
+  | ( map(select((attribution == "unknown") or (attribution | startswith("~"))))
+      | map(tokens) | add // 0 ) as $unk
+  | if $tot > 0 then (($unk * 100) / $tot | floor) else 0 end')"
+[ "${UNKNOWN_PCT:-0}" -gt 10 ] 2>/dev/null && echo "token-report: WARNING — $UNKNOWN_PCT% of tokens lack session-bead attribution ('unknown' plus '~' fallback rows) (threshold ~10%)." >&2
 
 if [ "$OUT" = "json" ]; then
   printf '%s\n' "$GROUPED" | jq .

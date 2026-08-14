@@ -284,6 +284,15 @@ PRD has at least one attached, merged PR (a diff you can read and cite).
      rationale naming what is missing — and, for a scenario failure, naming the
      scenario itself so the rework knows what to fix. This returns the criterion
      to the pool for rework — the honest outcome for delivered-but-wrong work.
+     **Every reject carries a reason — the server refuses one without it (400).**
+     The gate is unconditional: it keys on the verdict alone, so a `contract`
+     reject is refused exactly as a `judgment` one is, and no lane lets a bare
+     `fail` through. The bar is deliberately low but real — it wants
+     at least 12 characters and 3 words — so `"no"` is refused while one honest
+     sentence passes. Write that sentence for the next claimant rather than for
+     the gate: your rationale becomes the retry guidance on their bead, and
+     without it a rejected criterion is indistinguishable from one nobody ever
+     attempted.
      Then **`release`, never `complete`**: a fail resets the criterion to
      outstanding, so it has to be judgeable again once the re-work lands. A
      completed stake can never be taken again, so completing a fail would strand

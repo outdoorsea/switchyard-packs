@@ -211,6 +211,25 @@ POOL_SPAWN_TIMEOUT="${POOL_SPAWN_TIMEOUT:-90}"
 POOL_SPAWN_RECONCILE_ATTEMPTS="${POOL_SPAWN_RECONCILE_ATTEMPTS:-7}"
 POOL_SPAWN_RECONCILE_DELAY="${POOL_SPAWN_RECONCILE_DELAY:-20}"
 POOL_SPAWN_CYCLE_TIMEOUT="${POOL_SPAWN_CYCLE_TIMEOUT:-300}"
+# PER-CYCLE WALL-CLOCK BUDGET (switchyard PRD #185 / sw-jqrx guard).
+#
+# Pool-spawn runs on a 1-minute cadence, but a single slow `gc bd list --all`
+# against a large ledger can exceed the order runner's own exec deadline before
+# the script's 300s POOL_SPAWN_CYCLE_TIMEOUT ever fires. The result is a silent
+# `context deadline exceeded` with no record of which rigs were examined. This
+# budget is the sweep's own, deliberately set inside any plausible order-exec
+# deadline, so a cycle that cannot finish SAYS SO (below) instead of being killed
+# mid-rig. It is checked before each rig's demand read, so a slow read consumes
+# at most its own timeout and the remaining rigs are reported as unexamined.
+# 0 disables the cap for hand-run debugging.
+POOL_SPAWN_BUDGET_SECONDS="${POOL_SPAWN_BUDGET_SECONDS:-180}"
+# Optional cap on how many claimable bead ids the local-`bd` demand read
+# enumerates per rig. Dispatch only needs one bead to assign, and a large ledger
+# can make the full jq filter plus `gc bd list --all` payload exceed the cycle
+# budget. 0 means unbounded (the historical behavior). A positive value bounds
+# the enumeration and the report to at most that many ids; the remainder are
+# still claimable but are not listed.
+POOL_DEMAND_BOUND="${POOL_DEMAND_BOUND:-0}"
 
 sy_pool_bounded_uint() {
   case "$1" in ''|*[!0-9]*|0[0-9]*) return 1 ;; esac
@@ -230,6 +249,26 @@ sy_pool_bounded_uint "$POOL_SPAWN_CYCLE_TIMEOUT" 1 600 || exit 0
 # cycle timeout.
 _reconcile_budget=$((POOL_SPAWN_TIMEOUT + (POOL_SPAWN_RECONCILE_ATTEMPTS - 1) * POOL_SPAWN_RECONCILE_DELAY))
 [ "$_reconcile_budget" -le "$POOL_SPAWN_CYCLE_TIMEOUT" ] || exit 0
+
+sy_pool_bounded_uint "$POOL_SPAWN_BUDGET_SECONDS" 0 3600 || exit 0
+sy_pool_bounded_uint "$POOL_DEMAND_BOUND" 0 10000 || exit 0
+
+# sy_pool_now — current Unix time, or 0 if the clock is unreadable.
+# Fails toward "keep going" on an unreadable clock.
+sy_pool_now() { date +%s 2>/dev/null || printf '0'; }
+POOL_CYCLE_STARTED="$(sy_pool_now)"
+
+# sy_pool_over_budget — has this cycle spent its allowance?
+# Returns 0 (true) when the budget is exhausted or unreadable; 1 (false) when
+# there is time left or the cap is disabled. Fails toward "keep going" on an
+# unreadable clock, matching lane-ensure's lane_over_budget contract.
+sy_pool_over_budget() {
+  [ "$POOL_SPAWN_BUDGET_SECONDS" -gt 0 ] || return 1
+  [ "$POOL_CYCLE_STARTED" -gt 0 ] || return 1
+  _spob_now="$(sy_pool_now)"
+  [ "$_spob_now" -gt 0 ] || return 1
+  [ "$(( _spob_now - POOL_CYCLE_STARTED ))" -ge "$POOL_SPAWN_BUDGET_SECONDS" ]
+}
 
 # sy_pool_nonsuspended_rigs — the name of every rig gc is not suspending AND that
 # can actually be addressed per-rig, one per line. Mirrors publish-gate's rig
@@ -358,7 +397,12 @@ sy_pool_rig_demand() {
           and ((.type // .dependency_type // "")|type=="string")
           and ((.depends_on_id // .id // "")|type=="string")))
       and (($b|map(.id)|length) == ($b|map(.id)|unique|length))' >/dev/null 2>&1 || return 2
-  _demand="$(printf '%s' "$_raw" | jq -r "$POOL_DEMAND_JQ" 2>/dev/null)" || return 2
+  if [ "$POOL_DEMAND_BOUND" -gt 0 ] 2>/dev/null; then
+    _demand_jq="limit($POOL_DEMAND_BOUND; $POOL_DEMAND_JQ)"
+  else
+    _demand_jq="$POOL_DEMAND_JQ"
+  fi
+  _demand="$(printf '%s' "$_raw" | jq -r "$_demand_jq" 2>/dev/null)" || return 2
   printf '%s\n' "$_demand" | awk 'NF'
 }
 
@@ -1060,12 +1104,24 @@ assigned_preserved="" # prior rows whose current demand could not be read
 assigned_stalled=""   # prior rows whose alert has not yet been confirmed delivered
 bd_rigs_seen=""   # did the local-`bd` path run for ANY rig this cycle?
 spawn_seq=0        # monotonic suffix for every spawn alias in this locked cycle
+uncovered=""       # rigs skipped because the per-cycle budget was exhausted
 rigs="$(sy_pool_nonsuspended_rigs)"; rigs_rc=$?
 if [ "$rigs_rc" -ne 0 ]; then
   escalations="$escalations
 - city: rig roster was unreadable, malformed, or timed out, so demand and capacity are UNKNOWN. No brakeman was spawned."
 fi
 for rig in $rigs; do
+  # SPEND THE BUDGET, THEN NAME WHAT WAS MISSED (sw-jqrx).
+  #
+  # A slow `gc bd list --all` for one rig can consume enough of the order-exec
+  # deadline that the runner kills the whole cycle before the remaining rigs are
+  # examined. Stopping ourselves while we still have a voice — and naming the rigs
+  # we did not reach — replaces the silent `context deadline exceeded` with an
+  # actionable alarm. `continue` collects the names for the escalation below.
+  if sy_pool_over_budget; then
+    uncovered="$uncovered $rig"
+    continue
+  fi
   # CLOUD-POOL DISPATCH (crit:53605636a114) — probe, then spawn, and nothing else.
   # No `bd` read, no direct-assign, no cursor entry: the worker claims for itself
   # over MCP, atomically, so there is no hand-off here to race, guard or remember.
@@ -1283,6 +1339,21 @@ if [ -n "$bd_rigs_seen" ]; then
     escalations="$escalations
 - city: the last-assignment cursor could not be persisted atomically; failed hand-offs may be unobservable next cycle."
   fi
+fi
+
+# A CYCLE THAT RAN OUT OF TIME IS A REPORTED FAILURE, NOT A QUIET ONE (sw-jqrx).
+# This is the condition that replaces `context deadline exceeded`. Before, an
+# over-long demand read was killed by the order runner mid-rig: no record of how
+# far it got, which rigs it covered, or that dispatch had gone quiet. Now it
+# stops itself while it still has a voice, and says exactly which rigs it did not
+# reach — so the alarm names the gap instead of merely proving something died.
+# Rigs listed here were never examined, so no conclusion can be drawn about their
+# demand or capacity; rigs swept before the budget ran out were handled normally.
+if [ -n "$uncovered" ]; then
+  report="$report
+- city: cycle budget exhausted, the following rigs were NOT examined this cycle:$uncovered"
+  escalations="$escalations
+- city: pool-spawn hit its ${POOL_SPAWN_BUDGET_SECONDS}s per-cycle budget and stopped before examining these rigs:$uncovered. No brakeman was spawned for them. This bound is the order's own, deliberately inside gc's order-exec deadline, so this notice replaces the silent `order exec pool-spawn failed: context deadline exceeded` that hid this condition. Raise POOL_SPAWN_BUDGET_SECONDS, reduce the per-rig demand read cost (e.g. POOL_DEMAND_BOUND), or investigate why `gc bd list --all --json` for this rig is slow. This notice repeats at most once per episode and clears itself on the first cycle that covers every rig."
 fi
 
 # What this order detected AND did is observed through its own log (gc captures

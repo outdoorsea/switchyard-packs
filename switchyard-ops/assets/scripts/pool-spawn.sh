@@ -1120,6 +1120,15 @@ for rig in $rigs; do
   # actionable alarm. `continue` collects the names for the escalation below.
   if sy_pool_over_budget; then
     uncovered="$uncovered $rig"
+    # A budget skip is unknown demand: nothing this cycle can prove last cycle's
+    # hand-offs to this rig succeeded, so carry its cursor rows forward exactly
+    # as the unreadable-demand path does — otherwise a skip while another rig
+    # keeps bd_rigs_seen set would rewrite ASSIGNED_LAST without them, and a
+    # failed hand-off would be permanently forgotten (silent-failure mode 4,
+    # crit:90116a548d3b, the invariant this script exists to uphold).
+    _preserved="$(printf '%s\n' "$prev_assigned" | awk -v r="$rig" '$1==r {print}')"
+    [ -n "$_preserved" ] && assigned_preserved="$assigned_preserved
+$_preserved"
     continue
   fi
   # CLOUD-POOL DISPATCH (crit:53605636a114) — probe, then spawn, and nothing else.
@@ -1222,6 +1231,17 @@ $_preserved"
 - $rig: bead $pb was direct-assigned last cycle but is STILL claimable demand — the hand-off did not take (unclaimed after a full cycle)."
         assigned_stalled="$assigned_stalled
 $rig $pb" ;;
+      *)
+        # Absence from a BOUNDED enumeration proves nothing. With the window
+        # full (count >= bound), pb may sit beyond it — still claimable, its
+        # hand-off still failed — so carry the row forward instead of
+        # concluding it was claimed; a later cycle whose window reaches it (or
+        # an unbounded one) still gets to mail mode 4. Only an UNbounded read,
+        # or a window with room to spare, proves absence means claimed.
+        if [ "$POOL_DEMAND_BOUND" -gt 0 ] 2>/dev/null && [ "$count" -ge "$POOL_DEMAND_BOUND" ]; then
+          assigned_preserved="$assigned_preserved
+$rig $pb"
+        fi ;;
     esac
   done
 
@@ -1353,7 +1373,7 @@ if [ -n "$uncovered" ]; then
   report="$report
 - city: cycle budget exhausted, the following rigs were NOT examined this cycle:$uncovered"
   escalations="$escalations
-- city: pool-spawn hit its ${POOL_SPAWN_BUDGET_SECONDS}s per-cycle budget and stopped before examining these rigs:$uncovered. No brakeman was spawned for them. This bound is the order's own, deliberately inside gc's order-exec deadline, so this notice replaces the silent `order exec pool-spawn failed: context deadline exceeded` that hid this condition. Raise POOL_SPAWN_BUDGET_SECONDS, reduce the per-rig demand read cost (e.g. POOL_DEMAND_BOUND), or investigate why `gc bd list --all --json` for this rig is slow. This notice repeats at most once per episode and clears itself on the first cycle that covers every rig."
+- city: pool-spawn hit its ${POOL_SPAWN_BUDGET_SECONDS}s per-cycle budget and stopped before examining these rigs:$uncovered. No brakeman was spawned for them. This bound is the order's own, deliberately inside gc's order-exec deadline, so this notice replaces the silent \`order exec pool-spawn failed: context deadline exceeded\` that hid this condition. Raise POOL_SPAWN_BUDGET_SECONDS, reduce the per-rig demand read cost (e.g. POOL_DEMAND_BOUND), or investigate why \`gc bd list --all --json\` for this rig is slow."
 fi
 
 # What this order detected AND did is observed through its own log (gc captures

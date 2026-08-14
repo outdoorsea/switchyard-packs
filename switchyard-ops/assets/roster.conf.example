@@ -139,6 +139,41 @@
 # CLOUD_POOL_RIGS="<rig> <rig>"
 
 # ---------------------------------------------------------------------------
+# WITNESS_RIGS — the rigs the witness sweep watches (switchyard PRD #357 P1).
+#
+# Unset (the default) means the witness-sweep order exits immediately: a city
+# that never enables it never notices it exists. Naming a rig turns on three
+# checks for THAT RIG, every 30 minutes:
+#
+#   - THE STUCK-WORK DUAL-WRITE. The server already projects `stuck_work` and
+#     `ready_to_merge` entries into the project's decision inbox, each with a
+#     stable per-episode id. The sweep mails the mayor ONCE per (type, id)
+#     episode — publish-gate's mark-after-delivery ledger — so the escalation
+#     survives a dead mayor mailbox. It consumes the surface and never
+#     re-derives stall predicates: a lapsed lease the reclaim sweep already
+#     returned to the pool is absent from the surface and files nothing.
+#   - WEDGED WORKER SESSIONS. A session ACTIVE with a stale last_active whose
+#     pane holds a queued, unsubmitted prompt (the state a transient API error
+#     strands a session in) gets ONE `gc session nudge`; found in the same
+#     state on the next cycle it is escalated by mail instead of nudged again.
+#     The sweep never kills or resets a session.
+#   - A STALLED DISPATCH LOOP. A rig whose cloud claim pool holds claimable
+#     beads while no live worker session exists AND the dispatch order's last
+#     cycle failed (per the supervisor log) is mailed once per episode, naming
+#     `gc order run pool-spawn` as the manual unstick. A loop merely between
+#     cycles, or an empty pool, files nothing.
+#
+# Needs the pack's switchyard credential (SWITCHYARD_API_TOKEN, or the
+# switchyard-mcp CLI's own token file) for the first and third checks — the
+# same credential the lane queue probes use. The wedge check is gc-only and
+# runs regardless. A rig whose name is not its project slug needs a
+# RIG_PROJECTS entry, same as every other consumer.
+#
+# Format: space-separated rig names.
+#
+# WITNESS_RIGS="<rig> <rig>"
+
+# ---------------------------------------------------------------------------
 # MERGE_STRATEGY is GONE, and setting it now does nothing.
 #
 # It configured the retired `merge-gate` order, which stamped a merge strategy

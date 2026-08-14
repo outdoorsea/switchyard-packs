@@ -1,0 +1,28 @@
+# The witness (switchyard PRD #357 P1): make stalls REACH someone even when the
+# mayor mailbox is dead, and catch the two stalls only gc can see.
+#
+# The server half (PRD #357 P0) already projects `stuck_work` and
+# `ready_to_merge` into the decision inbox with a STABLE EPISODE HASH as each
+# entry's id. This order is the pack half of that dual-write: it mails the lane
+# once per (type, id) episode — publish-gate's mark-after-delivery ledger — so
+# the escalation survives a dead mailbox, and it adds the two pack-observable
+# checks no server read can make: a WEDGED worker session (turn ended, input
+# still queued on the pane — one `gc session nudge`, then mail if the nudge
+# does not take) and a STALLED DISPATCH LOOP (claimable pool + zero live
+# workers + the dispatch order's last cycle failed in the supervisor log —
+# mailed once per episode, naming `gc order run pool-spawn` as the unstick).
+#
+# Cadence is the PRD's own 30 minutes: a stall must become a decision within
+# one sweep cycle, and the wedge ladder is defined in cycles (nudge on the
+# first sighting, escalate on the next). Tighter would re-read a queue whose
+# entries are already deduped server-side; looser would let a stall compound —
+# issue 358's idle factory grew its pool for six hours before a human noticed
+# by silence.
+#
+# Opt-in per city: WITNESS_RIGS in roster.conf names the rigs swept; unset,
+# this order exits immediately and a city never notices it exists.
+[order]
+description = "Sweep each WITNESS_RIGS rig's stuck-work decision surface (mailing each episode once), nudge-then-escalate wedged worker sessions, and report a stalled dispatch loop — the pack half of the PRD #357 dual-write"
+trigger = "cooldown"
+interval = "30m"
+exec = "$PACK_DIR/assets/scripts/witness-sweep.sh"

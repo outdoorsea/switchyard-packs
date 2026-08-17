@@ -1,0 +1,10 @@
+# Documented consumer shape for switchyard-build.
+#
+# A rig that imports this pack must already carry these sibling imports at the
+# pinned commits below. The pack's own nested imports must be resolvable against
+# this shape; if they conflict, gc import install refuses the pack and the city
+# config is broken. This file is read by scripts/check-pack-importable.sh.
+
+[gc]
+source = "https://github.com/gastownhall/gascity-packs/tree/main/gascity"
+version = "sha:3b3b89f2011e06d84459aa7bea1552382f13930a"

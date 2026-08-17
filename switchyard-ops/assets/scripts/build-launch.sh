@@ -36,13 +36,12 @@
 # run block PRD 269's. The brackets make the match exact without needing a word
 # boundary regex that `jq`'s `contains` does not offer.
 #
-# The tag rides the TITLE because that is the only field `gc sling` can stamp
-# deterministically through its supported CLI: it takes `-t/--title`, and has no
-# `--metadata` flag. The launch also passes `--scope-kind prd --scope-ref <id>`,
-# gc's own logical-scope labelling for a v2 formula launch, so the run is
-# correctly labelled for anything that later learns to query scope directly; the
-# guard does not read it back, because no `gc` read surface exposes it today and
-# a guard must not depend on a field it cannot verify.
+# The tag rides the TITLE of the run's root bead, stamped at `gc bd create` —
+# the launch creates that bead and routes it onto the formula with
+# `gc sling <target> <bead> --on <formula>`, the v2 shape the installed gc
+# accepts. (`--scope-kind prd` is rejected by this gc — city|rig only — and a
+# bare `--formula` sling of a drain-step formula is refused wanting a target
+# convoy; both were proven on the first real launch, 2026-08-17.)
 #
 # NO STATE FILE, SO NOTHING GOES STALE. "Active" is derived from the LIVE ledger
 # every time, never from a marker this script wrote. That is what keeps the guard
@@ -177,16 +176,48 @@ case $? in
     exit 4 ;;
 esac
 
-# Clear to launch. `--scope-kind/--scope-ref` label the workflow with its logical
-# PRD scope; `-t` carries the run tag the guard above matches on.
-if gc sling "$target" "$SY_BUILD_FORMULA" --formula \
-     -t "$(sy_build_run_title "$prd")" \
+# Clear to launch. TWO facts about the installed gc, both learned the hard way
+# on the first real launch (2026-08-17, PRD 366 / task 106), shape this call:
+#
+#   1. `--scope-kind prd` is REJECTED — this gc accepts only city|rig. The
+#      scope labels were only ever cosmetic; the run tag in the TITLE is what
+#      the double-launch guard above matches, so nothing is lost by omitting
+#      them.
+#   2. A bare `--formula` sling of a v2 formula with a drain step is REFUSED
+#      ("requires a target convoy"). The documented path is to create a root
+#      bead and route it ON the formula — sling then auto-creates the convoy.
+#
+# The bead carries the run title, so the guard's tag survives the new shape.
+root=$(gc bd create --rig "$rig" --json "$(sy_build_run_title "$prd")" 2>/dev/null \
+         | jq -r '.id // empty')
+if [ -z "$root" ]; then
+  echo "build-launch: launch FAILED — could not create the run's root bead on $rig" >&2
+  exit 1
+fi
+
+# push/open_pr default FALSE in build-base, and a run that completes with them
+# unset publishes NOTHING (publish records action=noop, reason
+# push=false_open_pr=false) — the first real run did exactly that, finishing
+# every stage with its delivery stranded on a local branch. The judge's
+# checklist for a factory run requires both, so this launcher forwards them
+# with defaults of true; export SY_BUILD_PUSH=false for a dry run.
+if gc sling "$target" "$root" --on "$SY_BUILD_FORMULA" \
      --var prd_id="$prd" \
-     --scope-kind prd --scope-ref "$prd" \
+     --var push="${SY_BUILD_PUSH:-true}" \
+     --var open_pr="${SY_BUILD_OPEN_PR:-true}" \
+     ${SY_BUILD_ARTIFACT_ROOT:+--var artifact_root="$SY_BUILD_ARTIFACT_ROOT"} \
      >/dev/null 2>&1; then
-  echo "build-launch: launched $SY_BUILD_FORMULA for PRD $prd on $rig -> $target $(sy_build_run_tag "$prd")"
+  echo "build-launch: launched $SY_BUILD_FORMULA for PRD $prd on $rig -> $target $(sy_build_run_tag "$prd") (root $root)"
   exit 0
 fi
 
-echo "build-launch: launch FAILED — gc sling returned non-zero for PRD $prd on $rig -> $target" >&2
+# ROLL THE ROOT BEAD BACK. It already carries the run tag in an ACTIVE status,
+# so leaving it open would make the guard refuse every retry — "refuses
+# forever" is the one failure shape the header calls worse than no guard. If
+# the close itself fails, say exactly what the operator must do.
+if gc bd close "$root" --rig "$rig" --reason "sling failed; rolled back so the launch guard stays clear" >/dev/null 2>&1; then
+  echo "build-launch: launch FAILED — gc sling returned non-zero for PRD $prd on $rig -> $target (root bead $root closed; retry is clear)" >&2
+else
+  echo "build-launch: launch FAILED — gc sling returned non-zero AND the rollback close of root bead $root failed; run 'gc bd close $root --rig $rig' by hand or every future launch for PRD $prd will be refused as a duplicate" >&2
+fi
 exit 1

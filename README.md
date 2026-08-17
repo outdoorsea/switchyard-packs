@@ -124,6 +124,15 @@ mirror's root is this directory's root and each pack is a top-level subpath.
 
 The mirror is a projection, never a source. Send changes here.
 
+**Standing up a whole NEW city with these packs** — scaffold, provider
+declarations, the rig block, roster.conf (the step nothing prompts for), the
+webhook, and the verification sequence — is written up as a runbook in
+[docs/city-setup.md](../docs/city-setup.md), distilled from the second city
+build with every friction point that run actually hit. A derived pack's
+nested `gc` pin must match the consuming city's base pin, or
+`gc import install` refuses it and the declared-but-uninstalled import
+rejects the whole city config; the CI gate for that class is PRD 367's.
+
 ```sh
 # city-wide, ONCE: the heartbeat orders AND a brakeman pool in every rig
 gc import add https://github.com/outdoorsea/switchyard-packs/tree/main/switchyard-ops

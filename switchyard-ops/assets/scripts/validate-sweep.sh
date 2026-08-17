@@ -208,6 +208,13 @@ for rig in $VALIDATE_RIGS; do
   echo "validate-sweep: $rig -> $project (checkout $(git -C "$repo" rev-parse --short HEAD))"
 
   # --- The drain loop --------------------------------------------------------
+  # failed_crits is the cycle-local wedge guard (issue 377): a fail RELEASES its
+  # stake, which makes the criterion immediately re-claimable, so the claim
+  # endpoint hands the same queue head straight back — one persistently failing
+  # criterion would eat the whole cycle budget and nothing behind it would ever
+  # be reached. A criterion this cycle already failed (banked or withheld) is
+  # released untouched and the cycle ends; the next cycle retries it fresh.
+  failed_crits=" "
   n=0
   while [ "$n" -lt "$VALIDATE_MAX_PER_CYCLE" ]; do
     claim="$(sy_api_post "/api/v1/projects/$project/validations/claim" "$token" \
@@ -231,6 +238,14 @@ for rig in $VALIDATE_RIGS; do
       [ -n "$prd_id" ] && [ -n "$crit" ] && vs_release "$prd_id" "$crit" "$validator"
       break
     fi
+    case "$failed_crits" in *" $crit "*)
+      # The queue head is a criterion this cycle already failed; re-running it
+      # buys the same verdict again (issue 377). Release and end the cycle.
+      vs_release "$prd_id" "$crit" "$validator"
+      echo "validate-sweep: $project $crit -> already failed this cycle; queue head wedged, cycle ends"
+      break
+      ;;
+    esac
     HELD_PRD="$prd_id"; HELD_CRIT="$crit"; HELD_BY="$validator"
 
     ran_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -242,10 +257,21 @@ for rig in $VALIDATE_RIGS; do
     # prints "[no tests to run]". Treating that as a passing verdict banks a
     # `done` on work that was never built. Flip it to a failing run so the
     # criterion returns to the pool instead of being falsely signed off.
+    #
+    # Issue 377: the marker is judged per PACKAGE, not per run. A multi-package
+    # pattern (`go test ./... -run X` and friends) prints the marker for every
+    # package the pattern matches nothing in, even when the target package ran
+    # its tests and passed — grepping the whole output flipped genuinely
+    # passing runs to false fails. Vacuous means NO package ran a test: every
+    # `ok` package line carries the marker. One `ok` line without it is a real
+    # test execution and the exit code stands.
     no_tests_matched=""
     if [ "$code" -eq 0 ] && grep -qiF "no tests to run" "$out_file"; then
-      code=1
-      no_tests_matched="1"
+      ran_real="$(grep -E '^ok[[:space:]]' "$out_file" | grep -cviF "no tests to run")" || true
+      if [ "${ran_real:-0}" -eq 0 ]; then
+        code=1
+        no_tests_matched="1"
+      fi
     fi
 
     excerpt="$(tail -c 2000 "$out_file" 2>/dev/null)"
@@ -267,6 +293,7 @@ for rig in $VALIDATE_RIGS; do
       if [ -z "$evidence" ]; then
         vs_release "$prd_id" "$crit" "$validator"
         HELD_PRD=""; HELD_CRIT=""; HELD_BY=""
+        failed_crits="$failed_crits$crit "
         echo "validate-sweep: $project $crit -> fail WITHHELD (no merged delivery on record; released for re-claim after merge)"
         n=$((n + 1))
         continue
@@ -302,7 +329,7 @@ for rig in $VALIDATE_RIGS; do
 
     # done completes the stake; fail RELEASES it (see header). Derived, not
     # chosen: there is no code path that can pair a fail with `done`.
-    if [ "$verdict" = "done" ]; then act="done"; else act="release"; fi
+    if [ "$verdict" = "done" ]; then act="done"; else act="release"; failed_crits="$failed_crits$crit "; fi
     sy_api_post "/api/v1/prds/$prd_id/validations/action" "$token" \
       "$(jq -nc --arg c "$crit" --arg w "$validator" --arg a "$act" '{crit_label:$c, claimed_by:$w, action:$a}')" \
       >/dev/null 2>&1 || true

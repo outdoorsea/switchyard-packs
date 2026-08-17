@@ -2,7 +2,7 @@
   tdd-discipline — VENDORED VERBATIM from gastown.
 
   Upstream: gascity-packs, gastown/template-fragments/tdd-discipline.template.md
-  Pinned:   sha:637398502880f1a2a96a385f0d1b38b85343fa4e
+  Pinned:   sha:3b3b89f2011e06d84459aa7bea1552382f13930a
   sha256:   e8478e5fb438ef088182a3f6071b9f1f0bdde2365e10873a0e46074c98cc189f
 
   WHY A COPY RATHER THAN A CROSS-PACK REFERENCE. gc loads every imported pack's

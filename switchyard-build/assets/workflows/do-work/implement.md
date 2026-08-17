@@ -96,18 +96,18 @@ back explicitly:
     claim_action { kind: "bead", action: "release",
                    bead_id:    "<sy.pool.bead_id>",
                    claimed_by: "<sy.pool.claimed_by>",
-                   handoff_changed:              "...",
-                   handoff_verified_now:         "...",
-                   handoff_broken_or_unverified: "...",
-                   handoff_next_best_step:       "...",
-                   handoff_commands:             "...",
-                   handoff_repo_ref:             "<branch or commit SHA>" }
+                   handoff: { changed:              "...",
+                              verified_now:         "...",
+                              broken_or_unverified: "...",
+                              next_best_step:       "...",
+                              commands:             "...",
+                              repo_ref:             "<branch or commit SHA>" } }
 
 Release WITH a handoff, always. An abandoned item that simply goes quiet strands
 the criterion for the lease's full hour and then re-offers it to a worker who
 starts from zero — rediscovering the same blocker, in the same order, at the
 same cost. The handoff is the difference between the next session resuming and
-the next session repeating. Write `handoff_broken_or_unverified` honestly: a
+the next session repeating. Write the handoff's `broken_or_unverified` honestly: a
 half-built branch described as clean is worse than one described as broken.
 
 **Do not complete the bead from this step.** Completion belongs to the run's

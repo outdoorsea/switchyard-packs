@@ -235,7 +235,7 @@ saying the factory run abandoned the mapping:
     claim_action { kind: "bead", action: "release",
                    bead_id: "<pool-bead-id>",
                    claimed_by: "sy-build/{{prd_id}}/<pool-bead-id>",
-                   handoff_next_best_step: "...", handoff_broken_or_unverified: "..." }
+                   handoff: { next_best_step: "...", broken_or_unverified: "..." } }
 
 Never release a bead you skipped. A release you were not entitled to make is
 indistinguishable, from the pool's side, from stealing the claim.

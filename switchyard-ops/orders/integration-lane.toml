@@ -43,6 +43,13 @@
 #                                            LANE fault and ejects nobody.
 #   INTEGRATION_LANE_VERIFY_TIMEOUT   900    seconds, per verify attempt
 #   INTEGRATION_LANE_MAX_EJECTIONS    3      culprit ejections before giving up
+#   INTEGRATION_LANE_CI_REBUNDLES     1      after the BUNDLE'S OWN CI fails: eject
+#                                            the newest implicated constituent and
+#                                            re-bundle the rest, so one bad PR
+#                                            delays itself and not the set. Its own
+#                                            budget because each attempt costs a
+#                                            full CI wait, not one local verify.
+#                                            0 = report the first CI failure as-is.
 #   INTEGRATION_LANE_MERGE_POLLS      5      mergeability re-queries per PR
 #   INTEGRATION_LANE_LOCK_STALE_MIN   90     minutes before a lock is abandoned
 #   INTEGRATION_LANE_RIGS             ""     narrow to named rigs; empty = all

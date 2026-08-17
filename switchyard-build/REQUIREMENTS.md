@@ -19,7 +19,7 @@ that will satisfy it — this ledger never asserts evidence that does not exist.
 | Base contract | `gascity/REQUIREMENTS.md` (`gc.build-methodology-base.requirements.v1`) |
 | Base formula | `build-base` |
 | Upstream anchor | `GC-METH-012` |
-| Pinned base | `gascity-packs` `sha:637398502880f1a2a96a385f0d1b38b85343fa4e` |
+| Pinned base | `gascity-packs` `sha:3b3b89f2011e06d84459aa7bea1552382f13930a` |
 
 ## Divergence From The In-Tree Derived Packs
 
@@ -273,7 +273,7 @@ grep -c '^\[imports\.gc\]' packs/switchyard-build/pack.toml
 # NOTE: do not "simplify" this to `git ls-remote | grep <sha>`. ls-remote lists
 # REF TIPS only, so a pinned commit that is not a branch or tag head is absent
 # from its output — that check reports a false negative on a perfectly good pin.
-PIN=637398502880f1a2a96a385f0d1b38b85343fa4e
+PIN=3b3b89f2011e06d84459aa7bea1552382f13930a
 gh api "repos/gastownhall/gascity-packs/commits/$PIN" --jq .sha
 gh api "repos/gastownhall/gascity-packs/contents/gascity/pack.toml?ref=$PIN" --jq .path
 

@@ -96,6 +96,17 @@ has()  { grep -q  -- "$2" <<<"$1"; }
 hasi() { grep -qi -- "$2" <<<"$1"; }
 hasE() { grep -qE -- "$2" <<<"$1"; }
 
+# exclusion_reason <mail> <num> — the `excluded:` line exclude() wrote for ONE PR.
+#
+# Scoped deliberately. "The report does not blame #1" is meaningless asserted
+# against the whole mail, because #1 legitimately appears in the constituents
+# list of the bundle that shipped. The claim under test is about the reason
+# given for a SINGLE exclusion, so the assertion must read that line and nothing
+# else — otherwise it passes on unrelated text and proves nothing.
+exclusion_reason() { # <mail> <num>
+	awk -v n="$2" '$0 ~ ("^  #" n "  ") { getline; print; exit }' <<<"$1"
+}
+
 # ---------------------------------------------------------------------------
 # Fixture: a throwaway city, a real repo, stub gc + gh.
 #
@@ -150,6 +161,11 @@ new_city() {
 	# `pr view`   -> fixtures/merge.<n> (one line per successive read, so a case
 	#                can answer UNKNOWN first and MERGEABLE after — the lazy-read
 	#                fixture). Reads are counted in state/view.<n>.
+	#                A view of the BUNDLE's own pull request (matched by its
+	#                /pull/ URL) answers from fixtures/bundle-checks instead, on
+	#                the same successive-line rule — that is how a case makes the
+	#                integration branch's CI report PENDING first and settle
+	#                after, which is the whole thing the CI wait exists to do.
 	# `pr create` -> logged, echoes a URL
 	# `pr merge`  -> logged. Its presence in the log FAILS a case; the lane must
 	#                never merge.
@@ -161,13 +177,33 @@ new_city() {
 		    cat "$city/fixtures/prs.json" 2>/dev/null || printf '[]\n' ;;
 		  "pr view")
 		    n="\$3"
+		    case "\$n" in
+		      */pull/*)
+		        n=bundle-checks ; f="$city/fixtures/bundle-checks"
+		        # Observe the lane's own lock from inside the CI wait, then plant an
+		        # ancient timestamp. A run that keeps its lock alive overwrites this
+		        # before the next poll; one that does not leaves the 1 standing. See
+		        # case_ci_wait_keeps_the_lock_alive.
+		        cat "$city/state/integration-lane.$RIG.lock/started" \
+		          >> "$city/state/lock-seen.log" 2>/dev/null
+		        printf '1\n' > "$city/state/integration-lane.$RIG.lock/started" 2>/dev/null
+		        ;;
+		      *)        f="$city/fixtures/merge.\$n" ;;
+		    esac
 		    c=\$(cat "$city/state/view.\$n" 2>/dev/null || echo 0)
 		    c=\$((c + 1))
 		    printf '%s\n' "\$c" > "$city/state/view.\$n"
-		    line=\$(sed -n "\${c}p" "$city/fixtures/merge.\$n" 2>/dev/null)
+		    line=\$(sed -n "\${c}p" "\$f" 2>/dev/null)
 		    [ -n "\$line" ] && printf '%s\n' "\$line" && exit 0
-		    tail -n1 "$city/fixtures/merge.\$n" 2>/dev/null
+		    tail -n1 "\$f" 2>/dev/null
 		    ;;
+		  "repo view")
+		    # The repository's merge-button configuration. A case may make the read
+		    # FAIL, to prove the lane treats "cannot confirm" as "not allowed" rather
+		    # than rounding it up. Defaults to BOTH allowed — today's real repository
+		    # — so every other case is unaffected.
+		    [ -f "$city/fixtures/repo-view-fails" ] && { echo "gh: repo view refused" >&2; exit 1; }
+		    cat "$city/fixtures/repo.json" 2>/dev/null || printf '{"mergeCommitAllowed":true,"squashMergeAllowed":true}\n' ;;
 		  "pr create")
 		    printf '%s\n' "\$*" >> "$city/state/created.log"
 		    # A case may make creation fail, to prove the lane does not fall
@@ -176,11 +212,26 @@ new_city() {
 		    printf 'https://github.com/acme/demo/pull/999\n' ;;
 		  "pr merge")
 		    printf '%s\n' "\$*" >> "$city/state/merged.log" ;;
+		  "run view")
+		    # The failing job's log. This is the EVIDENCE half of attributing a CI
+		    # failure: the check's NAME says that something broke, its log says
+		    # WHAT — and the file paths in it are what tie the failure back to the
+		    # constituents that changed them.
+		    cat "$city/fixtures/ci-log" 2>/dev/null ;;
 		  *) : ;;
 		esac
 		exit 0
 	EOF
 	chmod +x "$city/bin/gh"
+
+	# Default CI answer for the bundle's own pull request: a settled, passing
+	# rollup. Same doctrine as add_pr's default MERGEABLE — the fixture's baseline
+	# is the healthy world, and a case that is ABOUT the unhealthy one overwrites
+	# it. Without a default every existing case would read as "the integration
+	# branch has no CI", which is a refusal, and the suite would go red for a
+	# reason none of those cases is about.
+	printf '{"statusCheckRollup":[{"name":"build & test","status":"COMPLETED","conclusion":"SUCCESS"}]}\n' \
+		> "$city/fixtures/bundle-checks"
 
 	printf '%s' "$city"
 }
@@ -204,6 +255,34 @@ touch_own()   { printf 'x\n' > "$1/pr-$2.txt"; }                      # independ
 edit_shared() { printf 'changed by %s\n' "$2" > "$1/shared.txt"; }    # conflicts
 bump_schema() { printf 'const schemaVersion = 101\n' > "$1/internal/db/dolt.go"; }
 
+# seed_wide <city> — a file with room for two FAR-APART edits, committed to main
+# before any branch is cut.
+#
+# Every other fixture here has its constituents touch private files, so any two
+# of them are related only by being in the same bundle. Real combination defects
+# are not like that: #1484 and #1503 both added fields to the same
+# `list_criteria` response rows, merged clean, and broke together. A suite whose
+# constituents never share a file cannot tell an attribution that identifies the
+# interacting pair from one that names the whole bundle.
+seed_wide() {
+	local repo="$1/$RIG" i
+	git -C "$repo" checkout --quiet main
+	for ((i = 1; i <= 40; i++)); do printf 'line %s\n' "$i"; done > "$repo/internal/db/wide.go"
+	git -C "$repo" add -A
+	git -C "$repo" commit --quiet -m "wide"
+	git -C "$repo" push --quiet origin main
+}
+# Two edits 37 lines apart: git merges them without a conflict, which is the
+# point — a conflict would be caught by the merge loop and never reach CI.
+edit_wide_top() {
+	awk 'NR==2 {print "edited near the top"; next} {print}' "$1/internal/db/wide.go" \
+		> "$1/internal/db/wide.go.tmp" && mv "$1/internal/db/wide.go.tmp" "$1/internal/db/wide.go"
+}
+edit_wide_bottom() {
+	awk 'NR==39 {print "edited near the bottom"; next} {print}' "$1/internal/db/wide.go" \
+		> "$1/internal/db/wide.go.tmp" && mv "$1/internal/db/wide.go.tmp" "$1/internal/db/wide.go"
+}
+
 # advance_main <city> <schemaVersion> — move main FORWARD after branches were cut.
 #
 # THE FIXTURE GAP THAT HID TWO REAL DEFECTS. Every case used to cut its branches
@@ -222,6 +301,12 @@ advance_main() {
 	git -C "$repo" add -A
 	git -C "$repo" commit --quiet -m "main advances to $ver"
 	git -C "$repo" push --quiet origin main
+}
+
+# merge_config <city> <mergeCommitAllowed> <squashMergeAllowed> — the repo's
+# merge-button configuration, as `gh repo view` reports it.
+merge_config() {
+	printf '{"mergeCommitAllowed":%s,"squashMergeAllowed":%s}\n' "$2" "$3" > "$1/fixtures/repo.json"
 }
 
 # queue <city> <json> — the `gh pr list` answer.
@@ -251,6 +336,7 @@ run_lane() {
 		GC_PACK_STATE_DIR="$city/state" \
 		INTEGRATION_LANE_RIGS="$RIG" \
 		INTEGRATION_LANE_MERGE_POLL_SLEEP=0 \
+		INTEGRATION_LANE_CI_POLL_SLEEP=0 \
 		"$@" \
 		"$SH" "$LANE" >"$city/state/run.out" 2>"$city/state/run.err" )
 }
@@ -369,6 +455,432 @@ case_combination_only_defect() {
 			"the verify is failing unconditionally, so case 2 proves nothing"
 	fi
 	rm -rf "$city" "$solo"
+}
+
+# bundle_checks <city> <json...> — the answers `gh pr view <bundle PR>` gives,
+# one per successive read, so a case can make CI report PENDING and then settle.
+bundle_checks() {
+	local city="$1"; shift
+	: > "$city/fixtures/bundle-checks"
+	local line
+	for line in "$@"; do printf '%s\n' "$line" >> "$city/fixtures/bundle-checks"; done
+}
+
+# A settled rollup with one check of the given conclusion.
+#
+# `detailsUrl` is what a real GitHub Actions rollup entry carries, and it is the
+# only handle on the run whose LOG says what actually broke — the check name
+# alone is "build & test failed", which names no file and therefore implicates
+# every constituent equally.
+rollup()  { printf '{"statusCheckRollup":[{"name":"build & test","status":"COMPLETED","conclusion":"%s","detailsUrl":"https://github.com/acme/demo/actions/runs/4242/job/77"}]}' "$1"; }
+
+# ci_log <city> <text...> — what `gh run view --log-failed` returns for the
+# bundle's failing job.
+ci_log() {
+	local city="$1"; shift
+	: > "$city/fixtures/ci-log"
+	local line
+	for line in "$@"; do printf '%s\n' "$line" >> "$city/fixtures/ci-log"; done
+}
+pending() { printf '{"statusCheckRollup":[{"name":"build & test","status":"IN_PROGRESS","conclusion":""}]}'; }
+no_checks() { printf '{"statusCheckRollup":[]}'; }
+
+# ---------------------------------------------------------------------------
+# 2b. The INTEGRATION BRANCH'S OWN CI is the run's verdict — not the local
+#     pre-flight, which is strictly weaker than the CI that judges the bundle.
+#
+# The local verify defaults to `go build && go vet`; ci.yml runs `go test ./...`
+# and a Dolt-backed suite besides. So a combination defect that surfaces as a
+# TEST failure — two PRs adding fields to the same response rows, the #1484 ×
+# #1503 class this PRD cites — passes the local verify. If the lane reports the
+# bundle green on that alone, a human is told "one merge is waiting for you"
+# about a bundle whose CI is RED, which is the false green this criterion is
+# about. The lane must read the branch's own CI result and fail the run on it.
+# ---------------------------------------------------------------------------
+case_bundle_ci_is_the_verdict() {
+	local city; city="$(new_city)"
+	add_pr "$city" 1 feat-1 touch_own
+	add_pr "$city" 2 feat-2 touch_own
+	queue "$city" "[$(pr_json 1 feat-1 "$(sha_of "$city" feat-1)"),$(pr_json 2 feat-2 "$(sha_of "$city" feat-2)")]"
+	# The local pre-flight PASSES. Everything below is decided by CI alone.
+	bundle_checks "$city" "$(rollup FAILURE)"
+	run_lane "$city" INTEGRATION_LANE_VERIFY='true'
+	local mail; mail="$(mail_of "$city")"
+
+	if hasi "$mail" 'one merge is waiting for you'; then
+		report FAIL "a red CI on the integration branch is not reported as a merge-ready bundle" \
+			"the mayor was told to merge a bundle whose CI failed"
+	else
+		report ok "a red CI on the integration branch is not reported as a merge-ready bundle"
+	fi
+	if hasi "$mail" "the integration branch's ci\|combination.*failed ci\|ci.*failed"; then
+		report ok "a red CI on the integration branch fails the run"
+	else
+		report FAIL "a red CI on the integration branch fails the run" \
+			"mail=$(printf '%s' "$mail" | head -10)"
+	fi
+	# The PR stays open: it is the evidence a human reads. The lane reports, it
+	# does not tidy away the thing that shows the failure.
+	if has "$(created_of "$city")" 'pr create'; then
+		report ok "the bundle pull request is still opened, so the failure is reviewable"
+	else
+		report FAIL "the bundle pull request is still opened, so the failure is reviewable" \
+			"no PR was created, so nobody can read the failing checks"
+	fi
+
+	# THE OTHER DIRECTION. Same lane, same local verify, CI green — otherwise the
+	# case above proves only that the lane can fail, not that CI decided it.
+	local ok_city; ok_city="$(new_city)"
+	add_pr "$ok_city" 1 feat-1 touch_own
+	add_pr "$ok_city" 2 feat-2 touch_own
+	queue "$ok_city" "[$(pr_json 1 feat-1 "$(sha_of "$ok_city" feat-1)"),$(pr_json 2 feat-2 "$(sha_of "$ok_city" feat-2)")]"
+	# PENDING first, then SUCCESS: proves the lane WAITS for a verdict instead of
+	# reading once and calling an unfinished run whatever it happened to see.
+	bundle_checks "$ok_city" "$(pending)" "$(rollup SUCCESS)"
+	run_lane "$ok_city" INTEGRATION_LANE_VERIFY='true'
+	if hasi "$(mail_of "$ok_city")" 'one merge is waiting for you'; then
+		report ok "a green CI on the integration branch is still handed to a human to merge"
+	else
+		report FAIL "a green CI on the integration branch is still handed to a human to merge" \
+			"mail=$(mail_of "$ok_city" | head -10)"
+	fi
+
+	# An EMPTY rollup is not success. PR #1346 read green on ZERO checks, which is
+	# why the candidate filter already refuses this — the bundle's own CI is the
+	# one place that mistake would be worst, since it is the measurement the whole
+	# lane exists to produce.
+	local none_city; none_city="$(new_city)"
+	add_pr "$none_city" 1 feat-1 touch_own
+	add_pr "$none_city" 2 feat-2 touch_own
+	queue "$none_city" "[$(pr_json 1 feat-1 "$(sha_of "$none_city" feat-1)"),$(pr_json 2 feat-2 "$(sha_of "$none_city" feat-2)")]"
+	bundle_checks "$none_city" "$(no_checks)"
+	run_lane "$none_city" INTEGRATION_LANE_VERIFY='true'
+	if hasi "$(mail_of "$none_city")" 'one merge is waiting for you'; then
+		report FAIL "an integration branch with NO checks is not rounded up to green" \
+			"zero checks were reported as a verified combination"
+	else
+		report ok "an integration branch with NO checks is not rounded up to green"
+	fi
+
+	rm -rf "$city" "$ok_city" "$none_city"
+}
+
+# ---------------------------------------------------------------------------
+# 2c. Waiting for CI does not make a live run look abandoned.
+#
+# The lock ages from a timestamp written when it was TAKEN, and a run past the
+# stale window is broken open by the next one. Adding a CI wait pushed the worst
+# case (four verifies at the 900s bound, then the CI budget) up against that
+# window, so a run could be sitting on a legitimate wait while a rival decides it
+# died and bundles the same PRs — the concurrent-bundle defect the lock exists to
+# prevent. Staleness has to mean "no progress", not "taking a while".
+# ---------------------------------------------------------------------------
+case_ci_wait_keeps_the_lock_alive() {
+	local city; city="$(new_city)"
+	add_pr "$city" 1 feat-1 touch_own
+	add_pr "$city" 2 feat-2 touch_own
+	queue "$city" "[$(pr_json 1 feat-1 "$(sha_of "$city" feat-1)"),$(pr_json 2 feat-2 "$(sha_of "$city" feat-2)")]"
+	# Three reads, so there is a poll AFTER the stub plants its ancient stamp.
+	bundle_checks "$city" "$(pending)" "$(pending)" "$(rollup SUCCESS)"
+	run_lane "$city" INTEGRATION_LANE_VERIFY='true'
+
+	local seen; seen="$(tail -n1 "$city/state/lock-seen.log" 2>/dev/null)"
+	# Count into a variable with an explicit 0 default: with the log absent the
+	# `wc -l <` redirect fails, `[ "" -lt 2 ]` errors instead of failing, and the
+	# regression this guard exists for would pass silently.
+	local polls; polls="$(grep -c '' "$city/state/lock-seen.log" 2>/dev/null || true)"
+	if [ "${polls:-0}" -lt 2 ]; then
+		report FAIL "the CI wait refreshes the lane's lock" \
+			"the lane polled CI fewer than twice, so this case proves nothing"
+	elif [ "$seen" = 1 ]; then
+		report FAIL "the CI wait refreshes the lane's lock" \
+			"the lock still carried the ancient stamp on a later poll — a waiting run reads as abandoned"
+	else
+		report ok "the CI wait refreshes the lane's lock, so a waiting run is not read as abandoned"
+	fi
+	rm -rf "$city"
+}
+
+# ---------------------------------------------------------------------------
+# 2d. A CI failure is attributed to the constituents that INTERACTED, not to
+#     the bundle as a whole.
+#
+# The local pre-flight failure path already attributes: it ejects a suspect and
+# names what that suspect broke beside (case 3+4 below). The CI path had no such
+# thing. It reported the failing CHECK NAMES — "build & test" — and told the
+# human to "let the next run rebuild without the culprit", which is the bundle
+# as a whole wearing the blame and a person doing the bisect by hand.
+#
+# That gap matters more than it looks, because CI is the run's REAL measurement.
+# The pre-flight is `go build && go vet`; ci.yml also runs the test suite. So the
+# combination defects this PRD is actually about — #1484 × #1503, two pull
+# requests adding fields to the same `list_criteria` response rows — are INVISIBLE
+# to the pre-flight and surface only here. The one path that finds them was the
+# one path that could not say who they were.
+#
+# There is no verify log to attribute from on this path, so attribution has to
+# come from the failing job's own log: the files it names, matched against what
+# each constituent changed.
+# ---------------------------------------------------------------------------
+case_ci_failure_is_attributed() {
+	local city; city="$(new_city)"
+	seed_wide "$city"
+	add_pr "$city" 1 feat-1 edit_wide_top
+	add_pr "$city" 2 feat-2 edit_wide_bottom
+	add_pr "$city" 3 feat-3 touch_own          # the bystander
+	queue "$city" "[$(pr_json 1 feat-1 "$(sha_of "$city" feat-1)"),$(pr_json 2 feat-2 "$(sha_of "$city" feat-2)"),$(pr_json 3 feat-3 "$(sha_of "$city" feat-3)")]"
+
+	# The local pre-flight PASSES. Everything here is decided by CI, exactly as
+	# the real #1484 × #1503 pair would be.
+	bundle_checks "$city" "$(rollup FAILURE)"
+	ci_log "$city" \
+		'--- FAIL: TestCriteriaRows (0.02s)' \
+		'    internal/db/wide.go:39: duplicate field on the response row' \
+		'FAIL	github.com/acme/demo/internal/db	0.4s'
+	run_lane "$city" INTEGRATION_LANE_VERIFY='true'
+	local mail; mail="$(mail_of "$city")"
+
+	local attr; attr="$(grep -m1 'CI failure attributed to' <<<"$mail")"
+	if [ -z "$attr" ]; then
+		report FAIL "a CI failure names the constituents that interacted" \
+			"nothing in the mail attributes the failure to anyone: $(printf '%s' "$mail" | head -14)"
+	elif has "$attr" '#1' && has "$attr" '#2'; then
+		report ok "a CI failure names the constituents that interacted"
+	else
+		report FAIL "a CI failure names the constituents that interacted" "attribution: $attr"
+	fi
+
+	# THE DISCRIMINATION, and the reason the bystander is in the fixture at all.
+	# Naming every constituent satisfies "names the pair" while attributing the
+	# defect to the bundle as a whole — the precise thing this criterion refuses.
+	# #3 shares no file with the failure and none with the other two.
+	if [ -n "$attr" ] && has "$attr" '#3'; then
+		report FAIL "a constituent the failure does not touch is not implicated" \
+			"#3 shares no file with the failure or with the pair, yet was named: $attr"
+	else
+		report ok "a constituent the failure does not touch is not implicated"
+	fi
+
+	# WHAT BROKE — the second half of the criterion. A check name is not a defect.
+	if has "$mail" 'wide.go' && hasi "$mail" 'duplicate field'; then
+		report ok "the report carries what broke, not only that CI was red"
+	else
+		report FAIL "the report carries what broke, not only that CI was red" \
+			"mail=$(printf '%s' "$mail" | head -24)"
+	fi
+
+	# NO FABRICATION. A failing check whose log implicates nobody must say so.
+	# This lane has a scar here: a missing `templ generate` once produced
+	# confident "it builds alone but not beside #X" attributions against innocent
+	# pull requests every single run. A named innocent is worse than no name, so
+	# the honest answer has to be reachable and has to be said out loud.
+	local blind; blind="$(new_city)"
+	add_pr "$blind" 1 feat-1 touch_own
+	add_pr "$blind" 2 feat-2 touch_own
+	queue "$blind" "[$(pr_json 1 feat-1 "$(sha_of "$blind" feat-1)"),$(pr_json 2 feat-2 "$(sha_of "$blind" feat-2)")]"
+	bundle_checks "$blind" "$(rollup FAILURE)"
+	ci_log "$blind" 'Error: the runner ran out of disk space'
+	run_lane "$blind" INTEGRATION_LANE_VERIFY='true'
+	local bmail; bmail="$(mail_of "$blind")"
+	if hasi "$bmail" 'could not attribute'; then
+		report ok "a failure that implicates nobody says so rather than guessing"
+	else
+		report FAIL "a failure that implicates nobody says so rather than guessing" \
+			"mail=$(printf '%s' "$bmail" | head -24)"
+	fi
+	if grep -qE '#[12].*(interact|attributed)' <<<"$bmail"; then
+		report FAIL "an unattributable failure names no suspect" \
+			"a pair was invented from a log that names no constituent's file"
+	else
+		report ok "an unattributable failure names no suspect"
+	fi
+
+	rm -rf "$city" "$blind"
+}
+
+# ---------------------------------------------------------------------------
+# 2e. A CI failure EJECTS a constituent and re-bundles the remainder, so one bad
+#     pull request delays itself rather than the whole set.
+#
+# Attribution (2d) names the pair; on its own it does not unblock anybody. When
+# the bundle's CI came back red the run stopped there: the bundle sat red, and
+# every constituent — including the ones the failure never touched — waited for a
+# human to bisect by hand. That is one bad pull request delaying the whole set,
+# at the layer this PRD calls the run's REAL measurement. The local pre-flight
+# path has ejected and re-bundled since the lane shipped (case 3+4 below); this
+# is the same guarantee on the path that actually finds the defects.
+#
+# EXACTLY ONE constituent is ejected, and that is the point rather than an
+# optimisation. The implicated SET here is the interacting PAIR, and ejecting
+# both would delay two pull requests to fix an interaction that breaking either
+# half resolves. Ejecting the newest of them leaves the older one shipping.
+#
+# The fixture is the real #1484 × #1503 shape: two pull requests editing the same
+# file far apart (git merges them clean, so the merge loop cannot catch it), plus
+# a bystander that shares nothing. The bystander is what separates "re-bundled
+# the remainder" from "gave up on the set".
+# ---------------------------------------------------------------------------
+case_ci_failure_ejects_and_rebundles() {
+	local city; city="$(new_city)"
+	seed_wide "$city"
+	add_pr "$city" 1 feat-1 edit_wide_top
+	add_pr "$city" 2 feat-2 edit_wide_bottom
+	add_pr "$city" 3 feat-3 touch_own          # the bystander
+	queue "$city" "[$(pr_json 1 feat-1 "$(sha_of "$city" feat-1)"),$(pr_json 2 feat-2 "$(sha_of "$city" feat-2)"),$(pr_json 3 feat-3 "$(sha_of "$city" feat-3)")]"
+
+	# Three successive reads of the bundle's checks: the first bundle's VERDICT,
+	# the second read `ci_failure_log` makes to find the failing run, and then the
+	# REPLACEMENT bundle's verdict. The replacement is green — which is the whole
+	# claim, since the remainder was never what was broken.
+	bundle_checks "$city" "$(rollup FAILURE)" "$(rollup FAILURE)" "$(rollup SUCCESS)"
+	ci_log "$city" \
+		'--- FAIL: TestCriteriaRows (0.02s)' \
+		'    internal/db/wide.go:39: duplicate field on the response row' \
+		'FAIL	github.com/acme/demo/internal/db	0.4s'
+	# The local pre-flight passes throughout: everything here is decided by CI.
+	run_lane "$city" INTEGRATION_LANE_VERIFY='true'
+	local mail; mail="$(mail_of "$city")"
+	local created; created="$(created_of "$city")"
+
+	# 1. A SECOND bundle was opened. Without this the run merely reported.
+	local n_created; n_created="$(grep -c 'pr create' <<<"$created")"
+	if [ "${n_created:-0}" -ge 2 ]; then
+		report ok "a CI-failed bundle is followed by a re-bundle of the remainder"
+	else
+		report FAIL "a CI-failed bundle is followed by a re-bundle of the remainder" \
+			"only $n_created bundle(s) were opened; the remainder was left waiting on a human"
+	fi
+
+	# 2. The ejected constituent is named, with the CI failure as its reason.
+	if has "$mail" '#2' && hasi "$mail" 'ejected'; then
+		report ok "the ejected constituent is named with its reason"
+	else
+		report FAIL "the ejected constituent is named with its reason" \
+			"mail=$(printf '%s' "$mail" | head -20)"
+	fi
+
+	# 3. THE SHIPPED BUNDLE. The other half of the pair and the bystander are both
+	#    in it, and the ejected one is not — asserted on the real branch in the
+	#    real origin, not on the prose of the mail.
+	local origin="$city/origin.git" b found=""
+	for b in $(git -C "$origin" for-each-ref --format='%(refname:short)' 'refs/heads/integration/*'); do
+		if git -C "$origin" merge-base --is-ancestor "$(sha_of "$city" feat-1)" "$b" \
+			&& git -C "$origin" merge-base --is-ancestor "$(sha_of "$city" feat-3)" "$b" \
+			&& ! git -C "$origin" merge-base --is-ancestor "$(sha_of "$city" feat-2)" "$b"; then
+			found="$b"
+		fi
+	done
+	if [ -n "$found" ]; then
+		report ok "the remainder ships without the ejected pull request"
+	else
+		report FAIL "the remainder ships without the ejected pull request" \
+			"no integration branch carries #1 and #3 but not #2 (branches: $(git -C "$origin" for-each-ref --format='%(refname:short)' 'refs/heads/integration/*' | tr '\n' ' '))"
+	fi
+
+	# 4. The run ends by handing a human the bundle that IS mergeable.
+	if hasi "$mail" 'one merge is waiting for you'; then
+		report ok "the re-bundled remainder is handed to a human to merge"
+	else
+		report FAIL "the re-bundled remainder is handed to a human to merge" \
+			"mail=$(printf '%s' "$mail" | head -20)"
+	fi
+
+	# 5. The superseded red bundle does not stay open competing for the same merge.
+	#    Two open bundles containing overlapping constituents is an invitation to
+	#    merge the red one, which would land the very pull request just ejected.
+	if has "$(cat "$city/state/gh.log" 2>/dev/null)" 'pr close'; then
+		report ok "the superseded red bundle is closed rather than left competing"
+	else
+		report FAIL "the superseded red bundle is closed rather than left competing" \
+			"the red bundle is still open beside its replacement"
+	fi
+
+	# 6. The FIRST attribution survives into the report. The run's story is both
+	#    failures; overwriting it with the latest would lose the pair that started
+	#    it, which is the fact a human needs most.
+	if has "$(grep -m1 'CI failure attributed to' <<<"$mail")" '#2'; then
+		report ok "the attribution that caused the ejection is still reported"
+	else
+		report FAIL "the attribution that caused the ejection is still reported" \
+			"mail=$(printf '%s' "$mail" | head -20)"
+	fi
+
+	# 7. NO FABRICATION, and this is the discrimination that makes the case mean
+	#    something. A CI failure whose log implicates nobody must eject NOBODY —
+	#    ejecting on no evidence is how the lane's old missing-`templ generate` bug
+	#    threw innocent pull requests out of every bundle, and a re-bundle makes
+	#    that worse by shipping the set minus an innocent.
+	local blind; blind="$(new_city)"
+	add_pr "$blind" 1 feat-1 touch_own
+	add_pr "$blind" 2 feat-2 touch_own
+	queue "$blind" "[$(pr_json 1 feat-1 "$(sha_of "$blind" feat-1)"),$(pr_json 2 feat-2 "$(sha_of "$blind" feat-2)")]"
+	bundle_checks "$blind" "$(rollup FAILURE)" "$(rollup FAILURE)" "$(rollup SUCCESS)"
+	ci_log "$blind" 'Error: the runner ran out of disk space'
+	run_lane "$blind" INTEGRATION_LANE_VERIFY='true'
+	local bcreated; bcreated="$(grep -c 'pr create' <<<"$(created_of "$blind")")"
+	if [ "${bcreated:-0}" -le 1 ]; then
+		report ok "an unattributable CI failure ejects nobody and does not re-bundle"
+	else
+		report FAIL "an unattributable CI failure ejects nobody and does not re-bundle" \
+			"a constituent was ejected on a log that names none of them"
+	fi
+	# Matched on an ejection CLAIM, not on the word: the lane says "Nothing was
+	# ejected: the failing job's log names no file any constituent changed", and
+	# that sentence is the behaviour under test rather than a violation of it.
+	# A bare `ejected` here would fail the lane for reporting honestly.
+	if hasE "$(mail_of "$blind")" 'Ejected #|excluded: ejected after the bundle'; then
+		report FAIL "an unattributable CI failure names no ejected suspect" \
+			"mail=$(mail_of "$blind" | head -20)"
+	else
+		report ok "an unattributable CI failure names no ejected suspect"
+	fi
+	# And it says so out loud, rather than leaving a human to notice that a red
+	# bundle simply stopped.
+	if hasi "$(mail_of "$blind")" 'nothing was ejected'; then
+		report ok "a CI failure with no attribution says why nobody was ejected"
+	else
+		report FAIL "a CI failure with no attribution says why nobody was ejected" \
+			"mail=$(mail_of "$blind" | head -20)"
+	fi
+
+	rm -rf "$city" "$blind"
+}
+
+# ---------------------------------------------------------------------------
+# 2f. Opting out of the CI wait must not claim the CI's verdict.
+#
+# INTEGRATION_LANE_CI_POLLS=0 is the documented opt-out: the run reports on the
+# pre-flight alone and gives up the combination guarantee. The mail must SAY so.
+# A green mail that still read "green on the integration branch's own CI" would
+# be the false-green this layer exists to end, minted by configuration instead
+# of by an empty rollup.
+# ---------------------------------------------------------------------------
+case_ci_polls_zero_says_preflight_only() {
+	local city; city="$(new_city)"
+	add_pr "$city" 1 feat-1 touch_own
+	add_pr "$city" 2 feat-2 touch_own
+	queue "$city" "[$(pr_json 1 feat-1 "$(sha_of "$city" feat-1)"),$(pr_json 2 feat-2 "$(sha_of "$city" feat-2)")]"
+	run_lane "$city" INTEGRATION_LANE_VERIFY='true' INTEGRATION_LANE_CI_POLLS=0
+	local mail; mail="$(mail_of "$city")"
+	if hasi "$mail" 'one merge is waiting for you'; then
+		report ok "POLLS=0: a clean bundle still ships and is handed to a human"
+	else
+		report FAIL "POLLS=0: a clean bundle still ships and is handed to a human" \
+			"mail=$(printf '%s' "$mail" | head -10)"
+	fi
+	if hasi "$mail" "green on the integration branch's own CI"; then
+		report FAIL "POLLS=0: the green mail claims no CI verdict it never read" \
+			"the mail asserts the integration branch's own CI, but the wait was skipped by config"
+	else
+		report ok "POLLS=0: the green mail claims no CI verdict it never read"
+	fi
+	if hasi "$mail" 'pre-flight only'; then
+		report ok "POLLS=0: the green mail states the pre-flight was the only check"
+	else
+		report FAIL "POLLS=0: the green mail states the pre-flight was the only check" \
+			"mail=$(printf '%s' "$mail" | head -10)"
+	fi
+	rm -rf "$city"
 }
 
 # ---------------------------------------------------------------------------
@@ -782,7 +1294,181 @@ case_silent_when_nothing_to_add() {
 }
 
 # ---------------------------------------------------------------------------
-# 11. Static guards — claims a runtime case cannot fully establish.
+# 11. A merge CONFLICT is attributed to the pair that collided, not the bundle.
+#
+# THE FIXTURE GAP THIS CLOSES. Every other case builds its PRs with `touch_own`,
+# which edits disjoint files by construction, so the merge loop's conflict
+# branch was never executed by any case in this file. The one case that uses
+# `edit_shared` (case_exclusions_are_named) declares its PR CONFLICTING in the
+# `gh` fixture, so requery_mergeable filters it out BEFORE the merge loop and it
+# never reaches the conflict path either.
+#
+# The conflict that matters is the one the forge cannot see. Both PRs re-query
+# as MERGEABLE because each merges clean against `main` ALONE; they collide only
+# with each other. That is a combination-only defect in exactly the sense this
+# lane exists to catch, and it is the most common one in a busy queue.
+# ---------------------------------------------------------------------------
+case_merge_conflict_names_the_counterpart() {
+	local city; city="$(new_city)"
+	add_pr "$city" 1 feat-1 touch_own       # innocent: only ever touches pr-1.txt
+	add_pr "$city" 2 shared-2 edit_shared   # these two both ADD shared.txt with
+	add_pr "$city" 3 shared-3 edit_shared   # different content -> add/add conflict
+	queue "$city" "[\
+$(pr_json 1 feat-1 "$(sha_of "$city" feat-1)"),\
+$(pr_json 2 shared-2 "$(sha_of "$city" shared-2)"),\
+$(pr_json 3 shared-3 "$(sha_of "$city" shared-3)")]"
+
+	# Every fixture answers MERGEABLE. add_pr's default is what makes this case
+	# meaningful: the collision is invisible to the forge and appears only when
+	# the lane puts them on one branch.
+	run_lane "$city" INTEGRATION_LANE_VERIFY='true'
+
+	local mail; mail="$(mail_of "$city")"
+	local reason; reason="$(exclusion_reason "$mail" 3)"
+
+	if [ -n "$reason" ]; then
+		report ok "a constituent that conflicts inside the bundle is excluded and named"
+	else
+		report FAIL "a constituent that conflicts inside the bundle is excluded and named" \
+			"mail=$(printf '%s' "$mail" | head -25)"
+	fi
+
+	# THE CRITERION. #3 collided with #2 over shared.txt. #1 was already merged
+	# at that moment but touched nothing #3 touched, so naming "#2" is a pair and
+	# naming "#1, #2" is the bundle-so-far wearing the blame collectively.
+	if has "$reason" '#2'; then
+		report ok "the conflict names the constituent it actually collided with"
+	else
+		report FAIL "the conflict names the constituent it actually collided with" \
+			"reason=$reason"
+	fi
+	if has "$reason" '#1'; then
+		report FAIL "the conflict does not blame a constituent that touched nothing it touched" \
+			"reason=$reason"
+	else
+		report ok "the conflict does not blame a constituent that touched nothing it touched"
+	fi
+
+	# "and what broke" — the conflicted path, not merely the fact of a conflict.
+	if has "$mail" 'shared.txt'; then
+		report ok "the conflicting path is reported, so what broke is legible"
+	else
+		report FAIL "the conflicting path is reported, so what broke is legible" \
+			"mail=$(printf '%s' "$mail" | head -25)"
+	fi
+
+	# The remainder still ships: a conflict delays its own PR, not the queue.
+	if has "$(created_of "$city")" 'pr create'; then
+		report ok "the constituents that did not conflict are still bundled"
+	else
+		report FAIL "the constituents that did not conflict are still bundled"
+	fi
+	rm -rf "$city"
+}
+
+# ---------------------------------------------------------------------------
+# 11b. A conflict with the BASE is not a combination failure, and says so.
+#
+# The counterpart search can come back empty, and the report must not round that
+# up to a pair. The reachable way to produce it: a stale MERGEABLE answer admits
+# a PR that no longer merges against `main`, and it is the FIRST constituent, so
+# nothing else is on the branch to have collided with it. Blaming the bundle
+# there would be a FABRICATED combination defect — the exact failure the
+# prepare-failure case guards on the verify side, on the conflict side.
+# ---------------------------------------------------------------------------
+case_conflict_with_base_implicates_nobody() {
+	local city; city="$(new_city)"
+	local repo="$city/$RIG"
+	add_pr "$city" 1 shared-1 edit_shared
+	add_pr "$city" 2 feat-2 touch_own
+
+	# main moves under the open PR and lands its own shared.txt, so #1's branch
+	# and `main` now both ADD that path from a merge-base that has neither.
+	git -C "$repo" checkout --quiet main
+	printf 'changed by main\n' > "$repo/shared.txt"
+	git -C "$repo" add -A
+	git -C "$repo" commit --quiet -m "main lands shared.txt"
+	git -C "$repo" push --quiet origin main
+
+	# The fixture still answers MERGEABLE for #1 — that staleness is the point.
+	queue "$city" "[$(pr_json 1 shared-1 "$(sha_of "$city" shared-1)"),$(pr_json 2 feat-2 "$(sha_of "$city" feat-2)")]"
+	run_lane "$city" INTEGRATION_LANE_VERIFY='true'
+
+	local mail; mail="$(mail_of "$city")"
+	local reason; reason="$(exclusion_reason "$mail" 1)"
+
+	if has "$reason" 'shared.txt'; then
+		report ok "a conflict against the base still reports the path that broke"
+	else
+		report FAIL "a conflict against the base still reports the path that broke" \
+			"reason=$reason mail=$(printf '%s' "$mail" | head -20)"
+	fi
+	# THE CLAIM. Nothing had been merged yet, so no constituent can be implicated
+	# and none may be named.
+	if has "$reason" '#2'; then
+		report FAIL "a conflict with the base implicates no other pull request" \
+			"reason=$reason"
+	else
+		report ok "a conflict with the base implicates no other pull request"
+	fi
+	if hasi "$mail" 'not a combination failure'; then
+		report ok "a conflict with the base is not reported as a combination failure"
+	else
+		report FAIL "a conflict with the base is not reported as a combination failure" \
+			"mail=$(printf '%s' "$mail" | head -20)"
+	fi
+	rm -rf "$city"
+}
+
+# ---------------------------------------------------------------------------
+# 12. The ejection ceiling must not swallow the evidence.
+#
+# The attribution/log write sits AFTER the ceiling test inside the loop, so when
+# `ejections >= INTEGRATION_LANE_MAX_EJECTIONS` the loop breaks before anything
+# is recorded. At the default ceiling of 3 that costs only the FINAL attempt's
+# log — three earlier ones are already in notes. At 0 it costs every line, and
+# the mail then asserts "each green alone and BROKEN TOGETHER" while showing
+# neither a pair nor a single line of build output.
+# ---------------------------------------------------------------------------
+case_ceiling_break_reports_output() {
+	local city; city="$(new_city)"
+	add_pr "$city" 1 feat-1 touch_own
+	add_pr "$city" 2 feat-2 touch_own
+	queue "$city" "[$(pr_json 1 feat-1 "$(sha_of "$city" feat-1)"),$(pr_json 2 feat-2 "$(sha_of "$city" feat-2)")]"
+
+	# A verify that SAYS something before it fails, so "was the output kept?" is
+	# a question this fixture can actually answer. combo_verify alone is silent.
+	#
+	# THE MARKER IS SPLIT ON PURPOSE. The mail echoes the verify COMMAND back at
+	# the reader ("Combination verify: ..."), so a plain marker matches that line
+	# and the assertion passes even when the lane discarded every line of output
+	# — which is exactly what it did when this case was first written. Splitting
+	# the literal means the string exists only after `sh -c` evaluates it, so a
+	# match can have come from nowhere but the captured output.
+	run_lane "$city" \
+		INTEGRATION_LANE_VERIFY="echo \"LANE_\"\"VERIFY_BROKE\"; $(combo_verify pr-1.txt pr-2.txt)" \
+		INTEGRATION_LANE_MAX_EJECTIONS=0
+
+	local mail; mail="$(mail_of "$city")"
+	if has "$mail" 'LANE_VERIFY_BROKE'; then
+		report ok "a run stopped by the ejection ceiling still reports what broke"
+	else
+		report FAIL "a run stopped by the ejection ceiling still reports what broke" \
+			"mail=$(printf '%s' "$mail" | head -25)"
+	fi
+	# And it says WHY it could narrow no further, rather than presenting the
+	# whole set as collectively guilty with no explanation.
+	if hasi "$mail" 'ejection ceiling'; then
+		report ok "the ceiling is named as the reason the failure was not narrowed"
+	else
+		report FAIL "the ceiling is named as the reason the failure was not narrowed" \
+			"mail=$(printf '%s' "$mail" | head -25)"
+	fi
+	rm -rf "$city"
+}
+
+# ---------------------------------------------------------------------------
+# 13. Static guards — claims a runtime case cannot fully establish.
 # ---------------------------------------------------------------------------
 case_static_guards() {
 	# NEVER MERGES, in the strong form. The dynamic check in case 1 proves the
@@ -875,10 +1561,145 @@ case_create_failure_is_reported() {
 	rm -rf "$city"
 }
 
+# ---------------------------------------------------------------------------
+# 12. The bundle must be mergeable AS A MERGE COMMIT, or it is a trap.
+#
+# Each constituent auto-closes because its own head commit becomes REACHABLE
+# from the base when the bundle merges — which is why the lane merges every
+# constituent with --no-ff. That reachability survives a merge commit and
+# nothing else: a squash or a rebase rewrites those commits away, so the bundle
+# would land and leave every constituent OPEN with its code already on main,
+# each looking unmerged. That is the precise outcome this criterion forbids.
+#
+# So a repository whose merge-commit button is disabled cannot receive this
+# bundle at all, and the body's "MERGE THIS WITH A MERGE COMMIT" is then an
+# instruction nobody can follow. Asserted from BOTH sides: the impossible case
+# refuses before pushing anything, and the possible case still ships.
+# ---------------------------------------------------------------------------
+case_merge_commit_is_required() {
+	local city created mail left
+
+	# (a) Merge commits DISABLED — refuse, and refuse before littering origin.
+	city="$(new_city)"
+	add_pr "$city" 1 feat-1 touch_own
+	add_pr "$city" 2 feat-2 touch_own
+	merge_config "$city" false true
+	queue "$city" "[$(pr_json 1 feat-1 "$(sha_of "$city" feat-1)"),$(pr_json 2 feat-2 "$(sha_of "$city" feat-2)")]"
+	run_lane "$city" INTEGRATION_LANE_VERIFY='true'
+
+	if [ -z "$(created_of "$city")" ]; then
+		report ok "merge commits disabled: no bundle pull request is opened"
+	else
+		report FAIL "merge commits disabled: no bundle pull request is opened" \
+			"created=$(created_of "$city" | head -2)"
+	fi
+	left=$(git -C "$city/origin.git" for-each-ref --format='%(refname:short)' 'refs/heads/integration/*')
+	if [ -z "$left" ]; then
+		report ok "merge commits disabled: nothing is pushed to origin"
+	else
+		report FAIL "merge commits disabled: nothing is pushed to origin" "left=$left"
+	fi
+	mail="$(mail_of "$city")"
+	# NOT `hasi "$mail" "merge commit"`. The ordinary GREEN mail already says
+	# "Merge it with a MERGE COMMIT, not a squash", so that assertion passes
+	# without the refusal ever happening — it was green before this gate existed.
+	# Assert the two things only a REFUSAL produces: no bundle is announced as
+	# ready, and the blocked setting is named.
+	if hasi "$mail" 'one merge is waiting for you'; then
+		report FAIL "merge commits disabled: the run is not announced as a bundle ready to merge" \
+			"mail=$(printf '%s' "$mail" | head -10)"
+	else
+		report ok "merge commits disabled: the run is not announced as a bundle ready to merge"
+	fi
+	if hasi "$mail" 'disabled'; then
+		report ok "merge commits disabled: the mail names the merge-commit button as the blocker"
+	else
+		report FAIL "merge commits disabled: the mail names the merge-commit button as the blocker" \
+			"mail=$(printf '%s' "$mail" | head -10)"
+	fi
+	rm -rf "$city"
+
+	# (b) The setting cannot be READ. "Cannot confirm" is not "allowed" — the same
+	# fail-closed choice the empty check rollup and the empty `gh pr list` make.
+	city="$(new_city)"
+	add_pr "$city" 1 feat-1 touch_own
+	add_pr "$city" 2 feat-2 touch_own
+	: > "$city/fixtures/repo-view-fails"
+	queue "$city" "[$(pr_json 1 feat-1 "$(sha_of "$city" feat-1)"),$(pr_json 2 feat-2 "$(sha_of "$city" feat-2)")]"
+	run_lane "$city" INTEGRATION_LANE_VERIFY='true'
+	left=$(git -C "$city/origin.git" for-each-ref --format='%(refname:short)' 'refs/heads/integration/*')
+	if [ -z "$left" ]; then
+		report ok "merge-commit setting unreadable: nothing is pushed to origin"
+	else
+		report FAIL "merge-commit setting unreadable: nothing is pushed to origin" "left=$left"
+	fi
+	if [ -z "$(created_of "$city")" ]; then
+		report ok "merge-commit setting unreadable: no bundle pull request is opened"
+	else
+		report FAIL "merge-commit setting unreadable: no bundle pull request is opened" \
+			"created=$(created_of "$city" | head -2)"
+	fi
+	mail="$(mail_of "$city")"
+	if hasi "$mail" 'could not'; then
+		report ok "merge-commit setting unreadable: the run says it could not confirm, rather than going quiet"
+	else
+		report FAIL "merge-commit setting unreadable: the run says it could not confirm, rather than going quiet" \
+			"mail=$(printf '%s' "$mail" | head -10)"
+	fi
+	rm -rf "$city"
+
+	# (c) Squash DISABLED — the bundle still ships, and the body must not offer a
+	# button this repository does not have.
+	city="$(new_city)"
+	add_pr "$city" 1 feat-1 touch_own
+	add_pr "$city" 2 feat-2 touch_own
+	merge_config "$city" true false
+	queue "$city" "[$(pr_json 1 feat-1 "$(sha_of "$city" feat-1)"),$(pr_json 2 feat-2 "$(sha_of "$city" feat-2)")]"
+	run_lane "$city" INTEGRATION_LANE_VERIFY='true'
+	created="$(created_of "$city")"
+	if [ -n "$created" ]; then
+		report ok "merge commits allowed: the bundle pull request is opened"
+	else
+		report FAIL "merge commits allowed: the bundle pull request is opened" \
+			"run.err=$(tail -3 "$city/state/run.err" 2>/dev/null)"
+	fi
+	if hasi "$created" 'allows squash merging'; then
+		report FAIL "squash disabled: the body does not offer a squash button that is not there"
+	else
+		report ok "squash disabled: the body does not offer a squash button that is not there"
+	fi
+	if hasi "$created" 'Squash merging is disabled here'; then
+		report ok "squash disabled: the body states that squash merging is disabled"
+	else
+		report FAIL "squash disabled: the body states that squash merging is disabled"
+	fi
+	rm -rf "$city"
+
+	# (d) Both allowed — today's real repository. The squash warning must stay.
+	city="$(new_city)"
+	add_pr "$city" 1 feat-1 touch_own
+	add_pr "$city" 2 feat-2 touch_own
+	merge_config "$city" true true
+	queue "$city" "[$(pr_json 1 feat-1 "$(sha_of "$city" feat-1)"),$(pr_json 2 feat-2 "$(sha_of "$city" feat-2)")]"
+	run_lane "$city" INTEGRATION_LANE_VERIFY='true'
+	created="$(created_of "$city")"
+	if hasi "$created" 'squash'; then
+		report ok "squash allowed: the body warns that the wrong button is right there"
+	else
+		report FAIL "squash allowed: the body warns that the wrong button is right there"
+	fi
+	rm -rf "$city"
+}
+
 echo "integration-lane self-test (sh=$SH)"
 echo
 case_bundles_and_tests_the_combination
 case_combination_only_defect
+case_bundle_ci_is_the_verdict
+case_ci_wait_keeps_the_lock_alive
+case_ci_failure_is_attributed
+case_ci_failure_ejects_and_rebundles
+case_ci_polls_zero_says_preflight_only
 case_ejects_culprit_and_rebundles
 case_requeries_mergeability
 case_exclusions_are_named
@@ -891,6 +1712,10 @@ case_default_prepare_handles_templ
 case_create_failure_is_reported
 case_concurrent_runs_are_excluded
 case_silent_when_nothing_to_add
+case_merge_commit_is_required
+case_merge_conflict_names_the_counterpart
+case_conflict_with_base_implicates_nobody
+case_ceiling_break_reports_output
 case_static_guards
 
 echo

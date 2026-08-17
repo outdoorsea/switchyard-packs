@@ -305,6 +305,23 @@ PR alone": a rename that git merges perfectly cleanly and then fails to build,
 and a `schemaVersion` collision between two PRs that each bumped to the same
 number.
 
+**The run's verdict is the integration branch's own CI, not the local
+pre-flight.** Those are two different measurements and the difference decides
+what a human is told. The pre-flight (`INTEGRATION_LANE_VERIFY`) defaults to
+`go build ./... && go vet ./...` — it must finish inside the run so a culprit can
+be *attributed* and ejected, and the full `go test ./...` cannot: `internal/db`
+and `internal/dashboard` hang for tens of minutes against the reachable local
+Dolt a lane run always has. CI has no such database and runs the whole suite. So
+the lane opens the bundle, then **waits for that pull request's checks** and
+reports what they say: a combination defect that only shows up as a *test*
+failure — #1484 × #1503, two PRs adding fields to the same `list_criteria` rows —
+is invisible to the pre-flight and caught only here. A red rollup fails the run
+and says *do not merge*; a rollup that is still empty or unfinished when the wait
+runs out is reported as **unmeasured**, never rounded up to green. Budget:
+`INTEGRATION_LANE_CI_POLLS` × `INTEGRATION_LANE_CI_POLL_SLEEP` (60 × 30s), sized
+under the stale-lock window; set the first to `0` to skip the wait and give up
+the guarantee.
+
 **The lane never merges.** Decided in PRD #340 question 305 and pinned by a
 criterion, and it is a positive choice rather than a half-built step. The value
 is the combination test, which is fully delivered without touching the production
@@ -316,7 +333,7 @@ What it hands a human is one pull request whose checks are the only ones in the
 repo that measure a merge **result**, plus a report naming every PR it excluded
 and why. Nothing falls out of a bundle silently: a draft, a failing check, an
 empty check rollup (PR #1346 read green on *zero* checks, so an empty rollup is
-refused rather than rounded up), a conflict with the rest of the set, a
+refused rather than rounded up), a conflict with a **named** constituent, a
 `schemaVersion` collision, or simply not fitting the bundle size — each is
 reported with its reason. A run that finds fewer than two mergeable PRs has no
 combination to test, so it creates no branch and sends no mail.
@@ -327,13 +344,79 @@ combination to test, so it creates no branch and sends no mail.
 > lands. A squash flattens those commits away: the bundle merges and leaves eight
 > PRs open, each looking unmerged with its code already on `main`. This
 > repository allows squash merging, so the wrong button is right there — the
-> bundle's own body says so too.
+> bundle's own body says so too, and says it from the repository's *actual*
+> configuration rather than asserting it.
+>
+> The lane will not build a bundle a repository cannot merge that way. It reads
+> `mergeCommitAllowed` **before pushing anything**, and if the merge-commit
+> button is disabled — or the setting cannot be read at all — it builds no
+> bundle and mails the mayor the one-line fix
+> (`gh api -X PATCH repos/<slug> -f allow_merge_commit=true`). "Cannot confirm"
+> is treated as "not allowed", the same way an empty check rollup is refused
+> rather than rounded up to success.
 
 When the combination fails, the lane ejects its prime suspect and re-verifies, so
 one bad PR delays *itself* rather than the whole set, and the report attributes
 the break to the pull requests that **interacted** rather than to the bundle as a
 whole. A `mkdir` lock (atomic, unlike test-then-create on a lock file) keeps two
 runs from bundling overlapping sets and racing on the branch.
+
+**Both failure layers name a culprit, by different means.** The pre-flight can
+eject-and-re-verify, so a wrong guess is corrected within the run. CI cannot be
+re-run once per suspect at that price, so a red bundle is attributed from the
+**failing job's own log**: the files it names are matched against what each
+constituent changed (measured from its own merge-base, never the base tip), and a
+pull request is implicated only when the failure names a file it changed — or
+when it shares one of those files with a PR that is. Everyone else is listed as
+*not implicated*, which is what makes it an attribution to a pair rather than a
+notice about the bundle. This matters most on exactly the defects only CI sees
+(`#1484` × `#1503` both added fields to the same `list_criteria` rows), and
+before this the stronger layer was the one that could not say who. **When the
+log names no constituent's file, the run says it could not attribute** and names
+nobody — a fabricated culprit is worse than none, the same rule preparation
+failures follow.
+
+**A combination breaks in two shapes, and both are attributed to a pair.** The
+one above is a verify failure. The other is a merge **conflict** between two
+constituents — and it is the more common one, because every candidate has
+already re-queried as `MERGEABLE` against the base, so a collision inside the
+bundle is by definition invisible to the forge. The lane reads the conflicted
+paths *before* `merge --abort` discards them, then intersects them with each
+merged constituent's own change set — measured from that constituent's
+merge-base, not the base tip — to name the counterpart exactly: "CONFLICTS with
+#2 over internal/db/prds.go" rather than "conflicts with the rest of the bundle",
+which is a set of eight wearing the blame for a collision between two. Where the
+conflict shape does not permit narrowing (a rename or delete-modify against a
+path no constituent's diff lists), the report says the counterpart could not be
+narrowed and names the set instead of inventing a pair.
+
+**The ejection ceiling never swallows the evidence.** `INTEGRATION_LANE_MAX_EJECTIONS`
+(default 3) bounds how many suspects one run will eject. Reaching it ends the
+run, and the report still carries the failing output and the constituents that
+were built together, with the ceiling named as the reason the failure was not
+narrowed further. At a ceiling of `0` that report is the *only* evidence the run
+produces, so a mail claiming "each green alone and BROKEN TOGETHER" is never sent
+without the output that justifies it.
+
+**A CI failure is not the end of the run either: one implicated constituent is
+ejected and the remainder is re-bundled.** Attribution names the pair, but on its
+own it unblocks nobody — the bundle sat red and every constituent the failure
+never touched waited on a human to bisect by hand, which is one bad pull request
+delaying the whole set on the very layer that finds the defects the pre-flight
+cannot see. So the run ejects **exactly one**: the newest of the implicated,
+because the implicated set is an interacting *pair* and breaking it needs only
+one of them gone — ejecting both would delay two PRs to fix one interaction. The
+remainder is opened as a replacement bundle and the superseded red one is
+*closed* (closed, not deleted — its failing checks and logs are the evidence)
+so two bundles holding the same constituents never compete for one merge. The
+ejected PR is not judged wrong; it keeps its own pull request, and the next run
+reconsiders it. `INTEGRATION_LANE_CI_REBUNDLES` (default 1) bounds this, because
+one attempt here costs a whole extra CI wait rather than a single local verify: a
+second red means either the first attribution was wrong or the queue holds two
+independent combination defects, and both are worth a person reading. Set it to
+`0` to report the first CI failure as-is. **Nobody is ejected on no evidence** —
+when the log implicates no one the run says *nothing was ejected* and why, rather
+than dropping a constituent so the cycle looks like progress.
 
 **A `schemaVersion` bump is measured against the pull request's own merge-base,
 never against the base tip**, and it must be *strictly above* what the base

@@ -75,9 +75,9 @@ complete. Never complete instead of publishing.
 
 **Attach the delivering PR to the owning PRD — and only once it has merged.** A
 merged, attached pull request is the only delivery signal switchyard reads: until
-one exists the criterion reads as unbuilt however much code landed. So pass
-`pr_url`, `pr_number` and the forge's own `merged_at` on `complete`, reading that
-timestamp from the forge rather than stamping your own:
+one exists the criterion reads as unbuilt however much code landed. So pass the
+`pr` payload — `{ url, number, merged_at }`, carrying the forge's own merge
+timestamp rather than one you stamped yourself — on `complete`:
 
 ```sh
 gh api repos/<owner>/<repo>/pulls/<n> --jq .merged_at

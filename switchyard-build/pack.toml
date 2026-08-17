@@ -67,6 +67,23 @@ schema = 2
 # its sibling pack from that repo — verified to contain `gascity/pack.toml`.
 # Upgrade with `gc import upgrade`, then re-run the Evidence Commands in
 # REQUIREMENTS.md and reconcile any claim the upgrade invalidates.
+#
+# ⛔ CORRECTED 2026-08-17 — 63739850 → 3b3b89f2. The sentence above was ALREADY
+# the intent; it was simply false. gc-factory pins gascity at 3b3b89f2 for all
+# four of its rigs, and this pack pinned 63739850 (142 commits / 300 files
+# ahead) while claiming to match. Nothing here required the newer base:
+# `build-base`, the seam this pack extends, exists at both shas, and 3b3b89f2
+# carries `gascity/pack.toml` — the pin's own stated check, re-run at the fix.
+#
+# THE COST OF THE MISMATCH WAS TOTAL, AND SILENT. A rig cannot import this pack
+# while the two disagree: `gc import install` refuses the incompatible pair, and
+# a DECLARED-but-uninstalled import rejects the WHOLE city config — every lane
+# asleep, zero orders firing. So no rig ever imported it, `sy-build-from-prd`
+# never resolved, and PRD #269's two run-it criteria took 7 judge rejections
+# into the repair ceiling for machinery that was finished and merged.
+#
+# So DO NOT "upgrade" this pin on its own. It is a JOINT pin with the consuming
+# city's `[rigs.imports.gc]`; moving one without the other re-breaks the import.
 [imports.gc]
   source = "https://github.com/gastownhall/gascity-packs/tree/main/gascity"
-  version = "sha:637398502880f1a2a96a385f0d1b38b85343fa4e"
+  version = "sha:3b3b89f2011e06d84459aa7bea1552382f13930a"

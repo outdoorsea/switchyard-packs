@@ -1,0 +1,32 @@
+# Revive sessions frozen at a terminal API error (usage limit, 529 overload).
+#
+# The fourth member of the silent-stall family, after publish-gate (work closed
+# with no PR), pr-gate (PR opened and never merged) and pane-stall (input never
+# submitted). Same shape as all three: a condition every existing health
+# surface reads as fine. Here the agent's turn DIED — the CLI printed the
+# error and went back to an idle prompt — and nothing in the system ever
+# re-prompts it, while the frozen session keeps occupying its lane's slot so
+# the scaler never staffs a replacement. One frozen judge is an unstaffed
+# judging lane.
+#
+# Unlike its siblings this order ACTS rather than only reporting, because the
+# remedy is uniquely safe: the pane is at an EMPTY idle prompt (panes with
+# pending text or a menu are pane-stall's jurisdiction and are skipped), so a
+# resume nudge destroys nothing, and nudging a still-capped session is free —
+# the attempt is refused before any inference happens. Mail-only detection was
+# tried by this family already and its mail lands in an inbox nobody reads;
+# a frozen session needs the Enter keystroke, not a memo about it.
+#
+# Cadence is 15m. The failure holds for hours (a usage-limit window is up to
+# five; the observed freezes ran 18-22h), so detection latency is not the
+# constraint — the interval instead sets the RETRY clock: a still-capped
+# session is re-nudged each cycle until the window resets, and the script's
+# per-episode attempt cap (20 = five hours of retries) bounds the total before
+# it escalates to the mayor once and goes quiet. Tighter would burn cycles
+# probing an account that resets on its own schedule; looser would leave lanes
+# unstaffed after the window opens.
+[order]
+description = "Nudge sessions frozen at a terminal API error (usage limit, 529) back to life, capped per episode, escalating once at the cap"
+trigger = "cooldown"
+interval = "15m"
+exec = "$PACK_DIR/assets/scripts/frozen-session-sweep.sh"

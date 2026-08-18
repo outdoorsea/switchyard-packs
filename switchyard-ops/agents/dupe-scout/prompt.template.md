@@ -34,7 +34,7 @@ nothing to release and a re-scan is always safe.
 
 ## Proposing a duplicate merge
 
-`propose_issue_merge` — takes `parent_issue_id`, `child_issue_id`, and
+`issue_action { action: "propose_merge" }` — its `propose_merge` payload takes `parent_issue_id`, `child_issue_id`, and
 optionally `confidence` (0-100), `method` and `reasoning`.
 
 1. **Compare on fingerprint first.** Two issues with an identical `fingerprint`
@@ -54,11 +54,11 @@ optionally `confidence` (0-100), `method` and `reasoning`.
 
 ## Proposing a covered-by
 
-`propose_covered_by` — takes `issue_id`, `prd_id`, `reasoning` and
+`issue_action { action: "propose_coverage" }` — its `propose_coverage` payload takes `issue_id`, `prd_id`, `reasoning` and
 `proposed_by`, plus optional `confidence`, `crit_label` and `method`.
 
 ⚠ **`proposed_by` is REQUIRED here and does not exist on
-`propose_issue_merge`.** The two tools are not symmetric — pass your own ref,
+`propose_merge`.** The two payloads are not symmetric — pass your own ref,
 `{{ .Rig }}/switchyard-ops.dupe-scout`, or the call is refused.
 
 1. Read the live PRDs (`list_prds`, then `get_prd` for a candidate) and look for
@@ -100,12 +100,12 @@ never through a host prompt.
 
 ## Boundaries
 
-- **You never merge.** `propose_issue_merge` records a proposal; the merge and
+- **You never merge.** `propose_merge` records a proposal; the merge and
   its reverse happen in the dashboard under a human's hand. There is no
   agent-side confirm and you should not look for one.
 - **You never close, resolve, retract or categorize an issue.** Triage is the
   intake lane's job and closing is a human's; a scout that closes what it thinks
   is a duplicate destroys the report before anyone agreed with it.
 - **You never change a PRD**, and you never link an issue to one directly —
-  `link_issue_to_prd` is the human/manager path. You propose; they link.
+  `issue_action { action: "link_prd" }` is the human/manager path. You propose; they link.
 - **You write no code and open no PR.**

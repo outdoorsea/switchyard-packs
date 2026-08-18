@@ -2,8 +2,8 @@
 #
 # A dupe-scout reads a project's OPEN issues and files two kinds of advisory
 # proposal: a duplicate-merge proposal for a pair describing one root problem
-# (`propose_issue_merge`), and a covered-by proposal for an issue an existing PRD
-# already covers (`propose_covered_by`). It decides nothing — a human confirms
+# (`issue_action { action: "propose_merge" }`), and a covered-by proposal for an issue an existing PRD
+# already covers (`issue_action { action: "propose_coverage" }`). It decides nothing — a human confirms
 # every merge in the dashboard — and it writes no code.
 #
 #   gc session new <rig>/switchyard-ops.dupe-scout --no-attach
@@ -16,7 +16,7 @@
 # covered-by detection ran only inside `switchyard-companion` — a second runtime
 # an operator had to install, credential and supervise before the factory worked.
 # Both sweeps need NO MCP tool that is missing: `list_issues`, `list_prds`,
-# `propose_issue_merge` and `propose_covered_by` all ship today. That makes this
+# `issue_action`'s `propose_merge` and `propose_coverage` all ship today. That makes this
 # the lowest-risk proof that a companion verb becomes a pack agent, which is why
 # the PRD lands it before the builder-lane cutover.
 #

@@ -33,13 +33,24 @@ first: you take it yourself, and a rival is refused.
    (`staging`) or a per-PRD branch, and it overrides any repo default. Only
    when the response carries no policy do you fall back to
    `{{ .DefaultBranch }}`.
-6. Build it, sending `claim_action` `heartbeat` as you go. A quiet claim reads
+6. **Judge the plan before you build it.** Write your build plan out, one item
+   per line, and run the decomposer over it:
+
+       $PACK_DIR/assets/scripts/fanout-decompose.sh --plan <plan-file> \
+         --rig {{ .Rig }} --crit <crit_label> --prd <prd_id>
+
+   Past `SY_FANOUT_THRESHOLD` items (default 4) it mints one parent epic bead
+   with a child per plan item and answers `decision=fanout`; at or under it
+   nothing is minted and it answers `decision=serial`. Those children are local
+   execution detail only — they share this worktree and this branch, and the
+   criterion still ships exactly one PR.
+7. Build it, sending `claim_action` `heartbeat` as you go. A quiet claim reads
    as *stalled* on the PRD page, and a lapsed lease hands your bead back to the
    pool while you are still holding the worktree.
-7. Publish — push the branch and open the pull request against the
+8. Publish — push the branch and open the pull request against the
    claim-served base from step 5, never against a base you inferred from the
    repo.
-8. `claim_action` `complete`, carrying the delivering PR. **Which PR fields
+9. `claim_action` `complete`, carrying the delivering PR. **Which PR fields
    belong on that call, and when, is the attach rule below** — send them wrong
    and you sign off code that never shipped.
 
@@ -73,6 +84,13 @@ complete. Never complete instead of publishing.
 > If you have worked a gastown polecat lane before, this is the rule that
 > flipped. There, closing your own bead was forbidden. Here it is the last step
 > you take — once the PR exists.
+
+**Report the fan-out decision — on every run, fan-out or serial.** Paste the
+decomposer's `fanout-decompose:` line into your PR body verbatim. A serial run
+past the threshold carries `serial_past_threshold=1` and a `reason=` naming
+which path it took (`disabled`, `mint-failed`), so a reader can tell a short
+plan from a decomposer that broke — the two want opposite responses, and
+without the line they look identical.
 
 **Attach the delivering PR to the owning PRD — and only once it has merged.** A
 merged, attached pull request is the only delivery signal switchyard reads: until

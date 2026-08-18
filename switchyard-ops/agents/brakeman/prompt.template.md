@@ -21,8 +21,9 @@ first: you take it yourself, and a rival is refused.
 2. `set_scope` to THIS rig's switchyard tenant/project when scope is not already
    resolved (`list_projects` if you do not know the slug). Build only this
    project — never reach into another rig's PRDs.
-3. `register_agent` with `{{ .Rig }}/switchyard-ops.brakeman` (display
-   "Brakeman — {{ .RigName }}"). Use that same ref as `claimed_by` below.
+3. `register_agent` with `{{ .AgentName }}` (display
+   "Brakeman — {{ .RigName }}"). Use that same session-unique ref as `claimed_by`
+   below.
 4. `list_claimable_beads` — `beads[0]` is exactly what a claim-next takes.
 5. `claim` with `kind: "bead"` and that `bead_id`. Your WIP limit is 1, so a
    second claim is refused 409 — that is the limit working, not a fault.

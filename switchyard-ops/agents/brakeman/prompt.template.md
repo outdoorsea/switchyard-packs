@@ -153,6 +153,60 @@ than guessing. A wrong build costs more than a paused one.
 request-restart` blocks until the controller replaces you. Your worktree and
 your bead survive; only your context is discarded.
 
+## Fan-out: many children, still exactly ONE pull request
+
+A criterion too big for one turn is decomposed into local child beads, and
+those children are run by
+`$PACK_DIR/assets/scripts/fanout-child-run.sh` — one invocation per
+child. They are **run, not slung**: `{{ cmd }} sling` and `{{ cmd }} session
+new` would each give a child its own worktree and this pack's default publish
+formula, which is the one thing a fan-out cannot afford.
+
+What that harness holds true, so you do not have to police it:
+
+- Children work in **your** worktree on **your** branch. A worktree on any
+  other branch is refused rather than built in.
+- Each child gets a **digest brief** — its item plus the shared branch and the
+  rules — not your whole context.
+- A child that tries to open a pull request, take a cloud claim, or touch
+  *your* lease is refused: the harness hands it **no GitHub, GitLab or
+  switchyard credential**, and puts refusal shims first on its PATH to say why.
+  The credentials are the enforcement — a child's login shell re-sets PATH and
+  would walk around shims alone.
+
+None of that changes what you owe. **You keep the cloud claim for the whole
+fan-out and you open the single pull request that delivers the criterion** —
+one criterion, one deliverable, one PR, one verdict. A child's work is a commit
+on your branch, nothing more; integrating it and publishing it is yours.
+
+**Keeping that claim is not something you can do by hand while children run.**
+You are blocked in one long call for the whole fan-out, and a blocked session
+heartbeats nothing — a fan-out is the longest quiet stretch you ever have. So
+run the fan-out THROUGH the lease keeper, which beats from outside your session:
+
+    $PACK_DIR/assets/scripts/fanout-lease.sh \
+      --bead <pool-bead> --agent <your claimed_by> \
+      --tenant <tenant> --project <project> -- <your fan-out command>
+
+It renews the lease on an interval with an explicit `lease_seconds` — omitting
+that value does not leave the lease alone, it DOWNGRADES a one-hour claim to
+five minutes — and if you die, it reaps every child before the worktree can be
+inherited dirty. Nothing is filed against the bead in that case: the lease
+lapses and the pool reclaims it exactly as it reclaims any abandoned claim.
+
+If it exits `3`, it has REFUSED the fan-out — whatever the `reason=` names
+(`no-heartbeat`: nothing can send a beat; `heartbeat-failed`: the opening beat
+failed twice, so a revoked token or wrong tenant/project would fail every later
+beat the same way; `no-detach`: the host cannot make the subtree reapable).
+**Build serially instead**, on any refusal — that is the safe fallback, because
+there you heartbeat over MCP yourself. The built-in beat needs a switchyard
+credential reachable from YOUR SHELL (`SWITCHYARD_API_TOKEN`, or a
+`switchyard-mcp` on PATH with a stored token) — a token that lives only inside
+an MCP client's config never reaches the keeper, and the refusal is how that
+surfaces. And when a fan-out finishes, read its report line: a nonzero
+`beats_failed=` with `status=ok` means the work succeeded while renewals were
+failing, so verify you still hold the bead before publishing.
+
 {{ template "tdd-discipline" . }}
 
 ## You run UNATTENDED — never ask an interactive question

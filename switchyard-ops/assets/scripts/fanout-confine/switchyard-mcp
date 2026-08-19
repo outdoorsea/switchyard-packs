@@ -1,0 +1,75 @@
+#!/bin/sh
+#
+# switchyard-mcp — the fan-out confinement's refusal shim for the switchyard
+# client. switchyard PRD #372, crit:cb7409dc0b5a.
+#
+# WHAT THIS SHIM CAN AND CANNOT DO — stated plainly, because the first version
+# of this file claimed a guarantee it did not hold.
+#
+# It CANNOT stop a child's MCP tool calls. An agent reaches `claim`,
+# `claim_action` and `attach_prd_pr` as MCP TOOLS over stdio, and the client
+# spawns the server by ABSOLUTE path (`claude mcp add … -- <os.Executable()>`,
+# and every stanza in ~/.claude.json is absolute), so PATH is never consulted.
+# Those names are not CLI subcommands either — main.go's switch knows only
+# login, doctor, generate-docs, token-path, config-json, update, version, help.
+# A shim matching them refuses a spelling nobody types.
+#
+# What actually denies a child the cloud claim is fanout-child-run.sh emptying
+# SWITCHYARD_API_TOKEN and pointing SWITCHYARD_CONFIG_HOME at a directory with
+# no token in it: an MCP server that starts finds nothing to authenticate with,
+# whatever path it was spawned from.
+#
+# So this file does the two things it genuinely can: it refuses to START a
+# server for a child that invokes it through PATH, and it refuses `login`, which
+# is how a child would go and FETCH the credential the harness just withheld.
+
+set -u
+
+. "$(dirname "$0")/_confine.sh"
+
+WHY_SERVER='a fan-out child works from its brief, not from the cloud claim surface'
+WHY_LOGIN='the harness withheld this credential deliberately; do not go and fetch another'
+
+if [ "$#" -eq 0 ]; then
+	confine_refuse switchyard-mcp "$WHY_SERVER" '<server start>'
+fi
+
+case "${1:-}" in
+serve | server | stdio)
+	confine_refuse switchyard-mcp "$WHY_SERVER" "$@"
+	;;
+login)
+	confine_refuse switchyard-mcp "$WHY_LOGIN" "$@"
+	;;
+esac
+
+# The claim protocol by name. These are MCP TOOL names rather than subcommands
+# this binary has today, so this arm refuses a spelling nobody currently types —
+# it is kept because it costs nothing, covers a wrapper that shells out, and
+# would cover the CLI if these ever became subcommands. It is NOT the guarantee:
+# the withheld token above is.
+for arg in "$@"; do
+	case "$arg" in
+	claim | claim_action)
+		confine_refuse switchyard-mcp "the claim protocol belongs to the parent, not to a child" "$@"
+		;;
+	attach_prd_pr)
+		confine_refuse switchyard-mcp "one attachment marks every criterion of the PRD delivered" "$@"
+		;;
+	token-path | token)
+		# The stored credential's location (or value) is the raw material for
+		# calling the claim protocol over plain HTTP, bypassing every refusal
+		# above. A confined child has no use for the token itself.
+		# confine_refuse/CONFINE_REFUSAL_EXIT are what _confine.sh actually
+		# defines. The names used here before — log_refusal, REFUSAL_EXIT —
+		# existed nowhere, so this arm died as "command not found" plus an
+		# unbound variable: still non-zero, so it LOOKED like a refusal, but
+		# with the wrong exit status, none of the refusal text, and no line in
+		# the refusal log the harness counts.
+		confine_refuse switchyard-mcp \
+			"a fan-out child gets no cloud credential; work from your brief" "$@"
+		;;
+	esac
+done
+
+confine_exec_real switchyard-mcp "$@"

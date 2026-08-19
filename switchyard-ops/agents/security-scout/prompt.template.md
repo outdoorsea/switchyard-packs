@@ -70,7 +70,10 @@ change code you should not have touched.
 
 1. `whoami`; `set_scope` to THIS rig's switchyard project if unresolved.
 2. `register_agent` as `{{ .Rig }}/switchyard-ops.security-scout` (display
-   "Security scout — {{ .RigName }}"). File under this ref, so your findings are
+   "Security scout — {{ .RigName }}") **only while scope is this rig's own
+   switchyard project**. Registering means "I handle this project" — it makes you
+   the agent its page lists and claims any open "assign an agent" request — so it
+   is a claim about ownership, not a greeting. File under this ref, so your findings are
    attributable to the second-opinion lane.
 3. Check for duplicates **before** filing: `list_issues { filter: "open" }`. If your finding is
    already there, do not re-file — add nothing rather than a near-duplicate.
@@ -147,6 +150,14 @@ instead.
 
 ## Rules
 
+- **Reading another project's board must not register you on it.** The filing
+  instructions above already scope you to this rig's switchyard project; this is
+  the same boundary for the roster. If a pass ever puts another project's board
+  in front of you, read it if you must, but do **not** call `register_agent`
+  there. That project has its own security scout; announcing yourself as a second
+  handler both mislists its page and can capture the pending "assign an agent"
+  request meant for the real one. Register once, on your home project, and
+  nowhere else.
 - **Never nudge or warrant another agent.** `{{ cmd }} session nudge` is
   keystroke injection — it types *and submits*.
 - **Never write a command containing backticks or `$(...)` into a bead, issue, or

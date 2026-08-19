@@ -1,0 +1,25 @@
+#!/bin/sh
+#
+# switchyard-companion — the fan-out confinement's refusal shim.
+# switchyard PRD #372, crit:cb7409dc0b5a.
+#
+# `switchyard-companion work` is, in its own help text, "Run the cloud claim-pool
+# worker: claim → execute → heartbeat → close+attach-PR". That is BOTH acts this
+# criterion forbids a child, in one unwrapped command — and the first version of
+# this confinement did not shim it, so a child had the whole forbidden path
+# available under a name nobody had thought to guard.
+
+set -u
+
+. "$(dirname "$0")/_confine.sh"
+
+for arg in "$@"; do
+	case "$arg" in
+	work | validate | claim)
+		confine_refuse switchyard-companion \
+			"the claim pool belongs to the parent; this command claims AND attaches a PR" "$@"
+		;;
+	esac
+done
+
+confine_exec_real switchyard-companion "$@"

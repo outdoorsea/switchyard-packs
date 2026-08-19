@@ -1,0 +1,40 @@
+# Answer a project's Buzz channel directives from THIS city, one at a time
+# (switchyard PRD #371).
+#
+# A director @-mentions a project's Conductor in the project's Buzz channel and
+# that message becomes a claimable DIRECTIVE on switchyard. Several Gas Cities on
+# several machines may each be able to answer it, and exactly one must: the claim
+# is the mutex, and this order is the machine's hand on it.
+#
+# THIS ORDER CLAIMS AND DISPATCHES; IT NEVER ANSWERS. Each cycle it takes at most
+# one directive per opted-in rig and hands it to a Gas City agent scoped to that
+# rig's bound project (tenant + project slug, so `switchyard-mcp` resolves the
+# project's own truth rather than the session's ambient scope). The answer, and
+# every judgment in it, belongs to that session — the same division of labour as
+# every other lane sweep in this pack: the order decides WHO works, the session
+# decides WHAT to say.
+#
+# THE ANSWERING MACHINE HOLDS NO NOSTR KEY. The dispatched session completes the
+# directive through switchyard's API and switchyard's existing outbound notifier
+# posts the answer into the channel as the project bot. Nothing in this lane
+# needs relay credentials on the machine that does the thinking, which is what
+# lets any city with a project-scoped `sy_` token be an answerer.
+#
+# OPT-IN PER RIG via roster.conf's CONDUCTOR_RIGS; unset = off for every rig,
+# exactly like EVENT_PUMP_RIGS. A city that never enables the lane must never
+# notice this order exists — no claim is taken, no session is started, and a
+# project whose directives this city is not meant to answer is never even asked
+# about.
+#
+# CADENCE 1m, the event-pump precedent. A directive is a person waiting in a
+# chat room, so the tick is the floor of how long they wait for the pickup
+# acknowledgement; the cost of a tick is one bounded claim call per opted-in rig,
+# and a cycle that finds nothing exits without spawning anything. The 90-second
+# claim lease (PRD #371's settled default) is deliberately close to this
+# interval: a machine that dies mid-directive returns it to the queue about one
+# tick later, and the next city to run this order picks it up.
+[order]
+description = "Claim one Buzz channel directive per CONDUCTOR_RIGS rig and dispatch a Gas City agent scoped to that rig's bound project to answer it — the claim is the mutex that stops two machines answering one question"
+trigger = "cooldown"
+interval = "1m"
+exec = "$PACK_DIR/assets/scripts/conductor.sh"

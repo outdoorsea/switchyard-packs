@@ -1,0 +1,21 @@
+# Railway TRAIN-CREW occupations — themed session names for the conductor pool.
+# Kin to brakeman (trades) and judge (inspectors), drawn from the roles that face
+# the people being carried: the crew a passenger actually speaks to. A conductor
+# answers a person waiting in a room, so its sessions are named for the staff who
+# answer questions on the train rather than the ones who move it.
+#
+# `gc` draws one name per concurrent session, so this pool must hold at least
+# max_active_sessions entries (conductor runs one; see agent.toml for why that
+# cap is load-bearing and not merely thrifty). Single-word, lowercase — a name is
+# a session id, not a specialty. None of these appear in another pool's namepool,
+# so a session name reads unambiguously as this lane's.
+trainman
+steward
+purser
+usher
+announcer
+greeter
+collector
+callboy
+starter
+attendant

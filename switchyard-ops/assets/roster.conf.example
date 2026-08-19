@@ -177,13 +177,13 @@
 # SY_FANOUT_THRESHOLD / SY_FANOUT_ENABLED — epic fan-out (switchyard PRD #372).
 #
 # A brakeman runs its build plan past the decomposer before building. Above the
-# threshold it mints one parent epic bead with a child per plan item; at or
-# under it, nothing is minted and the build is exactly what it was before. (The
-# short-lived local workers that will build those children — sharing the
-# brakeman's worktree and branch — are a sibling PRD #372 criterion; until it
-# lands, a minted tree marks the decomposition but the brakeman still builds
-# serially.) The threshold IS the product surface — below it the lane is
-# byte-for-byte unchanged, so a city that sets nothing gets today's behaviour.
+# threshold it mints one parent epic bead with a child per plan item, then
+# builds each child through the confined harness documented under FAN-OUT
+# CHILDREN below — short-lived workers sharing the brakeman's worktree and
+# branch, with exactly one PR for the whole tree. At or under the threshold,
+# nothing is minted and the build is exactly what it was before. The threshold
+# IS the product surface — below it the lane is byte-for-byte unchanged, so a
+# city that sets nothing gets today's behaviour.
 #
 # "Exceeds" is strict: a plan of exactly SY_FANOUT_THRESHOLD items stays serial.
 # A non-numeric value falls back to the default rather than refusing to run — a
@@ -212,3 +212,125 @@
 # choose. `publish-gate` replaces that order and takes no configuration.
 #
 # Delete any MERGE_STRATEGY line when migrating a city off the gastown lane.
+
+# ---------------------------------------------------------------------------
+# FAN-OUT CHILDREN — how a decomposed criterion's child beads are executed
+# (switchyard PRD #372, crit:cb7409dc0b5a).
+#
+# Children are run by assets/scripts/fanout-child-run.sh, one invocation per
+# child, INSIDE the parent brakeman's worktree on the parent's branch. They are
+# deliberately not slung: `gc sling` and `gc session new` would each hand a
+# child its own worktree and this pack's `default_sling_formula`, whose publish
+# step opens a pull request — and the criterion a fan-out is building has
+# exactly one deliverable, so a second PR is a second delivery of it.
+#
+# SY_FANOUT_CHILD_LAUNCHER — the command line that runs ONE child, with the
+#   parent's worktree as its cwd. The brief is on the child's STDIN and its path
+#   is in SY_FANOUT_BRIEF; nothing is appended to argv, because the default
+#   launcher takes its prompt from an argument when it gets one and would then
+#   prompt the child with a bare filename. Default: `claude -p`. An unresolvable
+#   launcher is
+#   REFUSED loudly rather than skipped, because a fan-out that quietly ran no
+#   children is indistinguishable from one that ran them all and found nothing.
+#
+# SY_FANOUT_CHILD_LAUNCHER="claude -p"
+#
+# SY_FANOUT_BRIEF_MAX_BYTES — the digest budget for a child's brief. Default
+#   4000. It bounds the ITEM only: the identity block and the rules are a floor
+#   and are written first, so a tiny budget yields a brief slightly over it
+#   rather than a brief missing the rules it exists to carry. A truncated brief
+#   says that it was truncated.
+#
+# SY_FANOUT_BRIEF_MAX_BYTES="4000"
+#
+# SY_FANOUT_REFUSAL_LOG — where the confinement records what a child tried to
+#   do and was refused (opening a pull request, taking a cloud claim, touching
+#   the parent's lease). Defaults to a path inside the harness's own work
+#   directory. The report line carries the DELTA for that child, not the file's
+#   total: the log is opened append-only, so a shared path accumulates across a
+#   whole fan-out and a bare count would blame each child for its predecessors.
+#
+#   Note what the confinement is and is not. The shims refuse loudly and explain
+#   themselves, but they are PATH interposition and a child's login shell
+#   re-sets PATH from the user profile — so what actually denies a child the
+#   ability to publish or claim is the harness withholding the credentials
+#   (empty GH_TOKEN / GITHUB_TOKEN / GITLAB_TOKEN / SWITCHYARD_API_TOKEN, and
+#   GH_CONFIG_DIR / SWITCHYARD_CONFIG_HOME pointed at an empty directory).
+#
+# SY_FANOUT_REFUSAL_LOG="/var/log/switchyard/fanout-refusals.log"
+
+# ---------------------------------------------------------------------------
+# THE PARENT'S LEASE, across a fan-out (switchyard PRD #372).
+#
+# A brakeman normally heartbeats its cloud claim between turns. A fan-out takes
+# that away: the parent sits in ONE long call while its children build, and a
+# blocked session sends nothing. So the fan-out is wrapped in
+# `fanout-lease.sh`, which keeps the lease from outside the session and reaps
+# the children if the parent dies.
+#
+# SY_FANOUT_LEASE_SECONDS — the lease requested on every beat. Default 3600,
+#   which is the server's cap; anything larger is clamped there.
+#
+#   Spelling this on every beat is not tidiness, and the bug runs the opposite
+#   way to intuition: the server's heartbeat handler starts from a FIVE-MINUTE
+#   default and only overrides it when lease_seconds is present. A claim taken
+#   at the one-hour cap and then heartbeated without the value is therefore
+#   DOWNGRADED to five minutes by the very call meant to keep it alive. A
+#   non-numeric value here falls back to 3600 rather than to the empty string,
+#   because the empty string is that downgrade.
+#
+# SY_FANOUT_HEARTBEAT_INTERVAL — seconds between beats. Default 900, matching
+#   the fifteen-minute floor the build workflow already documents. It is
+#   clamped to a third of the lease: an interval at or past the lease cannot
+#   renew in time BY CONSTRUCTION, and a third leaves room for two missed beats
+#   on a loaded box. A clamp is reported rather than applied quietly, since a
+#   silently corrected knob is one nobody ever fixes.
+#
+# SY_FANOUT_HEARTBEAT_CMD — the command line that sends ONE beat, for a city
+#   that wants to route the call its own way. It is invoked with
+#   `--bead <id> --agent <ref> --lease-seconds <n>` appended and the same three
+#   values exported as SY_FANOUT_BEAD / SY_FANOUT_AGENT /
+#   SY_FANOUT_LEASE_SECONDS. Left unset, the built-in beat posts to the bead
+#   action endpoint and needs a tenant, a project and a resolvable token.
+#
+#   When NO beat is possible at all, the fan-out is REFUSED rather than run.
+#   That is the safe direction: the fallback is a serial build, where the
+#   session heartbeats over MCP itself, and a fan-out with no keeper is exactly
+#   the silent lease loss this machinery exists to prevent.
+#
+#   THE CREDENTIAL SEAM, spelled out because it is the usual reason the
+#   built-in refuses: the beat runs in the SESSION'S SHELL, so it needs a token
+#   the shell can resolve — SWITCHYARD_API_TOKEN(S) exported, or a
+#   `switchyard-mcp` on PATH holding a stored token (`sy_api_token`'s chain). A
+#   token that lives only inside an MCP client's own config (a ~/.claude.json
+#   server stanza) is injected into the MCP server process and never reaches
+#   this shell, so the keeper refuses with reason=no-heartbeat even though the
+#   session's switchyard tools all work. That refusal is correct — fix it by
+#   exporting a token for the shell, not by skipping the keeper.
+#
+# SY_FANOUT_REAP_GRACE — seconds between TERM and KILL when reaping a dead
+#   parent's children. Default 5.
+#
+#   The reaping is owned by a supervisor in its own session, NOT by the
+#   parent's exit trap: SIGKILL runs no trap, and SIGKILL is what an OOM
+#   killer, a `kill -9` and a controller replacing a wedged session all send.
+#   The whole process group goes, not just the direct child — the child is an
+#   LLM session that spawns compilers and test runners, and leaving those in
+#   the shared worktree corrupts the NEXT fan-out rather than merely wasting a
+#   core.
+#
+#   Nothing is filed against the bead when a parent dies. The lease simply
+#   stops being renewed and the pool reclaims it on its ordinary expiry sweep,
+#   exactly as for any other abandoned claim. The keeper dying with its parent
+#   is the point: one that survived would renew switchyard's only mutex on
+#   behalf of a worker that no longer exists, and the bead would never come
+#   back to the pool at all — invisible from every dashboard, because a
+#   heartbeated claim looks perfectly healthy.
+#
+# SY_FANOUT_LEASE_LOG — optional path; the keeper's report line is appended.
+#
+# SY_FANOUT_LEASE_SECONDS="3600"
+# SY_FANOUT_HEARTBEAT_INTERVAL="900"
+# SY_FANOUT_HEARTBEAT_CMD=""
+# SY_FANOUT_REAP_GRACE="5"
+# SY_FANOUT_LEASE_LOG="/var/log/switchyard/fanout-lease.log"

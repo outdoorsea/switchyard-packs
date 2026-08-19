@@ -1,0 +1,71 @@
+# conductor — the Buzz DIRECTIVE lane, as a Gas City agent (switchyard PRD #371).
+#
+# A director @-mentions a project's Conductor in the project's Buzz channel and
+# that message becomes a claimable DIRECTIVE on switchyard. The `conductor` order
+# (orders/conductor.toml) claims one per opted-in rig and nudges THIS agent with
+# it, scoped to the rig's bound project. This agent is the thing that actually
+# answers: it reads the project's own truth over `switchyard-mcp` and the rig's
+# worktree for the repository, composes one answer, and hands it back by
+# completing the directive's claim.
+#
+#   gc session new <rig>/switchyard-ops.conductor --no-attach
+#
+# ...which is what the `conductor` order does when a rig has no live conductor.
+# Like the judge, the answerer and the intake triager, you do not sling work to a
+# conductor — but it is unlike all three in one way that matters:
+#
+# THIS AGENT DOES NOT CLAIM ITS OWN WORK. Every other lane in this pack reads a
+# switchyard queue and stakes a row itself. Here the ORDER holds the claim: it
+# checks a conductor session is live BEFORE claiming, precisely so a 90-second
+# lease is never taken while its answerer is still booting. A session that
+# claimed directives on its own initiative would defeat that ordering, and would
+# take work from cities whose order was about to. The prompt says so in as many
+# words; this note is why.
+#
+# THE ANSWERING MACHINE HOLDS NO NOSTR KEY, and nothing here may add one. The
+# answer is recorded through switchyard's API and switchyard's outbound notifier
+# posts it into the directive's thread as the project bot. That is what lets any
+# city with a project-scoped `sy_` token be an answerer, so the lane never needs
+# relay credentials on the machine that does the thinking. (The answer-carrying
+# completion is the server's contract, not yet a shipped fact everywhere — which
+# is why the prompt's hand-back section probes for it and falls back to
+# release-and-mail rather than completing empty. Do not simplify that hedge away
+# on the strength of this paragraph.)
+scope = "rig"
+
+# fresh: a directive is a conversational turn answered from the project's current
+# truth. There is no state worth carrying between directives — and one thing that
+# must NOT be carried: a directive body is text a stranger wrote, and a fresh
+# context is what stops the last room's words sitting behind the next answer.
+wake_mode = "fresh"
+
+# Read-only except for the answer it hands back over MCP. It reads the rig's code
+# and history to ground an answer; it never edits, branches, or commits. The
+# worktree is the agent's, not a work item's: a conductor holds no bead.
+work_dir = ".gc/worktrees/{{.Rig}}/conductor/{{.AgentBase}}"
+
+# THE BARE NUDGE IS A STAND-DOWN, not a work order — the one nudge in this pack
+# that tells its agent to do nothing. Every other lane's nudge means "go find
+# work"; a conductor's work arrives INSIDE the order's dispatch nudge, which
+# carries the directive it claimed. So a wake with no DIRECTIVE block means the
+# reconciler started or refreshed this session, not that a directive is waiting,
+# and the honest response is to idle. A nudge that said "claim a directive now"
+# would contradict the order's claim-after-liveness ordering and hand this
+# session a lease the order deliberately did not take.
+nudge = "Stand by. If this wake carries no DIRECTIVE block you have no work: say IDLE: no directive dispatched, exiting turn. and stop. Never claim a directive yourself — the conductor order holds the claim."
+
+idle_timeout = "30m"
+
+# min 0: an idle conductor is pure token burn, and the order starts one the cycle
+# before it claims — a cold city pays one tick (1m) of latency, which is the
+# trade the order's header argues for.
+#
+# max 1, and it is LOAD-BEARING rather than a spend choice. The directive claim's
+# holder identity is the qualified agent name (`<rig>/switchyard-ops.conductor`),
+# not a per-session ref, so two sessions in this pool would be indistinguishable
+# holders: either could heartbeat or complete the other's directive, and the
+# ownership guard on the server could not tell them apart. One session per rig is
+# what keeps "the holder" a single thing. Widening this needs a per-session
+# claimed_by first — the same shape the brakeman pool needs — not a bigger number.
+min_active_sessions = 0
+max_active_sessions = 1

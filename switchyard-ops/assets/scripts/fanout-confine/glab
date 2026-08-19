@@ -1,0 +1,25 @@
+#!/bin/sh
+#
+# glab — the fan-out confinement's refusal shim for the GitLab CLI.
+# switchyard PRD #372, crit:cb7409dc0b5a.
+#
+# pack.toml requires "`gh` or `glab` on PATH … since the worker opens its own
+# pull request", and assets/workflows/sy-item-work/publish.md runs
+# `glab mr create`. A confinement that shimmed only `gh` therefore refused
+# nothing at all on a GitLab rig — for the exact act it exists to prevent.
+
+set -u
+
+. "$(dirname "$0")/_confine.sh"
+
+WHY='this criterion has exactly one deliverable and the parent publishes it'
+
+saw_mr=0
+for arg in "$@"; do
+	case "$arg" in
+	mr | merge-request) saw_mr=1 ;;
+	create) [ "$saw_mr" = 1 ] && confine_refuse glab "$WHY" "$@" ;;
+	esac
+done
+
+confine_exec_real glab "$@"

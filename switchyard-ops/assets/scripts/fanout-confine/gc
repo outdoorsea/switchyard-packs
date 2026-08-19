@@ -1,0 +1,31 @@
+#!/bin/sh
+#
+# gc — the fan-out confinement's refusal shim for the Gas City CLI.
+# switchyard PRD #372, crit:cb7409dc0b5a.
+#
+# A child that slings or spawns gets what this harness's own header explains it
+# must not have: a session with its OWN worktree and this pack's
+# `default_sling_formula`, whose publish step opens a second pull request. A
+# child re-entering the dispatcher is also how one fan-out becomes several.
+#
+# Reads (`gc bd show`, `gc mail`, `gc status`) pass through: a child that cannot
+# see its own bead or report a problem is less useful without being safer.
+
+set -u
+
+. "$(dirname "$0")/_confine.sh"
+
+case "${1:-}" in
+sling)
+	confine_refuse gc "a slung child gets its own worktree and the publish formula" "$@"
+	;;
+session)
+	case "${2:-}" in
+	new)
+		confine_refuse gc "a spawned session gets its own worktree, not the parent's" "$@"
+		;;
+	esac
+	;;
+esac
+
+confine_exec_real gc "$@"

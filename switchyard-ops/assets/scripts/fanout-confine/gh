@@ -1,0 +1,110 @@
+#!/bin/sh
+#
+# gh — the fan-out confinement's refusal shim for the GitHub CLI.
+# switchyard PRD #372, crit:cb7409dc0b5a.
+#
+# Refuses the three ways a child can open a pull request, and passes reads
+# through: a confinement that broke `gh` outright would stop a child doing the
+# work it was slung, and a child that cannot READ a PR is not safer.
+#
+# FLAGS ARE NORMALISED BEFORE THEY ARE MATCHED. gh accepts `--method POST`,
+# `--method=POST`, `-X POST` and `-XPOST` for one thing, and `-f`, `-F`,
+# `--field`, `--field=`, `--raw-field` and `--input=` for another. Matching only
+# the space-separated spellings — which is what the first version of this file
+# did — refuses the two forms a test happens to exercise and passes a complete,
+# valid PR-creation call in every other spelling.
+#
+# GRAPHQL IS JUDGED ON WHAT THIS SHIM CAN READ. Every `gh api graphql` call is
+# an HTTP POST carrying a field, reads included, so "refuse graphql writes"
+# would refuse graphql entirely and brick a legitimate read. Instead: an inline
+# query is inspected and refused if it is a mutation, and a query this shim
+# CANNOT inspect — `-F query=@file`, `--input file.json` — is refused for that
+# reason alone, because the alternative is passing a mutation through unread.
+#
+# What this canNOT stop, stated because the harness's guarantee rests on the
+# other half: `/usr/bin/gh` by absolute path, a user alias whose body arrives as
+# one argv word, or `curl` against api.github.com. Those are why
+# fanout-child-run.sh withholds the TOKEN — a login shell restores PATH, it does
+# not restore a credential.
+
+set -u
+
+. "$(dirname "$0")/_confine.sh"
+
+WHY_PR='this criterion has exactly one deliverable and the parent publishes it'
+
+# --- `gh pr ... create`, with any flags between the two words -----------------
+saw_pr=0
+for arg in "$@"; do
+	case "$arg" in
+	pr) saw_pr=1 ;;
+	create) [ "$saw_pr" = 1 ] && confine_refuse gh "$WHY_PR" "$@" ;;
+	esac
+done
+
+# --- `gh api` writes ---------------------------------------------------------
+is_api=0
+hits_pulls=0
+hits_graphql=0
+writes=0
+has_fields=0
+method_get=0
+want_method=0
+
+for arg in "$@"; do
+	if [ "$want_method" = 1 ]; then
+		case "$arg" in
+		POST | post | PATCH | patch | PUT | put) writes=1 ;;
+		GET | get) method_get=1 ;;
+		esac
+		want_method=0
+		continue
+	fi
+	case "$arg" in
+	api) is_api=1 ;;
+	graphql) hits_graphql=1 ;;
+	-X | --method) want_method=1 ;;
+	-X* | --method=*)
+		case "$arg" in
+		*=POST | *=post | *=PATCH | *=patch | *=PUT | *=put) writes=1 ;;
+		-XPOST | -Xpost | -XPATCH | -Xpatch | -XPUT | -Xput) writes=1 ;;
+		*=GET | *=get | -XGET | -Xget) method_get=1 ;;
+		esac
+		;;
+	-f | -F | --field | --raw-field | --input) has_fields=1 ;;
+	-f* | -F* | --field=* | --raw-field=* | --input=*) has_fields=1 ;;
+	*/pulls | */pulls\?* | pulls) hits_pulls=1 ;;
+	esac
+done
+
+# Field flags imply an implicit POST — unless an explicit GET says otherwise:
+# `gh api -X GET .../pulls -f state=open` sends its fields as query parameters
+# and cannot create anything, and refusing a documented read spelling pushes a
+# child toward less ordinary ones.
+if [ "$has_fields" = 1 ] && [ "$method_get" = 0 ]; then
+	writes=1
+fi
+
+if [ "$is_api" = 1 ] && [ "$writes" = 1 ]; then
+	if [ "$hits_pulls" = 1 ]; then
+		confine_refuse gh "$WHY_PR" "$@"
+	fi
+fi
+
+if [ "$is_api" = 1 ] && [ "$hits_graphql" = 1 ]; then
+	for arg in "$@"; do
+		case "$arg" in
+		*mutation*)
+			confine_refuse gh "a GraphQL mutation can create a pull request" "$@"
+			;;
+		*=@* | @*)
+			confine_refuse gh "this GraphQL query is in a file the shim cannot read, so it cannot be cleared" "$@"
+			;;
+		--input | --input=*)
+			confine_refuse gh "this GraphQL body is in a file the shim cannot read, so it cannot be cleared" "$@"
+			;;
+		esac
+	done
+fi
+
+confine_exec_real gh "$@"

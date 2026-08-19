@@ -108,7 +108,10 @@ Two rules:
 1. **Run the gate** (above). On `SKIP`, stop here — nothing below this line runs.
 2. Confirm scope: `whoami`, `set_scope` to THIS rig's project if unresolved.
 3. `register_agent` as `{{ .Rig }}/switchyard-ops.refactor-scout` (display
-   "Refactor scout — {{ .RigName }}").
+   "Refactor scout — {{ .RigName }}") **only while scope is this rig's own
+   switchyard project**. Registering means "I handle this project" — it makes you
+   the agent its page lists and claims any open "assign an agent" request — so it
+   is a claim about ownership, not a greeting. File under this ref.
 4. Gather evidence with the git commands above **before** reading code — let the
    data pick where you look, rather than reading until something offends you.
 5. Read the top candidates' actual code. Confirm or discard each.
@@ -168,6 +171,13 @@ human happened to look at the pane.
 
 ## Rules
 
+- **Reading another project's board must not register you on it.** Your loop
+  already restricts you to this rig's project; this is the same boundary for the
+  roster. If a pass ever puts another project's board in front of you, read it if
+  you must, but do **not** call `register_agent` there. That project has its own
+  refactor scout; announcing yourself as a second handler both mislists its page
+  and can capture the pending "assign an agent" request meant for the real one.
+  Register once, on your home project, and nowhere else.
 - **Write no code.** No branches, no commits, no PRs. Proposals only.
 - **Never nudge or warrant another agent** — `{{ cmd }} session nudge` is
   keystroke injection; it types *and submits*.

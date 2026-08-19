@@ -201,6 +201,19 @@ cd_release() {
     >/dev/null 2>&1 || true
 }
 
+# cd_holder — peer-unique identity for the directive claim.
+#
+# The claim is a cross-city mutex: if two Gas City instances on the same rig
+# share the same claimed_by, either can heartbeat or complete the other's
+# claim and the mutex becomes inert (issue 398). The holder therefore names
+# the rig's conductor agent AND this city (and host, so identically-named
+# cities on different hosts do not collide).
+cd_holder() {
+  _cdh_city="$(sy_city_name)"
+  _cdh_host="${HOSTNAME:-$(hostname 2>/dev/null || echo 'unknown')}"
+  printf '%s@%s/%s' "$qualified" "$_cdh_host" "$_cdh_city"
+}
+
 # The directive held RIGHT NOW, for the kill trap. One at a time by
 # construction, so three scalars are the whole state. A cycle killed mid-dispatch
 # returns its directive to the queue rather than parking it for a lease.
@@ -356,10 +369,14 @@ for rig in $CONDUCTOR_RIGS; do
 
   # --- Claim ONE directive ---------------------------------------------------
   #
-  # The holder identity is the rig's conductor lane, not this script: the
-  # dispatched session heartbeats and completes under the SAME claimed_by, so
-  # the lease it extends is the one this cycle took.
-  holder="$qualified"
+  # The holder identity is the rig's conductor lane ON THIS PEER, not just the
+  # rig: the dispatched session heartbeats and completes under the SAME
+  # claimed_by, so the lease it extends is the one this cycle took. If every
+  # peer on a rig used the bare rig/agent identity, two cities on one rig could
+  # each operate the same claim and the directive mutex would be inert
+  # (issue 398). GC_CITY names this city; hostname keeps identically-named
+  # cities on different hosts distinct.
+  holder="$(cd_holder)"
   claim="$(sy_api_post "/api/v1/projects/$project/$CONDUCTOR_API_SEGMENT/claim" "$token" \
     "$(jq -nc --arg w "$holder" --argjson l "$CONDUCTOR_LEASE_SECONDS" \
         '{claimed_by:$w, lease_seconds:$l}')")"

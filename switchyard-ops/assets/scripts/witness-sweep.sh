@@ -27,8 +27,10 @@
 #      queued, unsubmitted prompt (pane-stall.sh's exact markers — not busy,
 #      prompt-glyph line non-empty, placeholders excluded). The response is a
 #      LADDER, one rung per cycle, keyed per session: first sighting nudges
-#      once via `gc session nudge` (the nudge submits the queued text, which is
-#      the complete observed fix); the same session still wedged on the NEXT
+#      once via `gc session nudge --delivery immediate` (which submits the
+#      queued text AND clears the line — the complete observed fix; the default
+#      wait-idle delivery submits nothing on a wedged pane, see the call site);
+#      the same session still wedged on the NEXT
 #      cycle is escalated by mail instead of nudged again, so a nudge-immune
 #      session becomes a decision rather than a nudge loop. A session seen
 #      healthy clears its marker, so the next wedge is a new episode starting
@@ -331,11 +333,24 @@ These same entries are live in the project's decision inbox (list_pending_decisi
         esac
         # WEDGED: active, stale, input queued. One rung per cycle.
         if [ ! -f "$w_marker" ]; then
-          # Rung 1: one nudge. The nudge types text + Enter, which submits the
-          # queued prompt — the complete observed fix. The marker is written
-          # whether or not the nudge delivered (a rung TRIED is a rung spent;
-          # retrying it forever is the loop this ladder replaces).
-          gc session nudge "$w_ref" "witness-sweep: your last turn ended with input still queued and no activity for $(( now - w_epoch ))s. This nudge submits the queued prompt; continue where you left off." >/dev/null 2>&1 || true
+          # Rung 1: one nudge. The nudge must type text + Enter to SUBMIT the
+          # queued prompt — that submission is the entire fix, not the message.
+          #
+          # ⛔ `--delivery immediate` IS LOAD-BEARING, NOT A TUNING KNOB. The
+          # default is `wait-idle`, which appends the text and waits for an idle
+          # boundary to submit. A wedged pane never reaches that boundary — its
+          # turn already ended with input queued — so the default delivers
+          # NOTHING and additionally leaves its own text on the dirty line,
+          # where the next nudge is appended to the fragment and submitted as
+          # one corrupted string. That is the failure this rung was written to
+          # cure, so the default made rung 1 a no-op and every wedge fell
+          # through to rung 2's mail. `immediate` submits AND clears the line.
+          # If this flag is ever dropped, the ladder goes silently dead again.
+          #
+          # The marker is written whether or not the nudge delivered (a rung
+          # TRIED is a rung spent; retrying it forever is the loop this ladder
+          # replaces).
+          gc session nudge "$w_ref" --delivery immediate "witness-sweep: your last turn ended with input still queued and no activity for $(( now - w_epoch ))s. This nudge submits the queued prompt; continue where you left off." >/dev/null 2>&1 || true
           printf 'nudged\n' > "$w_marker" 2>/dev/null || true
           echo "witness-sweep: $rig session $w_ref is wedged (input queued, idle $(( now - w_epoch ))s) — nudged once"
         elif [ "$(awk 'NF{print;exit}' "$w_marker" 2>/dev/null)" = "nudged" ]; then

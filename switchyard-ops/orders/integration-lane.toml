@@ -16,6 +16,13 @@
 # script — the lane sits one API call away from being an unattended production
 # deploy path, and that call will always look harmless.
 #
+# 2026-08-19 REVISION OF SCOPE, not of this ruling: the owner directed that
+# merge authority exist in the pack (reviewed PRs merge into staging; staging
+# promotes to main on a cadence). That authority lives in `merge-lane` and
+# `staging-promote`, opt-in per rig via roster.conf, and NOWHERE else. This
+# lane's own contract is unchanged: it bundles, tests, and mails — the two
+# merge orders decide nothing about review quality that this lane could.
+#
 # CADENCE — 2h, and the reasoning is throughput, not latency.
 # Nothing is at risk while this order waits: every constituent is an open PR,
 # durable on the remote, and a human can merge any of them by hand at any time.

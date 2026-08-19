@@ -22,6 +22,46 @@ PROVIDER="${JUDGE_PROVIDER:-kimi}"
 UNCONFIGURED_MARKER="$(sy_state_dir)/judge-sweep.unconfigured"
 SKEW_MARKER="$(sy_state_dir)/judge-sweep.provider-skew"
 
+# sy_provider_args PROVIDER — print the resolved provider args from
+# `gc config show`, one per line. Empty output means the provider has no args.
+sy_provider_args() {
+  _pa_provider="$1"
+  gc config show 2>/dev/null | awk -v p="$_pa_provider" '
+    BEGIN { in_section = 0; in_args = 0; buf = "" }
+    /^\[providers\./ {
+      if (in_section) exit
+      in_section = (match($0, "^\\[providers\\." p "\\]") != 0)
+      next
+    }
+    in_section && /^[[:space:]]*args[[:space:]]*=/ {
+      in_args = 1
+      buf = $0
+      if (buf ~ /\][[:space:]]*$/) { emit(buf); exit }
+      next
+    }
+    in_args {
+      buf = buf $0
+      if (buf ~ /\][[:space:]]*$/) { emit(buf); exit }
+      next
+    }
+    END { if (in_args && buf ~ /\][[:space:]]*$/) emit(buf) }
+
+    function emit(line,    n, i, s) {
+      sub(/^[[:space:]]*args[[:space:]]*=[[:space:]]*\[/, "", line)
+      sub(/\][[:space:]]*$/, "", line)
+      n = split(line, parts, ",")
+      for (i = 1; i <= n; i++) {
+        s = parts[i]
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", s)
+        if (s ~ /^".*"$/) {
+          gsub(/^"|"$/, "", s)
+          print s
+        }
+      }
+    }
+  '
+}
+
 # The default provider is always usable — skip the readiness gate entirely.
 if [ "$PROVIDER" != "claude" ]; then
 
@@ -41,23 +81,52 @@ if [ "$PROVIDER" != "claude" ]; then
   - the '$PROVIDER' CLI is not on PATH"
   fi
 
-  # 3. an API key. Name is conventional: KIMI_API_KEY, CURSOR_API_KEY, etc.
+  # 3. Auth credentials. Name is conventional: KIMI_API_KEY, CURSOR_API_KEY, etc.
+  #    For kimi we also accept OAuth credentials: either a populated
+  #    ~/.kimi-code/oauth directory or a successful `kimi -p` probe.
   keyvar="$(printf '%s' "$PROVIDER" | tr '[:lower:]' '[:upper:]')_API_KEY"
   eval "keyval=\${$keyvar:-}"
-  if [ -z "${keyval:-}" ]; then
+  _has_oauth=0
+  if [ "$PROVIDER" = "kimi" ]; then
+    _oauth_dir="${KIMI_CODE_OAUTH_DIR:-$HOME/.kimi-code/oauth}"
+    if [ -d "$_oauth_dir" ]; then
+      _has_oauth=1
+    elif command -v kimi >/dev/null 2>&1; then
+      if sy_timeout 10 kimi -p >/dev/null 2>&1; then
+        _has_oauth=1
+      fi
+    fi
+  fi
+  if [ -z "${keyval:-}" ] && [ "$_has_oauth" -eq 0 ]; then
     missing="$missing
-  - \$$keyvar is not set"
+  - \$$keyvar is not set and no OAuth credentials found"
   fi
 
-  # 4. PROVIDER-SPAWN READINESS PROBE: the CLI must accept the flags gc's
-  # builtin provider will pass it. For builtin:kimi that includes --no-thinking.
-  # The probe mimics the invocation (global option, no subcommand) and checks
-  # stderr for "unknown option", because kimi 0.35.0 prints that error even
-  # though its exit code is 0.
-  if [ "$PROVIDER" = "kimi" ] && command -v kimi >/dev/null 2>&1; then
-    _probe_err="$(sy_timeout 10 kimi --no-thinking 2>&1 >/dev/null)"
-    if printf '%s' "$_probe_err" | grep -qi "unknown option.*--no-thinking"; then
-      skew="kimi CLI rejects --no-thinking (provider/cli version skew): the installed kimi does not accept the flag gc's builtin:kimi provider passes. Judging cannot start until the CLI and provider agree."
+  # 4. PROVIDER-SPAWN READINESS PROBE: the CLI must accept the args gc's
+  # builtin provider will pass it. We extract those args from the resolved
+  # config and run the CLI with them. kimi is special-cased because older
+  # versions print "unknown option" even though their exit code is 0.
+  if command -v "$PROVIDER" >/dev/null 2>&1; then
+    _provider_args="$(mktemp)"
+    sy_provider_args "$PROVIDER" >"$_provider_args"
+    _probe_err="$(
+      set --
+      while IFS= read -r _arg; do
+        set -- "$@" "$_arg"
+      done <"$_provider_args"
+      sy_timeout 10 "$PROVIDER" "$@" 2>&1 >/dev/null
+    )"
+    _probe_rc=$?
+    rm -f "$_provider_args"
+
+    if [ "$PROVIDER" = "kimi" ]; then
+      if printf '%s' "$_probe_err" | grep -qi "unknown option"; then
+        skew="kimi CLI rejects resolved provider args: the installed kimi does not accept the flags gc's builtin:kimi provider passes. Judging cannot start until the CLI and provider agree."
+      fi
+    else
+      if [ "$_probe_rc" -ne 0 ]; then
+        skew="$PROVIDER CLI failed the spawn-readiness probe (exit $_probe_rc): the installed CLI does not accept the flags gc's builtin:$PROVIDER provider passes. Judging cannot start until the CLI and provider agree."
+      fi
     fi
   fi
 
@@ -79,8 +148,8 @@ $skew
 No judging sessions are being spawned, so the awaiting-validation backlog is not draining. This is a provider/cli version mismatch, NOT a load-induced startup handshake failure.
 
 To recover:
-  - upgrade the kimi CLI to a version accepting --no-thinking, OR
-  - downgrade gc to a version whose builtin:kimi provider does not pass --no-thinking, OR
+  - upgrade the $PROVIDER CLI to a version accepting the resolved args, OR
+  - downgrade gc to a version whose builtin:$PROVIDER provider does not pass those args, OR
   - run the judge on the default provider by patching city.toml:
       [[patches.agent]]
         name = \"switchyard/switchyard-ops.judge\"
@@ -109,7 +178,7 @@ To enable the lane, in city.toml:
   base = \"builtin:$PROVIDER\"
   args = [\"--model\", \"kimi-k2.6\"]
 
-...install the CLI, export \$$keyvar in the session environment, then 'gc reload'.
+...install the CLI, export \$$keyvar in the session environment or configure OAuth, then 'gc reload'.
 
 To run the judge on the default provider instead (accepting that builder and validator share a runtime brain, which is the whole point of pinning it), see agents/judge/agent.toml for the [[patches.agent]] provider override." >/dev/null 2>&1
     touch "$UNCONFIGURED_MARKER" 2>/dev/null

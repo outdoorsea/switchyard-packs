@@ -1,0 +1,57 @@
+# Merge reviewed, green pull requests into the staging base — the lane that
+# closes the "published but nobody merges" half of the loop.
+#
+# HISTORY — this reverses a deliberate decision, on the owner's directive.
+# PRD 340 question 305 ruled that `integration-lane` NEVER merges: it bundles,
+# tests the combination, and mails a person, because a lane that merges "sits
+# one API call away from being an unattended production deploy path". That
+# ruling stands for integration-lane itself. What changed is the policy above
+# it: on 2026-08-19 the owner directed that PRs be merged into staging after
+# review, with staging promoted to the default branch on a fixed cadence
+# (see `staging-promote`). Merge authority therefore exists in the pack now,
+# but it lives HERE, in one order, opt-in per rig, and nowhere else — do not
+# add `gh pr merge` to any other order.
+#
+# WHAT COUNTS AS "AFTER REVIEW" — the repo's own bar, mechanically applied:
+# CI green is not sufficient (docs/code-guidelines.md: "No PR merges on CI
+# green alone — the gate is CI + a finished review"). A PR qualifies when ALL
+# of the following hold on the CURRENT head:
+#   1. not a draft, no hold label (MERGE_LANE_HOLD_LABEL, default
+#      `do-not-merge`), mergeable, and NOT BEHIND its base — a green check on
+#      a behind branch was green against the base at TRIGGER time, which says
+#      nothing about the tree it would land on. A behind PR is update-branched
+#      (spending one cycle) so its next verdict is against the real base.
+#   2. no standing CHANGES_REQUESTED (latest review per reviewer), and either
+#      an APPROVED review, or a fallback review comment carrying the literal
+#      marker (MERGE_LANE_REVIEW_MARKER, default `Verdict: APPROVE`) posted
+#      AFTER the head's last commit — a verdict on an older head proves
+#      nothing about this one.
+#   3. every check on the head completed and none failed; zero checks = no
+#      merge (absence of CI is not CI).
+#
+# ONE MERGE PER RIG PER RUN, oldest first. Each merge moves the base, which
+# invalidates every sibling's green — merging two on one sweep would land the
+# second against a tree it was never tested on. One-at-a-time makes the lane
+# self-pacing: merge, siblings go BEHIND, next run update-branches one, CI
+# re-proves it against the new base, next run merges it. The interval below is
+# therefore the lane's throughput ceiling (~6 merges/hour), not its latency.
+#
+# SILENT when the queue is quiet or nothing qualifies — pr-gate already ages
+# and escalates stuck PRs; this lane's only mail is a merge call that FAILS on
+# a PR that passed every gate, which means the lane's model of mergeability is
+# wrong and a person should look.
+#
+# OFF BY DEFAULT. MERGE_LANE_RIGS in roster.conf is the only switch; empty
+# means this order exits without reading anything else. Merge authority is a
+# per-city, per-rig decision an operator makes deliberately.
+#
+# Configuration lives in roster.conf (all optional):
+#   MERGE_LANE_RIGS           ""            rigs granted merge authority; empty = lane off
+#   MERGE_LANE_BASE           staging       only PRs against this base are considered
+#   MERGE_LANE_HOLD_LABEL     do-not-merge  label that exempts a PR from the lane
+#   MERGE_LANE_REVIEW_MARKER  Verdict: APPROVE   literal marker a fallback review must carry
+[order]
+description = "Merge reviewed, CI-green pull requests into the staging base, one per rig per run, oldest first"
+trigger = "cooldown"
+interval = "10m"
+exec = "$PACK_DIR/assets/scripts/merge-lane.sh"

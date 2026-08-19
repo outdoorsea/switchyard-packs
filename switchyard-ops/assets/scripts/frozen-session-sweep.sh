@@ -23,7 +23,8 @@
 #
 # A frozen session holds recoverable context — it resumes exactly where it
 # froze when re-prompted, which a replacement session cannot. So this sweep
-# sends `gc session nudge` with a resume message that tells the agent to
+# sends `gc session nudge --delivery immediate` with a resume message that
+# tells the agent to
 # RE-VERIFY STATE FIRST (its leases were likely reclaimed while it was
 # frozen; sibling PRs may have merged). Nudging a still-capped session is
 # effectively free — the attempt is refused before any inference happens —
@@ -143,7 +144,13 @@ while IFS= read -r s; do
   case "$count" in ''|*[!0-9]*) count=0 ;; esac
 
   if [ "$count" -lt "$NUDGE_CAP" ]; then
-    gc session nudge "$s" "$RESUME_MSG" >/dev/null 2>&1
+    # `--delivery immediate` submits AND clears the input line. The default
+    # wait-idle appends and waits for an idle boundary, which a session frozen
+    # at a terminal API error does not reach — so the resume text would sit
+    # unsubmitted, and with NUDGE_CAP retries this lane would stack up to that
+    # many fragments on one line before escalating. Clearing per attempt is
+    # what makes "nudging a still-capped session is effectively free" true.
+    gc session nudge "$s" --delivery immediate "$RESUME_MSG" >/dev/null 2>&1
     count=$((count + 1))
   elif [ "$count" -eq "$NUDGE_CAP" ]; then
     # Cap reached: escalate once, then only remember the episode.

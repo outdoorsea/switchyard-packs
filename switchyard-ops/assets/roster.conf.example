@@ -334,3 +334,35 @@
 # SY_FANOUT_HEARTBEAT_CMD=""
 # SY_FANOUT_REAP_GRACE="5"
 # SY_FANOUT_LEASE_LOG="/var/log/switchyard/fanout-lease.log"
+
+# --- Merge authority (merge-lane + staging-promote, owner directive 2026-08-19) ---
+#
+# Both lanes are OFF until their rig list is set — merge authority is a
+# deliberate per-city, per-rig grant, never a default. The full gates live in
+# orders/merge-lane.toml and orders/staging-promote.toml.
+#
+# MERGE_LANE_RIGS — rigs whose reviewed, CI-green PRs against MERGE_LANE_BASE
+#   are merged automatically, one per rig per run, oldest first. Empty = off.
+#
+# MERGE_LANE_BASE — the base branch the lane feeds. Default "staging".
+#
+# MERGE_LANE_HOLD_LABEL — a PR carrying this label is never touched by the
+#   lane. Default "do-not-merge".
+#
+# MERGE_LANE_REVIEW_MARKER — the literal text a fallback review comment must
+#   carry (posted after the head's last commit) to count as a finished review
+#   when no APPROVED review exists. Default "Verdict: APPROVE" — the string the
+#   /code-review fallback verdicts already post.
+#
+# STAGING_PROMOTE_RIGS — rigs whose STAGING_PROMOTE_FROM branch is promoted
+#   into the rig default branch via a merged promotion PR whenever it is ahead
+#   and the promotion PR's own trial-merge checks are green. Empty = off.
+#
+# STAGING_PROMOTE_FROM — the branch promoted. Default "staging".
+#
+# MERGE_LANE_RIGS=""
+# MERGE_LANE_BASE="staging"
+# MERGE_LANE_HOLD_LABEL="do-not-merge"
+# MERGE_LANE_REVIEW_MARKER="Verdict: APPROVE"
+# STAGING_PROMOTE_RIGS=""
+# STAGING_PROMOTE_FROM="staging"

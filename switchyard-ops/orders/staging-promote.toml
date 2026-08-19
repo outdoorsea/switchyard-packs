@@ -1,0 +1,50 @@
+# Promote staging to the default branch on a fixed cadence.
+#
+# The other half of the 2026-08-19 owner directive that created `merge-lane`:
+# "PRs should be merged into staging after review, and every 30 minutes
+# staging should merge to main." merge-lane feeds staging; this order drains
+# it. Together they are the pack's entire merge authority — nothing else in
+# the pack calls `gh pr merge`, and integration-lane's own NEVER-MERGES ruling
+# (PRD 340 question 305) still stands for that lane.
+#
+# WHY A PROMOTION PR AND NOT A PUSH. The default branch auto-deploys
+# (Railway), and every accountability surface in this system — webhook
+# auto-attachment, deploy_shipped_prs, the review record — is keyed to pull
+# requests. A direct push would deploy exactly the same tree while leaving no
+# PR for any of that machinery to see. The lane therefore opens ONE promotion
+# PR from staging (reusing it if one is already open, since a PR from a branch
+# always reflects that branch's current head) and merges it.
+#
+# WHAT GATES THE MERGE. The promotion PR's own trial-merge checks, green on
+# the current heads. Staging-push CI green is NOT accepted as a substitute:
+# main can carry direct fix PRs staging does not have yet, and in that state
+# the merge RESULT is a tree that never existed on either branch — the exact
+# blind spot integration-lane documents. The cost is honesty's latency: a
+# promotion typically lands one tick after the staging change that armed it
+# (checks run during the gap), so the effective cadence is 30-60 minutes.
+# Review bar: the constituents were each reviewed before merge-lane let them
+# into staging, and the promotion adds no content of its own — the PR body
+# says so and lists them.
+#
+# BODY HYGIENE — two repo guards make the generated body a hazard if copied
+# naively from commit subjects. "PRD #N" in a PR body ATTACHES the PR to that
+# PRD (prd-ref guard), and an "issue-N" token CLOSES that issue on merge
+# (issue-ref guard). A promotion PR must do neither — the constituent PRs
+# already did both. The script de-fangs both token forms in everything it
+# quotes.
+#
+# Reports to the mayor only when promotion is BLOCKED: staging CI red, or the
+# promotion PR's checks red — once per offending sha, not per tick. A quiet
+# lane means staging is either promoted or empty.
+#
+# OFF BY DEFAULT, same contract as merge-lane: STAGING_PROMOTE_RIGS empty
+# means the order exits without reading anything.
+#
+# Configuration lives in roster.conf (all optional):
+#   STAGING_PROMOTE_RIGS  ""       rigs whose staging is promoted; empty = lane off
+#   STAGING_PROMOTE_FROM  staging  branch promoted into the rig default branch
+[order]
+description = "Open and merge the staging-to-main promotion PR whenever staging is ahead and the combination proves green"
+trigger = "cooldown"
+interval = "30m"
+exec = "$PACK_DIR/assets/scripts/staging-promote.sh"

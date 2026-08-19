@@ -281,6 +281,15 @@ nudges() { count_log "$1/nudged.log" '^NUDGE '; }
 spawns() { count_log "$1/spawned.log" '^SPAWN '; }
 mails() { count_log "$1/mailed.log" '^SUBJ '; }
 
+# expected_holder CITY RIG — the peer-unique claimed_by this order should use
+# for RIG in CITY. Matches conductor.sh: $qualified@$HOSTNAME/$city_name.
+expected_holder() {
+  local city_name host
+  city_name="$(basename "$1")"
+  host="$(hostname 2>/dev/null || echo "${HOSTNAME:-unknown}")"
+  printf '%s/%s@%s/%s' "$2" "switchyard-ops.conductor" "$host" "$city_name"
+}
+
 # ---------------------------------------------------------------------------
 # 1. POSITIVE CONTROL — load-bearing. If a served directive did NOT dispatch,
 #    every negative case below would pass vacuously by dispatching nothing.
@@ -316,10 +325,12 @@ fi
 
 # The claim must carry the lease PRD #371 settled on, and the holder identity the
 # dispatched session is told to heartbeat under — otherwise the session extends
-# a lease nobody took.
+# a lease nobody took. The holder is peer-unique (issue 398), so assert the exact
+# identity this city should have used.
+_holder="$(expected_holder "$c" rigA)"
 if grep -q '"lease_seconds":90' "$c/api.log" 2>/dev/null &&
-	grep -q '"claimed_by":"rigA/switchyard-ops.conductor"' "$c/api.log" 2>/dev/null &&
-	grep -q 'claimed_by: "rigA/switchyard-ops.conductor"' "$c/nudged.log" 2>/dev/null; then
+	grep -qF "\"claimed_by\":\"$_holder\"" "$c/api.log" 2>/dev/null &&
+	grep -qF "claimed_by: \"$_holder\"" "$c/nudged.log" 2>/dev/null; then
 	report ok "the claim takes a 90s lease and the dispatch names the same holder"
 else
 	report FAIL "the claim takes a 90s lease and the dispatch names the same holder" \
@@ -708,7 +719,7 @@ rm -rf "$c"
 c="$(new_city)"
 serve "$c" 101
 run_cycle "$c" "rigA" "" "90s"
-if grep -q '"claimed_by":"rigA/switchyard-ops.conductor"' "$c/api.log" 2>/dev/null &&
+if grep -qF "\"claimed_by\":\"$(expected_holder "$c" rigA)\"" "$c/api.log" 2>/dev/null &&
 	grep -q '"lease_seconds":90' "$c/api.log" 2>/dev/null; then
 	report ok "a mistyped CONDUCTOR_LEASE_SECONDS falls back rather than claiming anonymously"
 else

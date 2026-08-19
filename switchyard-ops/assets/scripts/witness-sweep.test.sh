@@ -127,7 +127,11 @@ case "$1 $2" in
 "session list") cat "$GC_CITY/sessions.json" ;;
 "session nudge")
 	[ -f "$GC_CITY/nudge-broken" ] && exit 1
-	printf 'NUDGE %s\n' "$3" >>"$GC_CITY/nudged.log"
+	# Record the WHOLE invocation, not just the ref. The counters below match
+	# on '^NUDGE ' and read the ref as field 2, so both still work; what this
+	# adds is the delivery mode, which the rung's correctness depends on and
+	# which a name-only mock silently accepts either way.
+	printf 'NUDGE %s ARGV %s\n' "$3" "$*" >>"$GC_CITY/nudged.log"
 	;;
 "mail send")
 	[ -f "$GC_CITY/mail-broken" ] && exit 1
@@ -353,6 +357,16 @@ if [ "$(nudges "$city")" = 1 ] && [ "$(mails "$city")" = 0 ]; then
 	report ok "wedge: first sighting is ONE nudge and no mail"
 else
 	report FAIL "wedge: first sighting is ONE nudge and no mail" "nudges=$(nudges "$city") mails=$(mails "$city")"
+fi
+# The rung's whole value is SUBMITTING the queued text. gc session nudge
+# defaults to --delivery wait-idle, which appends and waits for an idle
+# boundary a wedged pane never reaches — delivering nothing and dirtying the
+# line for the next nudge. Dropping this flag turns rung 1 back into a no-op
+# that still counts as "nudged", so the count assertion above cannot catch it.
+if grep -q '^NUDGE .* ARGV .*--delivery immediate' "$city/nudged.log" 2>/dev/null; then
+	report ok "wedge: the nudge is sent --delivery immediate so it SUBMITS the queued text"
+else
+	report FAIL "wedge: the nudge is sent --delivery immediate so it SUBMITS the queued text" "$(cat "$city/nudged.log" 2>/dev/null)"
 fi
 run_sweep "$city"
 out="$(mail_log "$city")"

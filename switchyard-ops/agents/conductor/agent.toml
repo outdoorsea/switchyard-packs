@@ -61,11 +61,13 @@ idle_timeout = "30m"
 # trade the order's header argues for.
 #
 # max 1, and it is LOAD-BEARING rather than a spend choice. The directive claim's
-# holder identity is the qualified agent name (`<rig>/switchyard-ops.conductor`),
-# not a per-session ref, so two sessions in this pool would be indistinguishable
-# holders: either could heartbeat or complete the other's directive, and the
-# ownership guard on the server could not tell them apart. One session per rig is
-# what keeps "the holder" a single thing. Widening this needs a per-session
-# claimed_by first — the same shape the brakeman pool needs — not a bigger number.
+# holder identity is the peer-unique form conductor.sh's cd_holder() builds —
+# `<rig>/switchyard-ops.conductor@<host>/<city>` (issue 398) — which separates
+# Gas City peers on the same rig, but it is still per-CITY, not per-session: two
+# sessions in this city's pool would be indistinguishable holders, and either
+# could heartbeat or complete the other's directive without the server's
+# ownership guard telling them apart. One session per city is what keeps "the
+# holder" a single thing. Widening this needs a per-session claimed_by first —
+# the same shape the brakeman pool needs — not a bigger number.
 min_active_sessions = 0
 max_active_sessions = 1

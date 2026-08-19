@@ -30,11 +30,26 @@
 #   CLAIMS NOTHING IT CANNOT HAND OVER. Three separate ways the hand-off can be
 #   impossible, each asserted on its own: no conductor session is live yet (the
 #   cycle must spawn one and claim NOTHING — claiming first would hold a 90s
-#   lease across a session start-up), the author is not authorized (release
-#   without dispatching), and the nudge fails (release immediately rather than
-#   stranding the directive for the whole lease). Together they are the
-#   difference between a directive that waits a minute and a room that gets two
-#   answers or none.
+#   lease across a session start-up), the session roster cannot be read at all
+#   (claim nothing and spawn nothing — an unreadable roster is not an empty
+#   one), and the nudge fails (release immediately rather than stranding the
+#   directive for the whole lease). Together they are the difference between a
+#   directive that waits a minute and a room that gets two answers or none.
+#
+#   AUTHORITY is deliberately NOT one of those ways, and section 5 pins that
+#   both directions. The server judges the author before the insert, so an
+#   unauthorized directive is never claimable and there is nothing here to
+#   refuse; the case that matters is the removed client-side veto staying
+#   removed, because the version that existed failed OPEN.
+#
+#   Read section 5 for exactly what it does and does not prove. "The pack does
+#   not re-check authority" is a weaker claim than "the refusal is covered": a
+#   server that stopped consulting its gate would leave every case in this file
+#   passing, §5 included, while the lane dispatched a stranger's directive into
+#   the room. Nothing here can see that, because nothing here has a server. The
+#   refusal itself is judged by internal/api/buzz_directive_authority_test.go,
+#   which needs Dolt and so runs in the `db tests (Dolt)` job; the conductor-gate
+#   job pins that that coverage still exists and that a job still runs it.
 #
 # It runs hermetically: a throwaway city plus stub `gc`, `switchyard-mcp` and
 # `curl` on PATH, answering from per-case fixtures. No real city, rig, session,
@@ -267,6 +282,31 @@ run_cycle() {
 		"$CONDUCTOR_TEST_SH" "$ORDER" >/dev/null 2>&1
 }
 
+# The same cycle with CONDUCTOR_LEASE_SECONDS absent from the environment.
+# run_cycle ALWAYS exports it — defaulting to 90 — so every case that goes
+# through run_cycle measures the harness's number rather than the order's, and
+# the `${CONDUCTOR_LEASE_SECONDS:-90}` default in conductor.sh could be edited
+# to any value at all without a single check here changing. Production runs it
+# unset (roster.conf sets the variable only to override), so the default IS the
+# lease nearly every claim goes out with; this is the one path that exercises
+# it.
+#
+# A subshell with an explicit `unset`, not a var prefix: a `VAR=x cmd` prefix
+# can only SET a variable, and this suite's own roster-timeout case records that
+# a var prefix on a function leaks into the caller under dash.
+run_cycle_default_lease() { # CITY
+	(
+		unset CONDUCTOR_LEASE_SECONDS
+		GC_CITY="$1" \
+			GC_PACK_STATE_DIR="$1/state" \
+			SWITCHYARD_API_TOKEN="sy_stub_token" \
+			CONDUCTOR_RIGS="rigA" \
+			RIG_PROJECTS="" \
+			PATH="$1/bin:$PATH" \
+			"$CONDUCTOR_TEST_SH" "$ORDER" >/dev/null 2>&1
+	)
+}
+
 # counts — each defaults its grep count, because `grep -c` prints 0 AND exits 1
 # when nothing matches, so a `|| echo 0` fallback would print "0" twice.
 count_log() { # FILE PATTERN
@@ -325,8 +365,10 @@ fi
 
 # The claim must carry the lease PRD #371 settled on, and the holder identity the
 # dispatched session is told to heartbeat under — otherwise the session extends
-# a lease nobody took. The holder is peer-unique (issue 398), so assert the exact
-# identity this city should have used.
+# a lease nobody took. The 90 here is the value run_cycle EXPORTS, so this case
+# pins the wire shape, not the order's own default; 12e's last case pins the
+# default itself by running with the variable unset. The holder is peer-unique
+# (issue 398), so assert the exact identity this city should have used.
 _holder="$(expected_holder "$c" rigA)"
 if grep -q '"lease_seconds":90' "$c/api.log" 2>/dev/null &&
 	grep -qF "\"claimed_by\":\"$_holder\"" "$c/api.log" 2>/dev/null &&
@@ -735,6 +777,38 @@ if [ "$(count_log "$c/api.log" '"lease_seconds":0')" = 0 ]; then
 else
 	report FAIL "a zero lease is refused rather than claimed and instantly expired" \
 		"$(grep '/directives/claim' "$c/api.log" 2>/dev/null | head -c 200)"
+fi
+rm -rf "$c"
+
+# ...and an UNSET lease claims the documented default. The two cases above pin
+# the repair paths; this pins the number being repaired TO. Every case in this
+# suite hands the order a lease through run_cycle, so all of them would keep
+# passing if conductor.sh's own `${CONDUCTOR_LEASE_SECONDS:-90}` were edited to
+# 30 — and 30 is what production would then claim, because roster.conf sets the
+# variable only to OVERRIDE and normally leaves it unset. The number is not
+# cosmetic: the whole liveness-before-claim design (see the order's header) is
+# sized against a 90-second lease, so shortening it silently reinstates the
+# double-answer the claim exists to prevent. A FRESH city, because the assertion
+# greps api.log for a 90 that the cases above would otherwise have written into
+# it.
+c="$(new_city)"
+serve "$c" 41
+run_cycle_default_lease "$c"
+if grep -q '"lease_seconds":90' "$c/api.log" 2>/dev/null; then
+	report ok "an unset CONDUCTOR_LEASE_SECONDS claims the order's own 90s default"
+else
+	report FAIL "an unset CONDUCTOR_LEASE_SECONDS claims the order's own 90s default" \
+		"$(grep '/directives/claim' "$c/api.log" 2>/dev/null | head -c 200)"
+fi
+# Positive control: the cycle above must actually have CLAIMED. Without this, a
+# run that died before reaching the claim (an unset variable under `set -u`, a
+# stub that never answered) would leave an empty api.log, and the assertion
+# would be reporting on a directive nobody ever asked for.
+if [ "$(claims "$c")" = 1 ]; then
+	report ok "control: the unset-lease cycle reached the claim it is measuring"
+else
+	report FAIL "control: the unset-lease cycle reached the claim it is measuring" \
+		"claims=$(claims "$c")"
 fi
 rm -rf "$c"
 

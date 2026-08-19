@@ -174,6 +174,61 @@
 # WITNESS_RIGS="<rig> <rig>"
 
 # ---------------------------------------------------------------------------
+# CONDUCTOR_RIGS — the rigs whose Buzz project channel gets a Conductor
+# (switchyard PRD #371).
+#
+# Unset (the default) means the conductor order exits before it does anything
+# a claim lane does — before the api token read, before the session-roster
+# read, before any API call — so an unopted city never issues a claim rather
+# than taking one and discarding it. (Loading this file, which may seed it from
+# this example on first use, happens before that gate — that is the only side
+# effect an unopted city performs.)
+# Naming a rig turns on a 1-minute lane for THAT RIG:
+#
+#   - A directive is a Buzz channel message that @-mentions the project's
+#     Conductor bot. Switchyard records it once (keyed on the channel event id,
+#     so a relay redelivery never queues a second answer) and refuses one whose
+#     author fails the channel-authority gate.
+#   - The order claims ONE directive per cycle under a 90-second lease and
+#     dispatches the `switchyard-ops.conductor` agent into the rig's worktree,
+#     scoped to the bound project. The claim is a cross-machine mutex: several
+#     cities may run this lane, and exactly one answers.
+#   - The answer is banked through switchyard and posted into the directive's
+#     THREAD by the outbound notifier, as the project bot. The answering
+#     machine never touches the relay and holds no Nostr key — only an
+#     `sy_` token.
+#
+# Liveness is checked BEFORE the claim, deliberately: holding a 90-second lease
+# across a session start-up is how two machines end up answering one question.
+# A cold city therefore costs one tick before it claims anything.
+#
+# Needs the pack's switchyard credential (SWITCHYARD_API_TOKEN, or the
+# switchyard-mcp CLI's own token file), and the rig's project must be bound to
+# a Buzz channel. A rig whose name is not its project slug needs a RIG_PROJECTS
+# entry, same as every other consumer.
+#
+# Optional overrides. The two numeric ones are normalised to bare digits
+# rather than pattern-matched — a value like "90s" would otherwise reach
+# `jq --argjson`, which prints nothing, and the malformed claim body would be
+# REFUSED by the server (claimed_by is required), so the cycle mails
+# "directive claim unreadable" and answers nothing until the value is fixed:
+#
+#   CONDUCTOR_LEASE_SECONDS   claim lease in seconds; default 90. Unset does
+#                             NOT defer to any per-project lease — the order
+#                             always sends the value explicitly, and no
+#                             per-project lease configuration exists yet.
+#   CONDUCTOR_ROSTER_TIMEOUT  seconds allowed for the `gc session list` roster
+#                             read; default 120. Digits only — a value like
+#                             "2m" makes every cycle read as a roster timeout
+#                             and the lane never dispatches.
+#   CONDUCTOR_AGENT           agent to dispatch (taken as-is, not normalised);
+#                             default switchyard-ops.conductor
+#
+# Format: space-separated rig names.
+#
+# CONDUCTOR_RIGS="<rig> <rig>"
+
+# ---------------------------------------------------------------------------
 # SY_FANOUT_THRESHOLD / SY_FANOUT_ENABLED — epic fan-out (switchyard PRD #372).
 #
 # A brakeman runs its build plan past the decomposer before building. Above the

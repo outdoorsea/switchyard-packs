@@ -94,9 +94,16 @@ for rig in $STAGING_PROMOTE_RIGS; do
       cat "$TMP/subjects"
       printf '\nOpened by the `staging-promote` pack order.\n'
     } > "$TMP/body"
+    # issue-ref-exempt from birth: constituent subjects lead with fix()/close
+    # and mention issues in prose, which the issue-ref guard reads as a closing
+    # claim missing its token. A promotion PR names issues its constituents
+    # already closed and must close nothing itself — the exemption is correct
+    # by construction, and the first live promotion (PR 1758) proved the guard
+    # fires without it.
     pr=$(gh pr create --repo "$slug" --base "$default_branch" \
           --head "$STAGING_PROMOTE_FROM" \
           --title "Promote $STAGING_PROMOTE_FROM to $default_branch ($ahead commits)" \
+          --label issue-ref-exempt \
           --body-file "$TMP/body" 2>/dev/null \
           | sed -n 's#^.*/pull/\([0-9]*\)$#\1#p')
     if [ -z "$pr" ]; then

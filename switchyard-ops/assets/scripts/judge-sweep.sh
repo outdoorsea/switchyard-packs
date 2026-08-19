@@ -44,7 +44,8 @@ sy_provider_args() {
       if (buf ~ /\][[:space:]]*$/) { emit(buf); exit }
       next
     }
-    END { if (in_args && buf ~ /\][[:space:]]*$/) emit(buf) }
+    # No END clause: `exit` inside a pattern-action still runs END, and any
+    # guard true after emit() has run would emit every arg a second time.
 
     function emit(line,    n, i, s) {
       sub(/^[[:space:]]*args[[:space:]]*=[[:space:]]*\[/, "", line)
@@ -89,10 +90,12 @@ if [ "$PROVIDER" != "claude" ]; then
   _has_oauth=0
   if [ "$PROVIDER" = "kimi" ]; then
     _oauth_dir="${KIMI_CODE_OAUTH_DIR:-$HOME/.kimi-code/oauth}"
-    if [ -d "$_oauth_dir" ]; then
+    # The directory must be non-empty: a bare mkdir left behind by an aborted
+    # login is not a credential.
+    if [ -d "$_oauth_dir" ] && [ -n "$(ls -A "$_oauth_dir" 2>/dev/null)" ]; then
       _has_oauth=1
     elif command -v kimi >/dev/null 2>&1; then
-      if sy_timeout 10 kimi -p >/dev/null 2>&1; then
+      if sy_timeout 10 kimi -p </dev/null >/dev/null 2>&1; then
         _has_oauth=1
       fi
     fi
@@ -104,8 +107,9 @@ if [ "$PROVIDER" != "claude" ]; then
 
   # 4. PROVIDER-SPAWN READINESS PROBE: the CLI must accept the args gc's
   # builtin provider will pass it. We extract those args from the resolved
-  # config and run the CLI with them. kimi is special-cased because older
-  # versions print "unknown option" even though their exit code is 0.
+  # config and run the CLI with them. Skew is judged by the CLI's rejection
+  # MESSAGE, never by exit code alone — older kimi prints "unknown option"
+  # yet exits 0, and other CLIs exit nonzero for reasons that are not skew.
   if command -v "$PROVIDER" >/dev/null 2>&1; then
     _provider_args="$(mktemp)"
     sy_provider_args "$PROVIDER" >"$_provider_args"
@@ -114,7 +118,7 @@ if [ "$PROVIDER" != "claude" ]; then
       while IFS= read -r _arg; do
         set -- "$@" "$_arg"
       done <"$_provider_args"
-      sy_timeout 10 "$PROVIDER" "$@" 2>&1 >/dev/null
+      sy_timeout 10 "$PROVIDER" "$@" </dev/null 2>&1 >/dev/null
     )"
     _probe_rc=$?
     rm -f "$_provider_args"
@@ -124,8 +128,13 @@ if [ "$PROVIDER" != "claude" ]; then
         skew="kimi CLI rejects resolved provider args: the installed kimi does not accept the flags gc's builtin:kimi provider passes. Judging cannot start until the CLI and provider agree."
       fi
     else
-      if [ "$_probe_rc" -ne 0 ]; then
-        skew="$PROVIDER CLI failed the spawn-readiness probe (exit $_probe_rc): the installed CLI does not accept the flags gc's builtin:$PROVIDER provider passes. Judging cannot start until the CLI and provider agree."
+      # A nonzero exit alone is NOT skew: an installed-but-unauthenticated CLI
+      # exits nonzero for lack of credentials, and a healthy CLI given flags
+      # but no work may print usage and exit nonzero. Both must fall through to
+      # the unconfigured notice (or to lane-ensure), so — like the kimi path —
+      # only an explicit option rejection in the CLI's own words is skew.
+      if printf '%s' "$_probe_err" | grep -Eqi 'unknown (option|flag)|unrecognized (option|flag)|invalid (option|flag)|no such (option|flag)'; then
+        skew="$PROVIDER CLI rejects resolved provider args (probe exit $_probe_rc): the installed CLI does not accept the flags gc's builtin:$PROVIDER provider passes. Judging cannot start until the CLI and provider agree."
       fi
     fi
   fi

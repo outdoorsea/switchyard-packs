@@ -174,7 +174,7 @@ To recover:
   - downgrade gc to a version whose builtin:$PROVIDER provider does not pass those args, OR
   - run the judge on the default provider by patching city.toml:
       [[patches.agent]]
-        name = \"switchyard/switchyard-ops.judge\"
+        name = \"<rig>/$SY_NS.judge\"
         provider = \"claude\"
 
 This notice repeats at most weekly." >/dev/null 2>&1

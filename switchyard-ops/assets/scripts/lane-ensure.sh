@@ -91,7 +91,7 @@ SUBJECT="${2:-$AGENT}"          # human label for the escalation mail
 sy_load_conf
 
 
-QUALIFIED="switchyard-ops.$AGENT"
+QUALIFIED="$SY_NS.$AGENT"
 
 # THE LANE'S QUEUE, per agent — the read that answers "is there anything for a
 # session to do?" without starting one (switchyard PRD #299, crit:61754b5dbdb9).

@@ -30,6 +30,22 @@
 
 set -u
 
+# SY_NS — the agent NAMESPACE every qualified name in this pack carries:
+# agents register as <rig>/<SY_NS>.<agent>, and every script that constructs,
+# matches, or spawns a qualified name goes through this variable instead of a
+# literal. It MUST equal the import key the city registered the pack under
+# ([imports.<key>] — the key is what gc namespaces agents by), and it defaults
+# to the pack's historical name. A city that imports the pack under a shorter
+# key (say `ops`, so the switchyard rig reads `switchyard/ops.judge` instead
+# of `switchyard/switchyard-ops.judge`) sets SY_NS="ops" in roster.conf in the
+# same change — the two must move together, and neither is derived from the
+# other on purpose: gc does not export the import key, and guessing it from a
+# path basename breaks the moment a test harness or a manual run points
+# GC_PACK_STATE_DIR somewhere arbitrary. roster.conf is sourced by
+# sy_load_conf AFTER this default lands, so a conf override wins everywhere
+# that reads $SY_NS at use time (every call site below does).
+SY_NS="${SY_NS:-switchyard-ops}"
+
 # sy_timeout SECS CMD... — run CMD with a wall-clock limit, portably.
 #
 # macOS ships NO `timeout` (and no `gtimeout` without coreutils). Prefer its system
@@ -198,7 +214,7 @@ sy_city_name() { basename "$(sy_city)"; }
 # without a single alarm. Keep these two paths identical.
 sy_state_dir() {
   if [ -n "${GC_PACK_STATE_DIR:-}" ]; then printf '%s' "$GC_PACK_STATE_DIR"
-  else printf '%s/.gc/runtime/packs/switchyard-ops' "$(sy_city)"; fi
+  else printf '%s/.gc/runtime/packs/%s' "$(sy_city)" "$SY_NS"; fi
 }
 
 sy_load_conf() {

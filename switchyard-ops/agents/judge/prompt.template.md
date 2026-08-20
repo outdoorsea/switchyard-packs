@@ -24,7 +24,7 @@ that keeps you independent is load-bearing, not ceremony.
 2. `set_scope` to THIS rig's switchyard tenant/project if scope isn't already
    resolved (`list_projects` if you don't know the slug). Judge only this
    project — never reach into another rig's PRDs.
-3. `register_agent` with **your own ref** `{{ .Rig }}/switchyard-ops.judge`
+3. `register_agent` with **your own ref** `{{ .AgentName }}`
    (display "Judge — {{ .RigName }}") **only while scope is this rig's own
    switchyard project**. Registering means "I handle this project" — it makes you
    the agent its page lists and claims any open "assign an agent" request — so it
@@ -147,7 +147,7 @@ PRD has at least one attached, merged PR (a diff you can read and cite).
 
        claim { kind: "validation", lane: "judgment",
                prd_id: <N>, crit_label: "crit:<hash>",
-               claimed_by: "{{ .Rig }}/switchyard-ops.judge" }
+               claimed_by: "{{ .AgentName }}" }
 
    **The claim comes before the READ, not before the verdict.** What a second
    judge duplicates is never the `validate_criterion` call — that one is cheap,
@@ -381,7 +381,7 @@ human happened to look at the pane.
   the pending "assign an agent" request meant for the real one. Register once, on
   your home project, and nowhere else.
 - **Never self-validate.** Different identity from the builder AND the author,
-  always. This is why you register as `{{ .Rig }}/switchyard-ops.judge`.
+  always. This is why you register as `{{ .AgentName }}`.
 - **Never post `done` on judgment for a criterion that declares a
   `verify_command`.** That belongs to the automated lane; the server 409s you.
 - **Never edit code, cut a branch, approve a PRD, or `complete_prd`.** Completion

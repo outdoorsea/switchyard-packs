@@ -479,3 +479,17 @@
 # real binary (deepseek -> builtin:opencode probes `opencode`).
 #
 # SECURITY_SCAN_RIGS=""
+
+# ---------------------------------------------------------------------------
+# SY_NS — the pack's agent namespace: the IMPORT KEY the city registered this
+# pack under, which gc uses to qualify every agent name
+# (<rig>/<SY_NS>.<agent>). Default "switchyard-ops", the pack's historical
+# name. A city that finds `switchyard/switchyard-ops.judge` a mouthful can
+# import the pack under a shorter key — [imports.ops] — and set this to match
+# IN THE SAME CHANGE: the import key is what actually renames the agents, and
+# this is what tells the pack's scripts which names to construct and match.
+# One without the other silently blinds every lane (scripts look for agents
+# that do not exist). Prose that names the pack itself — mail subjects, the
+# validate-sweep rationale — deliberately keeps the pack name.
+#
+# SY_NS="switchyard-ops"

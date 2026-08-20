@@ -136,6 +136,13 @@
 # rig, suspend the agent there ([[patches.agent]] suspended = true) rather than
 # withholding the import.
 #
+# CITY-AGNOSTIC, including the NAMESPACE: every qualified-name construction
+# goes through $SY_NS (lib/roster.sh; default "switchyard-ops"), so a city may
+# import the pack under a shorter key — [imports.ops] gives
+# `switchyard/ops.judge` — by setting SY_NS in roster.conf in the same change
+# (see roster.conf.example's SY_NS entry; the import key is what actually
+# renames the agents, SY_NS is what tells the scripts).
+#
 # CITY-AGNOSTIC: this pack names no rig, and the only agent it names is its own.
 # The liveness roster is derived from `gc agent list --json` (pool.min >= 1, not
 # suspended). Anything gc cannot express — singleton aliases, which agent runs

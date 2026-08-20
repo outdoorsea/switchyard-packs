@@ -396,7 +396,7 @@ The witness never kills or resets a session — one nudge, then this mail. This 
   w_workers=""
   if [ -n "$roster" ]; then
     _states_json="$(printf '%s' "$W_LIVE_STATES" | jq -Rc 'split(" ")')"
-    w_workers="$(printf '%s' "$roster" | jq -r --arg q "$rig/switchyard-ops.brakeman" --argjson live "$_states_json" '
+    w_workers="$(printf '%s' "$roster" | jq -r --arg q "$rig/$SY_NS.brakeman" --argjson live "$_states_json" '
       [ (.sessions // [])[]
         | select((.closed // false) | not)
         | (.agent // .agent_name // .qualified_name // "") as $n

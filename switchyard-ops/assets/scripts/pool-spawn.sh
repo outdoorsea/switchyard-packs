@@ -472,7 +472,7 @@ sy_pool_brakeman_max() {
   _raw="${2:-}"
   [ -n "$_raw" ] || return 2
   printf '%s' "$_raw" | jq -e 'type == "array" or (type == "object" and (.agents | type == "array"))' >/dev/null 2>&1 || return 2
-  _max="$(printf '%s' "$_raw" | jq -r --arg q "$1/switchyard-ops.brakeman" '
+  _max="$(printf '%s' "$_raw" | jq -r --arg q "$1/$SY_NS.brakeman" '
     [(if type=="array" then . else .agents end)[]
       | select((.qualified_name // "") == $q)] as $m
     | if ($m|length) != 1 then empty
@@ -518,7 +518,7 @@ sy_pool_brakeman_live() {
       type=="object" and
       ([.agent,.agent_name,.qualified_name,.template,.state]
        | all(.[]; .==null or type=="string")))' >/dev/null 2>&1 || return 2
-  _count="$(printf '%s' "$_raw" | jq -r --arg q "$1/switchyard-ops.brakeman" --argjson live "$_states_json" --argjson known "$_known_json" '
+  _count="$(printf '%s' "$_raw" | jq -r --arg q "$1/$SY_NS.brakeman" --argjson live "$_states_json" --argjson known "$_known_json" '
     [ (.sessions // [])[]
       | (.agent // .agent_name // .qualified_name // "") as $n
       | select( (.template // "") == $q
@@ -556,7 +556,7 @@ sy_pool_brakeman_identity_for_alias() {
   # identity that is neither this request's alias (either form) nor an
   # adhoc-shaped pool name is refused, because the shared roster is where an
   # unrelated session could wear our alias.
-  printf '%s' "$_raw" | jq -r --arg q "$1/switchyard-ops.brakeman" --arg a "$2" --arg qa "$1/switchyard-ops.$2" --argjson live "$_states_json" '
+  printf '%s' "$_raw" | jq -r --arg q "$1/$SY_NS.brakeman" --arg a "$2" --arg qa "$1/$SY_NS.$2" --argjson live "$_states_json" '
     [ (.sessions // [])[] | select((.alias // "") as $al | $al == $a or $al == $qa) ] as $records
     | if ($records | length) != 1 then empty
       else ($records[0]
@@ -613,7 +613,7 @@ sy_pool_spawn_brakeman() {
   # rejected with "exceeds max length 64", on stderr, which this call discards.
   # The claim pool sat at 138 for hours while each cycle either exited 0 on lock
   # contention or died on the deadline.)
-  _qual_prefix="$1/switchyard-ops."
+  _qual_prefix="$1/$SY_NS."
   _alias_budget=$(( 64 - ${#_qual_prefix} ))
   _seq="${2:-1}"
   case "$_seq" in ''|*[!0-9]*) return 1 ;; esac
@@ -736,7 +736,7 @@ sy_pool_spawn_brakeman() {
   # Assert the string gc will actually validate, not the one we hand it. This is
   # the assertion whose bare-string form caused the outage described above.
   [ "${#_qualified_alias}" -le 64 ] || return 1
-  _out="$(sy_timeout "$POOL_SPAWN_TIMEOUT" gc session new "$1/switchyard-ops.brakeman" --alias "$_spawn_alias" --json --no-attach 2>/dev/null)" || _out=""
+  _out="$(sy_timeout "$POOL_SPAWN_TIMEOUT" gc session new "$1/$SY_NS.brakeman" --alias "$_spawn_alias" --json --no-attach 2>/dev/null)" || _out=""
   _json_alias="$(printf '%s' "$_out" | jq -r '(if type=="object" then (.session // .) else empty end) | (.alias // "")' 2>/dev/null | head -n1)"
   _id="$(printf '%s' "$_out" | jq -r "$POOL_SESSION_ID_JQ" 2>/dev/null | awk 'NF' | head -n1)"
   # A JSON identity is usable immediately only when the response proves it came
@@ -749,8 +749,8 @@ sy_pool_spawn_brakeman() {
   esac
   case "$_id" in
     "$_spawn_alias"|"$_qualified_alias") ;;
-    "$1/switchyard-ops.brakeman-adhoc-"*)
-      _suffix=${_id#"$1/switchyard-ops.brakeman-adhoc-"}
+    "$1/$SY_NS.brakeman-adhoc-"*)
+      _suffix=${_id#"$1/$SY_NS.brakeman-adhoc-"}
       printf '%s' "$_suffix" | grep -Eq '^[[:alnum:]_.-]+$' || _id="" ;;
     *)
       # The alias check above already proved the response is THIS spawn's, and

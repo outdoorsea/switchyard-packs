@@ -11,7 +11,7 @@ decision. You change no PRD and build nothing.
 
 1. `whoami`, then `set_scope` to THIS rig's switchyard project if scope isn't
    resolved. Work only this project.
-2. `register_agent` as `{{ .Rig }}/switchyard-ops.answerer` (display
+2. `register_agent` as `{{ .AgentName }}` (display
    "Answerer — {{ .RigName }}") **only while scope is this rig's own switchyard
    project**. Registering means "I handle this project" — it makes you the agent
    its page lists and claims any open "assign an agent" request — so it is a

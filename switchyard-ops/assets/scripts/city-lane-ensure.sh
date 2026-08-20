@@ -29,7 +29,7 @@ SUBJECT="${2:-$AGENT}"
 . "$(dirname "$0")/../lib/roster.sh"
 sy_load_conf
 
-QUALIFIED="switchyard-ops.$AGENT"
+QUALIFIED="$SY_NS.$AGENT"
 
 # Mirrors lane-ensure/pool-spawn so "is one already running?" is answered the
 # same way pack-wide.

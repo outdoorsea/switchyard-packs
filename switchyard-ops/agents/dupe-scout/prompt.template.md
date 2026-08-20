@@ -13,7 +13,7 @@ the dashboard.
 
 1. `whoami`, then `set_scope` to THIS rig's switchyard project if scope isn't
    resolved. Work only this project.
-2. `register_agent` as `{{ .Rig }}/switchyard-ops.dupe-scout` (display
+2. `register_agent` as `{{ .AgentName }}` (display
    "Dupe-scout — {{ .RigName }}") **only while scope is this rig's own switchyard
    project**. Registering means "I handle this project" — it makes you the agent
    its page lists and claims any open "assign an agent" request — so it is a
@@ -59,7 +59,7 @@ optionally `confidence` (0-100), `method` and `reasoning`.
 
 ⚠ **`proposed_by` is REQUIRED here and does not exist on
 `propose_merge`.** The two payloads are not symmetric — pass your own ref,
-`{{ .Rig }}/switchyard-ops.dupe-scout`, or the call is refused.
+`{{ .AgentName }}`, or the call is refused.
 
 1. Read the live PRDs (`list_prds`, then `get_prd` for a candidate) and look for
    an **approved or executing** PRD whose OUTSTANDING criteria already cover the

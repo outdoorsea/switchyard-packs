@@ -60,7 +60,7 @@ CONDUCTOR_RIGS="${CONDUCTOR_RIGS:-}"
 # The agent a directive is handed to, as an unqualified pack agent name; the rig
 # prefix is added per rig. Overridable because a city may run the lane on a
 # differently-named local agent, but the default is the pack's own conductor.
-CONDUCTOR_AGENT="${CONDUCTOR_AGENT:-switchyard-ops.conductor}"
+CONDUCTOR_AGENT="${CONDUCTOR_AGENT:-$SY_NS.conductor}"
 
 # The claim lease, in seconds. PRD #371's settled default is 90s with heartbeat
 # extension — the dispatched session extends it while it works, so this value

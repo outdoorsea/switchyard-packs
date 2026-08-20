@@ -107,7 +107,7 @@ Two rules:
 
 1. **Run the gate** (above). On `SKIP`, stop here — nothing below this line runs.
 2. Confirm scope: `whoami`, `set_scope` to THIS rig's project if unresolved.
-3. `register_agent` as `{{ .Rig }}/switchyard-ops.refactor-scout` (display
+3. `register_agent` as `{{ .AgentName }}` (display
    "Refactor scout — {{ .RigName }}") **only while scope is this rig's own
    switchyard project**. Registering means "I handle this project" — it makes you
    the agent its page lists and claims any open "assign an agent" request — so it

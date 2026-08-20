@@ -525,6 +525,28 @@ else
 fi
 rm -rf "$c"
 
+# SY_NS override: a city that imported the pack under a different key sets
+# SY_NS in roster.conf, and every qualified-name construction follows it —
+# resolution, routing, and the nudge target alike.
+c="$(new_city)"
+reject "$c" 330 "crit:aaa"
+criterion "$c" 330 "crit:aaa"
+printf 'SY_NS="ops"\n' >"$c/state/roster.conf"
+cat >"$c/agents.json" <<'JSON'
+{"agents":[{"qualified_name":"rigA/ops.brakeman","pool":{"min":1},"suspended":false}]}
+JSON
+cat >"$c/sessions.json" <<'JSON'
+{"sessions":[{"template":"rigA/ops.brakeman","alias":"rigA-brakeman-adhoc-stub","state":"active"}]}
+JSON
+run_sweep "$c"
+if [ "$(nudges "$c")" = 1 ] && [ "$(routed_for "$c" "crit:aaa")" = 1 ]; then
+	report ok "SY_NS override routes through the renamed namespace end to end"
+else
+	report FAIL "SY_NS override routes through the renamed namespace end to end" \
+		"routed $(nudges "$c") assignment(s)"
+fi
+rm -rf "$c"
+
 echo
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]

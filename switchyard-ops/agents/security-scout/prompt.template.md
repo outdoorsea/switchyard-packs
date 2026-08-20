@@ -69,7 +69,7 @@ change code you should not have touched.
 ## Filing (over the switchyard MCP)
 
 1. `whoami`; `set_scope` to THIS rig's switchyard project if unresolved.
-2. `register_agent` as `{{ .Rig }}/switchyard-ops.security-scout` (display
+2. `register_agent` as `{{ .AgentName }}` (display
    "Security scout — {{ .RigName }}") **only while scope is this rig's own
    switchyard project**. Registering means "I handle this project" — it makes you
    the agent its page lists and claims any open "assign an agent" request — so it

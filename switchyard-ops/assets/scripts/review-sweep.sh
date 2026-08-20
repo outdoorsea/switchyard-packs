@@ -201,7 +201,7 @@ for rig in $REVIEW_LANE_RIGS; do
   # marker still suppresses re-dispatch. Busy-ness is read from the markers
   # themselves (field 2 of a fresh marker is the target), the same ledger
   # that gates the PR side.
-  if ! sy_session_aliases_for "$rig/switchyard-ops.reviewer" active > "$TMP/live-all"; then
+  if ! sy_session_aliases_for "$rig/$SY_NS.reviewer" active > "$TMP/live-all"; then
     failed="$failed $rig(roster-unreadable)"
     continue
   fi
@@ -264,7 +264,7 @@ diff is the one that would merge." </dev/null >/dev/null 2>&1; then
   if [ "$unassigned" -gt 0 ]; then
     # Both shapes gc emits: an object with .agents, or a bare top-level array
     # (roster.sh and pool-spawn parse the same output with the same guard).
-    pool_max="$(gc agent list --json 2>/dev/null | jq -r --arg q "$rig/switchyard-ops.reviewer" '
+    pool_max="$(gc agent list --json 2>/dev/null | jq -r --arg q "$rig/$SY_NS.reviewer" '
       (if type == "array" then . else (.agents // []) end)[]
       | select((.qualified_name // .name // "") == $q)
       | (.pool.max // .max_active_sessions // 2)' 2>/dev/null | head -n1)"
@@ -273,7 +273,7 @@ diff is the one that would merge." </dev/null >/dev/null 2>&1; then
     [ "$unassigned" -lt "$cap" ] && cap="$unassigned"
     i=0
     while [ "$i" -lt "$cap" ]; do
-      if ! gc session new "$rig/switchyard-ops.reviewer" --no-attach >/dev/null 2>&1; then
+      if ! gc session new "$rig/$SY_NS.reviewer" --no-attach >/dev/null 2>&1; then
         # A rig that never imported the reviewer agent, or a city at its
         # session cap: without this the lane is indistinguishable from a
         # quiet PR queue while every candidate waits forever.
@@ -292,7 +292,7 @@ if [ -n "$failed" ]; then
 
 nudge-failed means the reviewer session's alias resolved but 'gc session nudge' returned non-zero — check the session with 'gc session peek'.
 marker-write-failed means the reviewer WAS nudged but the assignment could not be recorded, so nothing suppresses a duplicate dispatch next cycle: fix the pack state directory's writability.
-spawn-failed means 'gc session new <rig>/switchyard-ops.reviewer' failed — the agent is not imported into that rig, is suspended, or the city is at its session cap.
+spawn-failed means 'gc session new <rig>/$SY_NS.reviewer' failed — the agent is not imported into that rig, is suspended, or the city is at its session cap.
 roster-unreadable means 'gc session list --json' could not be read, so liveness was UNKNOWN and nothing was dispatched for that rig this cycle." \
     >/dev/null 2>&1 || true
 fi

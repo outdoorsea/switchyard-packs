@@ -152,7 +152,7 @@ for rig in $VALIDATE_RIGS; do
   # The validator identity. Distinct from every builder identity by
   # construction (builders are brakeman adhoc sessions), which is what keeps
   # separation of duties from starving the lane.
-  validator="$rig/switchyard-ops.validator"
+  validator="$rig/$SY_NS.validator"
 
   # --- Guard 1: the lane's own checkout, hard-reset to merged main -----------
   repo="$state/validate-repo.$rig"

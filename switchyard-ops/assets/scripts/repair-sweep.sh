@@ -371,7 +371,7 @@ $prev"
 
   target=""
   target_known=1
-  if ! target="$(sy_live_session_for "$rig/switchyard-ops$worker_suffix")"; then
+  if ! target="$(sy_live_session_for "$rig/$SY_NS$worker_suffix")"; then
     target=""
     target_known=0
   fi
@@ -524,7 +524,7 @@ $prev"
     # full TTL.
     if [ "$worker_suffix" = ".rework" ] && [ -z "$target" ] && [ "$rework_attempted" -eq 0 ]; then
       rework_attempted=1
-      _rw_agent="$rig/switchyard-ops.rework"
+      _rw_agent="$rig/$SY_NS.rework"
       _rw_any="$(sy_session_alias_for "$_rw_agent" "" 2>/dev/null)" || _rw_any=""
       if [ -n "$_rw_any" ]; then
         if gc session wake "$_rw_any" >/dev/null 2>&1; then

@@ -214,9 +214,10 @@
 # "directive claim unreadable" and answers nothing until the value is fixed:
 #
 #   CONDUCTOR_LEASE_SECONDS   claim lease in seconds; default 90. Unset does
-#                             NOT defer to any per-project lease — the order
-#                             always sends the value explicitly, and no
-#                             per-project lease configuration exists yet.
+#                             NOT defer to the project's configured lease
+#                             (project_directive_policy) — the order always
+#                             sends the value explicitly, and an explicit ask
+#                             wins over the project's policy.
 #   CONDUCTOR_ROSTER_TIMEOUT  seconds allowed for the `gc session list` roster
 #                             read; default 120. Digits only — a value like
 #                             "2m" makes every cycle read as a roster timeout

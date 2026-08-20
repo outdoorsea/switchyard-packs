@@ -481,3 +481,83 @@ sy_prefix_of() {
   [ "$prefix" = "$entry" ] && prefix="${agent##*/}"
   printf '%s' "$prefix"
 }
+
+# sy_provider_bin PROVIDER — print the CLI binary a provider actually spawns.
+#
+# A provider's NAME and its BINARY are different things, and every readiness
+# gate that conflated them false-failed the moment a city registered a wrapped
+# provider: `deepseek` with `base = "builtin:opencode"` spawns the `opencode`
+# CLI, so `command -v deepseek` reports a missing CLI on a host where the lane
+# would spawn fine (observed on gc-factory 2026-08-20 — the judge lane could
+# not be probed on the provider it actually ran).
+#
+# Resolution follows the provider's `base` chain in the RESOLVED config
+# (`gc config show`), the same chain gc itself resolves at spawn:
+#   deepseek -> builtin:opencode  =>  opencode
+#   kimi     -> builtin:kimi      =>  kimi
+# A `builtin:<name>` base spawns the CLI named <name>; a base naming another
+# provider recurses (bounded at 5 hops — gc's own resolver rejects cycles, so
+# a deeper chain is config noise, not a real topology); a provider with no
+# resolvable base falls back to its own name, which is exactly the old
+# behaviour for every un-wrapped provider.
+#
+# Output is a bare binary name, never empty. Callers still `command -v` it —
+# this resolves WHICH name to look for, not whether it is installed.
+sy_provider_bin() {
+  _pb_name="$1"
+  _pb_conf="$(gc config show 2>/dev/null)"
+  _pb_hops=0
+  while [ "$_pb_hops" -lt 5 ]; do
+    _pb_base="$(printf '%s\n' "$_pb_conf" | awk -v p="$_pb_name" '
+      # Anchored MATCH, not whole-line equality: sy_provider_args and the
+      # registration greps all tolerate trailing content after the section
+      # header (a \r, an inline comment), and an over-strict match here would
+      # silently fall back to the name — the exact conflation this function
+      # exists to fix, with no diagnostic anywhere.
+      match($0, "^\\[providers\\." p "\\]") { insec = 1; next }
+      insec && /^\[/ { exit }
+      insec && $1 == "base" && $2 == "=" { v = $3; gsub(/"/, "", v); print v; exit }
+    ')"
+    case "$_pb_base" in
+      builtin:*) printf '%s' "${_pb_base#builtin:}"; return 0 ;;
+      '')        printf '%s' "$_pb_name";            return 0 ;;
+      *)         _pb_name="$_pb_base" ;;
+    esac
+    _pb_hops=$((_pb_hops + 1))
+  done
+  printf '%s' "$_pb_name"
+}
+
+# sy_session_aliases_for AGENT [STATE] — every matching session's alias, one
+# per line, active-first then most-recently-active. The PLURAL counterpart to
+# sy_session_alias_for, for lanes that run more than one concurrent session
+# (reviewer, max 2): the singular's head-1 answer cannot say "who ELSE is
+# live". Same tri-state contract — rc=2 means the roster is UNREADABLE, which
+# a caller must treat as knowing nothing (dispatching against a guessed-empty
+# roster is how one PR gets two reviewers). Shares the exact join predicate
+# with the singular so gc renaming .template or the -adhoc- suffix is fixed in
+# ONE file, not re-derived per lane.
+sy_session_aliases_for() {
+  if [ -n "${SY_SESSION_SNAPSHOT:-}" ]; then
+    _ssm_raw="$SY_SESSION_SNAPSHOT"
+  else
+    _ssm_raw="$(gc session list --json --state all 2>/dev/null)" || return 2
+  fi
+  [ -n "$_ssm_raw" ] || return 2
+  _ssm_out="$(printf '%s\n' "$_ssm_raw" | jq -r --arg q "$1" --arg st "${2:-}" '
+        [ (.sessions // [])[]
+          | select(((.closed // false) | not))
+          | (.agent // .agent_name // .qualified_name // "") as $n
+          | select( (.template // "") == $q
+                    or $n == $q
+                    or ($n | startswith($q + "-adhoc-")) )
+          | select($st == "" or (.state // "") == $st)
+        ]
+        | sort_by(.last_active // "")
+        | reverse
+        | ( map(select((.state // "") == "active"))
+            + map(select((.state // "") != "active")) )
+        | .[] | (.alias // .name // .id // "") | select(. != "")' 2>/dev/null)" || return 2
+  printf '%s\n' "$_ssm_out" | awk 'NF'
+  return 0
+}

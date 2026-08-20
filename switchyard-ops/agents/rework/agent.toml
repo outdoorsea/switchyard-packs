@@ -1,0 +1,56 @@
+# rework — the REPAIR specialist: the worker a judge-rejected criterion is
+# routed to, on rigs that opt in via roster.conf's REWORK_RIGS.
+#
+#   gc session new <rig>/switchyard-ops.rework --no-attach
+#
+# ...which is what repair-sweep does for an opted-in rig with rejections and
+# no live rework session. By default repair-sweep routes repairs to the shared
+# brakeman pool — a repair IS ordinary pool work with a known target — and
+# that stays the default. What this agent changes is the PROMPT the repair
+# lands in: a brakeman's prompt is written for building new work, and a repair
+# is the opposite job. The previous worker already built this criterion once;
+# a judge read the delivery against the criterion and refused it, with a
+# recorded reason. Fixing that needs the rejection read FIRST and the prior
+# delivery treated as the starting point — not a fresh build that reproduces
+# the same misreading, which is exactly what repeated identical rejections on
+# one criterion look like from the outside.
+#
+# LIKE THE CONDUCTOR AND REVIEWER, this agent does not find its own work: the
+# repair assignment arrives INSIDE repair-sweep's dispatch nudge, which names
+# the criterion, the PRD, and the rejection. The one claim it takes — the
+# criterion claim named in that nudge — it takes itself, so a second worker is
+# not routed onto the same repair (the nudge says so too).
+description = "Repairs one judge-rejected criterion per dispatch: reads the rejecting verdict and the prior delivery first, fixes what was refused, lands it as a PR"
+
+scope = "rig"
+
+# fresh: each repair is judged from the current rejection and the current
+# tree. Carrying the LAST repair's context into the next one is how a fix for
+# criterion A gets pattern-matched onto criterion B.
+wake_mode = "fresh"
+
+# A worktree, because unlike the judge and reviewer this agent WRITES code:
+# it branches, commits, and opens the repair PR — which is why it pairs
+# work_dir with the brakeman's pre_start: without worktree-setup.sh the
+# session's cwd is an empty non-git directory and every git/gh command dies
+# before the repair starts. The read-only lanes omit pre_start deliberately;
+# this agent is the pack's second code-writing one and follows its first.
+work_dir = ".gc/worktrees/{{.Rig}}/rework/{{.AgentBase}}"
+pre_start = ["{{.ConfigDir}}/assets/scripts/worktree-setup.sh {{.RigRoot}} {{.WorkDir}} {{.AgentBase}} --sync"]
+
+# The bare nudge is a stand-down (conductor precedent): work arrives only in
+# repair-sweep's dispatch nudge, which carries the REPAIR block.
+nudge = "Stand by. If this wake carries no REPAIR block you have no work: say IDLE: no repair dispatched, exiting turn. and stop. Never hunt for rejected criteria yourself — repair-sweep routes them."
+
+idle_timeout = "30m"
+max_session_age = "4h"
+
+# min 0: repair demand is bursty — a judge sweep produces rejections in
+# clumps. max 1: repairs on one rig serialize deliberately; two rework
+# sessions on one repo race worktrees for adjacent criteria of the same PRD,
+# and the repair queue is rarely deeper than the sweep's own once-per-cycle
+# routing anyway.
+min_active_sessions = 0
+max_active_sessions = 1
+
+fallback = true

@@ -1,0 +1,51 @@
+# Keep reviewable pull requests moving toward the review bar merge-lane
+# enforces — by dispatching a reviewer session onto each one, one PR per nudge.
+#
+# THE GAP THIS CLOSES. merge-lane (its header carries the owner directive)
+# merges only a PR whose CURRENT head carries a finished review: an APPROVED
+# review, or a comment with the fallback marker (`Verdict: APPROVE`). When the
+# repo's standing reviewer is absent or rate-limited — the 2026-08-19
+# CodeRabbit wave stalled every open PR at once — nothing produces that
+# verdict, and the pipeline's terminal stage silently starves while every
+# earlier lane reports healthy. This order is the fallback reviewer's
+# dispatcher; the review itself is a session's own reasoning, exactly like
+# every other lane here (the order decides WHO reviews WHAT; the session
+# decides the verdict).
+#
+# ONE PR PER NUDGE, ASSIGNED BY THE SWEEP. Two reviewers may run concurrently
+# (the agent's max_active_sessions), and nothing else keeps them off the same
+# PR — a reviewer that picked its own work would race its sibling onto the
+# newest diff. Assignment markers (state dir, keyed slug#num@head-sha) also
+# stop the SWEEP dispatching the same PR twice while a review is in flight;
+# a new head is a new key, so a re-push is re-reviewed by construction.
+#
+# WHAT QUALIFIES for dispatch: open, not draft, against the lane's base, no
+# hold label, no APPROVED reviewDecision, no standing CHANGES_REQUESTED (that
+# ball is the author's), no marker comment after the head's last commit, and
+# no failing CI on the head (a red PR goes back to its author without
+# spending a review; pending CI does not block — review and CI are parallel
+# work). These gates mirror merge-lane's review bar deliberately: everything
+# this order dispatches is exactly what stands between merge-lane and a merge.
+#
+# OFF BY DEFAULT. REVIEW_LANE_RIGS in roster.conf is the only switch; empty
+# means this order exits without reading anything. Same posture as merge-lane:
+# posting review verdicts under the repo's own bar is authority an operator
+# grants deliberately, per rig.
+#
+# CADENCE 15m — between event-pump's 1m (a person waiting) and merge-lane's
+# 10m. A review's consumers are merge-lane and the PR's author; a quarter hour
+# of dispatch latency costs one merge-lane cycle at worst, while a tighter
+# tick mostly re-reads an unchanged PR list. The real throughput bound is the
+# reviewer pool (2), not this interval.
+#
+# Configuration lives in roster.conf (all optional):
+#   REVIEW_LANE_RIGS        ""            rigs whose PRs are dispatched; empty = lane off
+#   REVIEW_LANE_BASE        staging       only PRs against this base are considered
+#   REVIEW_LANE_HOLD_LABEL  do-not-merge  label that exempts a PR from the lane
+#   REVIEW_LANE_MARKER      Verdict: APPROVE  the approve literal (MUST match merge-lane's)
+#   REVIEW_ASSIGNMENT_TTL   5400          seconds an undelivered assignment suppresses re-dispatch
+[order]
+description = "Dispatch a reviewer session onto each open PR lacking a finished review on its current head, one PR per nudge, so merge-lane's review bar is met rather than starved"
+trigger = "cooldown"
+interval = "15m"
+exec = "$PACK_DIR/assets/scripts/review-sweep.sh"

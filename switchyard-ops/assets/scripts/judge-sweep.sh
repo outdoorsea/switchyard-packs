@@ -19,6 +19,12 @@ set -u
 sy_load_conf
 
 PROVIDER="${JUDGE_PROVIDER:-kimi}"
+# The provider's NAME is not its BINARY: a wrapped provider (deepseek ->
+# builtin:opencode) spawns a CLI named differently from itself, and probing the
+# name false-fails the gate on a host where the lane spawns fine. Every check
+# below that touches the filesystem or execs uses $BIN; $PROVIDER remains the
+# config identity being validated.
+BIN="$(sy_provider_bin "$PROVIDER")"
 UNCONFIGURED_MARKER="$(sy_state_dir)/judge-sweep.unconfigured"
 SKEW_MARKER="$(sy_state_dir)/judge-sweep.provider-skew"
 
@@ -76,15 +82,22 @@ if [ "$PROVIDER" != "claude" ]; then
   - [providers.$PROVIDER] is not registered in city.toml"
   fi
 
-  # 2. CLI on PATH.
-  if ! command -v "$PROVIDER" >/dev/null 2>&1; then
+  # 2. CLI on PATH — the resolved BINARY, not the provider name.
+  if ! command -v "$BIN" >/dev/null 2>&1; then
     missing="$missing
-  - the '$PROVIDER' CLI is not on PATH"
+  - the '$BIN' CLI (provider '$PROVIDER') is not on PATH"
   fi
 
-  # 3. Auth credentials. Name is conventional: KIMI_API_KEY, CURSOR_API_KEY, etc.
-  #    For kimi we also accept OAuth credentials: either a populated
-  #    ~/.kimi-code/oauth directory or a successful `kimi -p` probe.
+  # 3. Auth credentials — only for a provider that IS its own binary. A wrapped
+  #    provider ($BIN != $PROVIDER, e.g. deepseek via opencode) authenticates
+  #    through the wrapper CLI's own credential store, which no env-var
+  #    convention can see; demanding $DEEPSEEK_API_KEY there false-idles a lane
+  #    whose credential is installed and working. The spawn probe below still
+  #    exercises the real CLI, so a genuinely unauthenticated wrapper surfaces
+  #    at lane-ensure as a spawn failure rather than being silently passed.
+  #    Name is conventional: KIMI_API_KEY, CURSOR_API_KEY, etc. For kimi we
+  #    also accept OAuth credentials: either a populated ~/.kimi-code/oauth
+  #    directory or a successful `kimi -p` probe.
   keyvar="$(printf '%s' "$PROVIDER" | tr '[:lower:]' '[:upper:]')_API_KEY"
   eval "keyval=\${$keyvar:-}"
   _has_oauth=0
@@ -100,7 +113,7 @@ if [ "$PROVIDER" != "claude" ]; then
       fi
     fi
   fi
-  if [ -z "${keyval:-}" ] && [ "$_has_oauth" -eq 0 ]; then
+  if [ "$BIN" = "$PROVIDER" ] && [ -z "${keyval:-}" ] && [ "$_has_oauth" -eq 0 ]; then
     missing="$missing
   - \$$keyvar is not set and no OAuth credentials found"
   fi
@@ -110,7 +123,7 @@ if [ "$PROVIDER" != "claude" ]; then
   # config and run the CLI with them. Skew is judged by the CLI's rejection
   # MESSAGE, never by exit code alone — older kimi prints "unknown option"
   # yet exits 0, and other CLIs exit nonzero for reasons that are not skew.
-  if command -v "$PROVIDER" >/dev/null 2>&1; then
+  if command -v "$BIN" >/dev/null 2>&1; then
     _provider_args="$(mktemp)"
     sy_provider_args "$PROVIDER" >"$_provider_args"
     _probe_err="$(
@@ -118,7 +131,7 @@ if [ "$PROVIDER" != "claude" ]; then
       while IFS= read -r _arg; do
         set -- "$@" "$_arg"
       done <"$_provider_args"
-      sy_timeout 10 "$PROVIDER" "$@" </dev/null 2>&1 >/dev/null
+      sy_timeout 10 "$BIN" "$@" </dev/null 2>&1 >/dev/null
     )"
     _probe_rc=$?
     rm -f "$_provider_args"

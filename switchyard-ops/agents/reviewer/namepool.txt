@@ -1,0 +1,13 @@
+# Railway signalling occupations — themed session names for the reviewer
+# pool. Kin to judge/namepool.txt (the inspectors), but drawn from the roles
+# that clear a train to PROCEED: the yard's signalmen. A reviewer's verdict is
+# a signal, not a judgment on delivered work — that distinction is the two
+# lanes' whole difference.
+#
+# `gc` draws one name per concurrent session, so this pool must hold at least
+# max_active_sessions entries (reviewer runs up to two). Keep them single-word
+# and lowercase — a name is a session id, not a specialty.
+signalman
+towerman
+pointsman
+flagman

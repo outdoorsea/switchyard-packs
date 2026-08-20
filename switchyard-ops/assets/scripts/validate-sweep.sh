@@ -82,6 +82,13 @@ projects="$(sy_api_projects "$token")"
 state="$(sy_state_dir)"
 mkdir -p "$state" 2>/dev/null || exit 0
 
+# Age out cross-cycle fail markers (drain loop, below) that nothing has
+# cleared — a retracted or re-drafted criterion leaves its marker orphaned,
+# and 30 days is far past any live retry horizon. Once per CYCLE, not per
+# rig: $state is city-wide, so a per-rig placement scanned the same
+# directory N times for N-1 no-ops.
+find "$state" -name 'validate-sweep.fail.*' -mtime +30 -delete 2>/dev/null || true
+
 # sy_mail_mayor SUBJECT BODY — escalations go to the resident coordinator, the
 # same path every other order uses. Best-effort: a failed mail must not fail the
 # sweep (the report line still names the problem).
@@ -205,6 +212,7 @@ for rig in $VALIDATE_RIGS; do
   fi
   rm -f "$state/validate-sweep.alert.register-$rig" 2>/dev/null
 
+  head_sha="$(git -C "$repo" rev-parse HEAD 2>/dev/null)"
   echo "validate-sweep: $rig -> $project (checkout $(git -C "$repo" rev-parse --short HEAD))"
 
   # --- The drain loop --------------------------------------------------------
@@ -246,6 +254,49 @@ for rig in $VALIDATE_RIGS; do
       break
       ;;
     esac
+
+    # CROSS-CYCLE repeat-fail guard (crit:f52a433cbd62). The cycle-local guard
+    # above stops a failing queue head eating ONE cycle; nothing stopped it
+    # re-failing every cycle after that — the same criterion, unchanged since
+    # its last fail, re-ran and re-banked an identical rejection at every
+    # sweep, forever. The contract lane is deterministic by design (exit code
+    # of a fixed command against a fixed checkout), so when everything that
+    # feeds the verdict is unchanged — the delivery on record (evidence_ref),
+    # the validated checkout (HEAD), and the declared command — re-running can
+    # only reproduce the banked fail. Skip it WITHOUT posting a verdict, and
+    # without burning the run.
+    #
+    # Any change to any input re-arms the retry on its own: a repair PR moves
+    # evidence_ref, a merged fix moves HEAD, a contract re-ratification moves
+    # the command — each changes the signature, the marker no longer matches,
+    # and the criterion is validated for real. A pass removes the marker.
+    #
+    # BOUNDED, because determinism is an approximation. The server exempts the
+    # contract lane from its own anti-spin term precisely because a flaky test
+    # or a port collision lands here (prd_validation_pending.go's
+    # verdictIsProvablyMechanical), and none of the signature's three inputs
+    # moves for a flake — an unbounded skip would convert the one transient
+    # the server refused to make permanent into a 30-day invisible wedge. So
+    # the marker only suppresses while YOUNGER than
+    # VALIDATE_FAIL_RETRY_INTERVAL (default 24h): a real fail costs one
+    # re-run a day instead of one per cycle, and a flake self-heals on the
+    # next day's re-run, which removes the marker on its pass.
+    #
+    # The skip does NOT spend a VALIDATE_MAX_PER_CYCLE slot: the budget bounds
+    # verdict RUNS, and nothing ran. Termination does not need the counter —
+    # the release hands the same queue head back, the next claim hits the
+    # cycle-local failed_crits guard above, and the cycle ends there exactly
+    # as a run-then-failed cycle does.
+    fkey="$state/validate-sweep.fail.$(printf '%s' "$project-$crit" | tr -c 'A-Za-z0-9' '-')"
+    fsig="$(printf '%s|%s|%s' "$evidence" "$head_sha" "$cmd" | cksum | awk '{print $1"-"$2}')"
+    _retry_min=$((${VALIDATE_FAIL_RETRY_INTERVAL:-86400} / 60))
+    if [ -f "$fkey" ] && [ "$(cat "$fkey" 2>/dev/null)" = "$fsig" ] &&
+      [ -z "$(find "$fkey" -mmin +"$_retry_min" 2>/dev/null)" ]; then
+      vs_release "$prd_id" "$crit" "$validator"
+      failed_crits="$failed_crits$crit "
+      echo "validate-sweep: $project $crit -> known fail, inputs unchanged (evidence, checkout, command); skipped without re-running"
+      continue
+    fi
     HELD_PRD="$prd_id"; HELD_CRIT="$crit"; HELD_BY="$validator"
 
     ran_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -329,7 +380,29 @@ for rig in $VALIDATE_RIGS; do
 
     # done completes the stake; fail RELEASES it (see header). Derived, not
     # chosen: there is no code path that can pair a fail with `done`.
-    if [ "$verdict" = "done" ]; then act="done"; else act="release"; failed_crits="$failed_crits$crit "; fi
+    #
+    # The cross-cycle marker records exactly the BANKED verdict: a fail that
+    # reached the server stamps its input signature so later cycles skip the
+    # deterministic re-run; a done clears any stale marker so a criterion that
+    # later regresses is re-validated from scratch. An unbanked verdict (the
+    # empty-resp branch above) writes nothing — it never happened server-side,
+    # and the marker must never suppress a verdict the ledger doesn't hold.
+    if [ "$verdict" = "done" ]; then
+      act="done"
+      rm -f "$fkey" 2>/dev/null || true
+    else
+      act="release"
+      failed_crits="$failed_crits$crit "
+      # A marker that did not persist silently disables the repeat-fail guard
+      # — the identical rejection returns every cycle with the sweep reporting
+      # healthy (repair-sweep records the same rule for its markers). Mailed
+      # once, not per cycle: the cause is a broken state dir, one incident.
+      if ! printf '%s' "$fsig" >"$fkey" 2>/dev/null; then
+        vs_mail_once "failmarker-$rig" \
+          "validate-sweep: repeat-fail marker unwritable for $rig" \
+          "Writing $fkey failed, so nothing suppresses the deterministic re-run of $crit: the identical fail will be re-banked every cycle until the pack state directory is writable again."
+      fi
+    fi
     sy_api_post "/api/v1/prds/$prd_id/validations/action" "$token" \
       "$(jq -nc --arg c "$crit" --arg w "$validator" --arg a "$act" '{crit_label:$c, claimed_by:$w, action:$a}')" \
       >/dev/null 2>&1 || true

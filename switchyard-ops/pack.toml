@@ -17,8 +17,10 @@
 #   disk-watch     — mail the mayor when a path crosses a size threshold (12h)
 #   token-spike-watch — mail the mayor when a day's token usage exceeds the median
 #                    of prior days by a factor (6h; MECHANICAL, zero LLM)
-#   security-scan  — start one security-scout per rig, if its provider is
-#                    configured (12h)
+#   security-scan  — start one security-scout per rig, when the lane is
+#                    enabled (SECURITY_SCAN_RIGS) and its provider usable (12h)
+#   review-sweep   — dispatch a reviewer onto each open PR lacking a finished
+#                    review on its head (15m; opt-in via REVIEW_LANE_RIGS)
 #   token-audit    — start the city token auditor (7d)
 #   refactor-scan  — start one refactor-scout per rig (7d)
 #
@@ -73,6 +75,18 @@
 #                    NO code: a refactor's value depends on the team agreeing it
 #                    is the right shape, so a human decides and the normal worker
 #                    pool builds it. Started by refactor-scan.
+#   reviewer       — the PR-REVIEW lane (max 2 concurrent): reviews ONE
+#                    dispatched pull request per nudge and posts the verdict
+#                    marker merge-lane requires (`Verdict: APPROVE`) or a cited
+#                    REQUEST CHANGES comment. Never merges, never edits the
+#                    branch; like the conductor it does not pick its own work —
+#                    review-sweep assigns PRs. Off until REVIEW_LANE_RIGS.
+#   rework         — the REPAIR specialist: fixes one judge-rejected criterion
+#                    per dispatch, reading the rejecting verdict and the prior
+#                    delivery FIRST (a brakeman's prompt is written for fresh
+#                    builds; repeated identical rejections are what that
+#                    mismatch looks like). Routed to by repair-sweep on rigs
+#                    opted in via REWORK_RIGS; brakeman routing is the default.
 #   token-auditor  — the SPEND-REVIEW lane, and the only CITY-SCOPED agent here
 #                    (spend is a city property, and the useful comparisons are
 #                    cross-rig). Attributes .gc/usage.jsonl to agents and rigs via
@@ -131,6 +145,12 @@
 # Requires: jq, tmux, curl, and the gascity pack (sy-item-work extends its
 # implementation-base and dispatches to its gc.implementation-worker /
 # gc.publisher / gc.run-operator role targets — import gascity/roles per rig).
+# THOSE THREE ARE THE WHOLE gc.* DEPENDENCY: the roles import ships 12 agents,
+# and this pack's formulas reach exactly implementation-worker, publisher and
+# run-operator. A city may suspend the other nine on any rig that runs no
+# build formulas of its own ([[patches.agent]] suspended = true) without
+# touching anything this pack does — switchyard-build's sy-build-from-prd is
+# what needs the design/planning roles, and only on rigs importing it.
 # A `gh` or `glab` on PATH, authenticated for the rig's forge, since the worker
 # opens its own pull request. And — for the sweeps to be useful — the
 # switchyard-mcp overlay in any rig whose coordinator should drive switchyard.

@@ -1,0 +1,64 @@
+# reviewer — the PULL-REQUEST REVIEW lane: the half of merge authority that
+# merge-lane deliberately does not do.
+#
+#   gc session new <rig>/switchyard-ops.reviewer --no-attach
+#
+# ...which is what review-sweep does when a rig has reviewable PRs and no live
+# reviewer. merge-lane merges only a PR that carries a finished review on its
+# CURRENT head — a real APPROVED review, or a comment carrying the literal
+# fallback marker (`Verdict: APPROVE` by default) posted after the head's last
+# commit. When the repo's standing reviewer (CodeRabbit) is absent or
+# rate-limited, nothing produces that verdict and reviewed-out work queues
+# behind a reviewer that is not coming (the 2026-08-19 rate-limit wave stalled
+# every open PR at once). This lane is the fallback that keeps the pipeline's
+# review bar MET rather than lowered.
+#
+# LIKE THE CONDUCTOR, THIS AGENT DOES NOT PICK ITS OWN WORK. review-sweep
+# decides WHICH PR each session reviews and says so in the dispatch nudge —
+# that is what lets two concurrent reviewers exist without racing onto the
+# same PR. A wake with no REVIEW block means the reconciler started or
+# refreshed this session, not that a PR is waiting; the honest response is to
+# idle (see nudge below).
+#
+# THE VERDICT IS A COMMENT, NEVER A GITHUB REVIEW. The lane's gh identity is
+# usually the same account that authored the PR (the brakeman's), and GitHub
+# forbids approving or requesting changes on your own PR — which is exactly
+# why merge-lane accepts the marker-comment form. Approval is the marker
+# literal; rejection is a `Verdict: REQUEST CHANGES` comment whose absence of
+# the approve marker simply leaves the PR unmerged.
+#
+# NEVER MERGES, never pushes, never edits the branch. Merge authority lives in
+# merge-lane and nowhere else (its header records the owner directive); a
+# reviewer that "fixes it while it's here" destroys the separation the marker
+# exists to witness.
+description = "Reviews one dispatched pull request per nudge and posts the verdict marker merge-lane requires; never merges or edits the branch"
+
+scope = "rig"
+
+# fresh: each review is judged from the PR's current state, and nothing worth
+# carrying exists between reviews. A review is also a judgment on someone
+# else's words — a fresh context is what keeps the last PR's diff from sitting
+# behind the next verdict.
+wake_mode = "fresh"
+
+work_dir = ".gc/worktrees/{{.Rig}}/reviewer/{{.AgentBase}}"
+
+# The bare nudge is a stand-down, exactly like the conductor's: work arrives
+# only inside review-sweep's dispatch nudge, which names the PR.
+nudge = "Stand by. If this wake carries no REVIEW block you have no work: say IDLE: no review dispatched, exiting turn. and stop. Never pick a pull request yourself — review-sweep assigns them."
+
+idle_timeout = "30m"
+max_session_age = "3h"
+
+# min 0: an idle reviewer is pure token burn — review-sweep starts one when a
+# rig has reviewable PRs. max 2: the owner's chosen ceiling (2026-08-20); two
+# concurrent reviews are useful when a merge wave lands, and the sweep's
+# one-PR-per-nudge dispatch keeps them off each other's work.
+min_active_sessions = 0
+max_active_sessions = 2
+
+# Default provider deliberately unset: the city's default reviews fine, and a
+# city wanting the independent-model property the judge has can patch this
+# agent's provider exactly as agents/judge/agent.toml documents.
+
+fallback = true

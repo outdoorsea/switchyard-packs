@@ -124,6 +124,13 @@ case "$1 $2" in
 	printf 'NUDGE %s\n' "$3" >>"$GC_CITY/nudged.log"
 	printf '%s\n' "$4" >>"$GC_CITY/nudged.log"
 	;;
+"session new")
+	[ -f "$GC_CITY/spawn-broken" ] && exit 1
+	printf 'SPAWN %s\n' "$3" >>"$GC_CITY/spawned.log"
+	;;
+"session wake")
+	printf 'WAKE %s\n' "$3" >>"$GC_CITY/woken.log"
+	;;
 "mail send")
 	subj=""
 	while [ $# -gt 0 ]; do
@@ -442,6 +449,79 @@ if [ "$(nudges "$c")" = 0 ] && [ ! -s "$c/mailed.log" ]; then
 else
 	report FAIL "a city with no rejections routes nothing and mails nothing" \
 		"routed $(nudges "$c"), mail: $(cat "$c/mailed.log" 2>/dev/null)"
+fi
+rm -rf "$c"
+
+# ---------------------------------------------------------------------------
+# REWORK_RIGS — an opted-in rig routes repairs to the dedicated rework lane.
+# With no live rework session the sweep SPAWNS one and routes nothing this
+# cycle (nudging a booting pane loses the assignment behind a live marker);
+# with one live, the assignment goes to it, never to the brakeman pool.
+# ---------------------------------------------------------------------------
+c="$(new_city)"
+reject "$c" 330 "crit:aaa"
+criterion "$c" 330 "crit:aaa"
+printf 'REWORK_RIGS="rigA"\n' >"$c/state/roster.conf"
+run_sweep "$c"
+n_spawn="$(grep -c '^SPAWN rigA/switchyard-ops.rework$' "$c/spawned.log" 2>/dev/null)" || n_spawn=0
+if [ "$(nudges "$c")" = 0 ] && [ "$n_spawn" = 1 ]; then
+	report ok "an opted-in rig with no live rework session spawns one and routes next cycle"
+else
+	report FAIL "an opted-in rig with no live rework session spawns one and routes next cycle" \
+		"routed $(nudges "$c"), spawned: $(cat "$c/spawned.log" 2>/dev/null)"
+fi
+
+# Same city, next cycle: a rework session is now live. The assignment must go
+# to IT — the brakeman session is also live and must receive nothing.
+cat >"$c/sessions.json" <<'JSON'
+{"sessions":[{"template":"rigA/switchyard-ops.brakeman","alias":"rigA-brakeman-adhoc-stub","state":"active"},
+{"template":"rigA/switchyard-ops.rework","alias":"rigA-rework-adhoc-stub","state":"active"}]}
+JSON
+run_sweep "$c"
+routed_to="$(grep '^NUDGE ' "$c/nudged.log" 2>/dev/null | awk '{print $2}' | sort -u)"
+if [ "$(nudges "$c")" = 1 ] && [ "$routed_to" = "rigA-rework-adhoc-stub" ]; then
+	report ok "an opted-in rig routes the repair to the live rework session, not the brakeman"
+else
+	report FAIL "an opted-in rig routes the repair to the live rework session, not the brakeman" \
+		"routed $(nudges "$c") to: $routed_to"
+fi
+rm -rf "$c"
+
+# A FAILED rework spawn is not "warming": the rejection must reach the
+# no-live-worker accumulation and the mayor mail within the same cycle —
+# the silent-failure invariant, restated for the new lane.
+c="$(new_city)"
+reject "$c" 330 "crit:aaa"
+criterion "$c" 330 "crit:aaa"
+printf 'REWORK_RIGS="rigA"\n' >"$c/state/roster.conf"
+: >"$c/spawn-broken"
+run_sweep "$c"
+if [ "$(nudges "$c")" = 0 ] && grep -q 'could not route' "$c/mailed.log" 2>/dev/null; then
+	report ok "a failed rework spawn mails no-live-worker instead of going quiet"
+else
+	report FAIL "a failed rework spawn mails no-live-worker instead of going quiet" \
+		"routed $(nudges "$c"), mail: $(cat "$c/mailed.log" 2>/dev/null)"
+fi
+rm -rf "$c"
+
+# An ASLEEP rework session is revived with wake, never buried under a second
+# spawn that would bounce off max_active_sessions=1.
+c="$(new_city)"
+reject "$c" 330 "crit:aaa"
+criterion "$c" 330 "crit:aaa"
+printf 'REWORK_RIGS="rigA"\n' >"$c/state/roster.conf"
+cat >"$c/sessions.json" <<'JSON'
+{"sessions":[{"template":"rigA/switchyard-ops.brakeman","alias":"rigA-brakeman-adhoc-stub","state":"active"},
+{"template":"rigA/switchyard-ops.rework","alias":"rigA-rework-adhoc-stub","state":"asleep"}]}
+JSON
+run_sweep "$c"
+n_wake="$(grep -c '^WAKE rigA-rework-adhoc-stub$' "$c/woken.log" 2>/dev/null)" || n_wake=0
+n_spawn="$(grep -c '^SPAWN ' "$c/spawned.log" 2>/dev/null)" || n_spawn=0
+if [ "$(nudges "$c")" = 0 ] && [ "$n_wake" = 1 ] && [ "$n_spawn" = 0 ]; then
+	report ok "an asleep rework session is woken, not respawned, and routes next cycle"
+else
+	report FAIL "an asleep rework session is woken, not respawned, and routes next cycle" \
+		"nudges $(nudges "$c") wake=$n_wake spawn=$n_spawn"
 fi
 rm -rf "$c"
 

@@ -103,7 +103,18 @@ sy_load_conf
 # The pool a repair is routed to. A rig's worker pool is
 # `<rig>/switchyard-ops.brakeman` — the same suffix pool-spawn staffs, because a
 # repair is ordinary pool work with a known target, not a new kind of worker.
+#
+# ...unless the rig opted into the DEDICATED repair lane via roster.conf's
+# REWORK_RIGS. A brakeman's prompt is written for building new work; a repair
+# is the opposite job — the rejection must be read FIRST and the prior
+# delivery is the starting point. agents/rework carries that prompt. For an
+# opted-in rig the assignment goes to `<rig>/switchyard-ops.rework` instead,
+# and when no rework session is live this sweep STARTS one and routes on the
+# NEXT cycle (the conductor's spawn-then-dispatch ordering — a nudge into a
+# still-booting pane is lost, and the assignment marker would then suppress
+# the retry for a full TTL).
 POOL_SUFFIX=".brakeman"
+REWORK_RIGS="${REWORK_RIGS:-}"
 
 # How long a routed assignment stays LIVE, in seconds. Defaults to one order
 # interval: an assignment that has not become a held claim within its own cycle
@@ -351,12 +362,37 @@ $prev"
   # mid-cycle blip answer differently for two criteria in the same sweep.
   criteria="$(sy_api_get "/api/v1/projects/$project/criteria" "$token")"
 
+  # Dedicated rework lane for opted-in rigs; the shared brakeman pool for the
+  # rest. See the REWORK_RIGS note beside POOL_SUFFIX above.
+  worker_suffix="$POOL_SUFFIX"
+  case " $REWORK_RIGS " in
+    *" $rig "*) worker_suffix=".rework" ;;
+  esac
+
   target=""
   target_known=1
-  if ! target="$(sy_live_session_for "$rig/switchyard-ops$POOL_SUFFIX")"; then
+  if ! target="$(sy_live_session_for "$rig/switchyard-ops$worker_suffix")"; then
     target=""
     target_known=0
   fi
+
+  # Rework-lane revival state, decided LAZILY inside the loop — only when a
+  # rejection actually survives the consumption/settled guards and needs a
+  # route. Deciding it here, on the raw 2-day rollup, spawned a session for
+  # rigs whose every rejection was already repaired (the rollup replays a
+  # settled fail for up to 48h), which then idled 30m and died, every cycle.
+  #   rework_attempted: revival tried this cycle (try once per cycle, not per
+  #                     rejection).
+  #   rework_warming:   a wake/spawn SUCCEEDED, so this cycle's unrouted
+  #                     rejections are the lane warming up — route next cycle,
+  #                     no alarm. A FAILED revival leaves this 0 and the
+  #                     rejection falls through to the no-live-worker
+  #                     accumulation below, so a rig whose rework agent is
+  #                     missing or suspended mails the mayor within one cycle
+  #                     (the silent-failure invariant) instead of spinning a
+  #                     doomed spawn forever.
+  rework_attempted=0
+  rework_warming=0
 
   # A HERE-DOC, NOT A PIPE. `printf ... | while read` runs the loop body in a
   # SUBSHELL, so every `routed`/`failed` this loop records would be discarded at
@@ -475,6 +511,37 @@ $prev"
       failed="$failed $rig/$label(session-lookup-failed)"
       continue
     fi
+
+    # Rework-lane revival (see the state block above the loop). Runs here — a
+    # rejection that reached this point survived every guard, so the demand is
+    # real. An ASLEEP session is revived with `gc session wake`, never a
+    # second `gc session new`: the agent runs max_active_sessions = 1 and its
+    # 30m idle_timeout makes asleep the COMMON state, so a spawn here would
+    # bounce off the cap every cycle while the sweep read the lane as absent
+    # (roster.sh's sy_session_alias_for header documents exactly this trap).
+    # Either revival routes NEXT cycle — a nudge into a booting or waking pane
+    # is lost, and the assignment marker would then suppress the retry for a
+    # full TTL.
+    if [ "$worker_suffix" = ".rework" ] && [ -z "$target" ] && [ "$rework_attempted" -eq 0 ]; then
+      rework_attempted=1
+      _rw_agent="$rig/switchyard-ops.rework"
+      _rw_any="$(sy_session_alias_for "$_rw_agent" "" 2>/dev/null)" || _rw_any=""
+      if [ -n "$_rw_any" ]; then
+        if gc session wake "$_rw_any" >/dev/null 2>&1; then
+          rework_warming=1
+          echo "repair-sweep: $rig rework session $_rw_any is asleep; woke it, routing next cycle"
+        fi
+      elif gc session new "$_rw_agent" --no-attach >/dev/null 2>&1; then
+        rework_warming=1
+        echo "repair-sweep: $rig has repair demand and no rework session; spawned one, routing next cycle"
+      fi
+    fi
+    if [ -z "$target" ] && [ "$rework_warming" -eq 1 ]; then
+      # The lane is warming — a wake/spawn just succeeded. Not a failure, not
+      # routed: the next cycle (1h) finds it live and routes with the marker
+      # ledger intact.
+      continue
+    fi
     if [ -z "$target" ]; then
       failed="$failed $rig/$label(no-live-worker)"
       continue
@@ -544,7 +611,7 @@ if [ -n "$failed" ]; then
 Routed $routed repair assignment(s) successfully this cycle.
 
 session-lookup-failed means 'gc session list --json' could not be run or its output could not be parsed, so whether that rig has a live worker is UNKNOWN. Do not spawn on this one — check gc and jq first.
-no-live-worker means the roster was read fine and that rig has no live brakeman session to route to: check pool-spawn is running and the rig is not suspended.
+no-live-worker means the roster was read fine and that rig has no live worker session to route to (brakeman, or rework for a REWORK_RIGS rig): check pool-spawn is running and the rig is not suspended. For a REWORK_RIGS rig this also means the sweep's own wake/spawn of the rework agent FAILED — the agent is missing from the rig or suspended, or the city is at its session cap — so fix that registration rather than waiting on more cycles.
 nudge-failed means the session alias resolved but gc session nudge returned non-zero.
 marker-write-failed means the worker WAS nudged and the assignment could not be recorded, so nothing suppresses a duplicate: the next cycle will route a second worker onto the same repair until the state directory is writable again.
 

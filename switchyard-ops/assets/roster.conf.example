@@ -422,3 +422,60 @@
 # MERGE_LANE_REVIEW_MARKER="Verdict: APPROVE"
 # STAGING_PROMOTE_RIGS=""
 # STAGING_PROMOTE_FROM="staging"
+
+# ---------------------------------------------------------------------------
+# Review lane (orders/review-sweep.toml) — the fallback reviewer that produces
+# the verdicts merge-lane requires, when the repo's standing reviewer is
+# absent or rate-limited. OFF until REVIEW_LANE_RIGS is set: posting verdicts
+# under the repo's review bar is authority an operator grants deliberately.
+#
+# REVIEW_LANE_RIGS — rigs whose open PRs (against REVIEW_LANE_BASE, lacking a
+#   finished review on their current head) are dispatched to reviewer
+#   sessions, one PR per nudge. Empty = off.
+#
+# REVIEW_LANE_BASE / REVIEW_LANE_HOLD_LABEL — the same gate values as the
+#   merge lane; keep them aligned or the two lanes will disagree about which
+#   PRs exist. Defaults "staging" / "do-not-merge".
+#
+# REVIEW_LANE_MARKER — the approve literal the reviewer posts. MUST equal
+#   MERGE_LANE_REVIEW_MARKER, or approvals will never merge. Default
+#   "Verdict: APPROVE".
+#
+# REVIEW_LANE_REJECT_MARKER — the reject literal. A comment carrying it on
+#   the current head counts as a FINISHED review (the author's move now), so
+#   the sweep stops re-dispatching the same head. Default
+#   "Verdict: REQUEST CHANGES".
+#
+# REVIEW_ASSIGNMENT_TTL — seconds a dispatched-but-undelivered assignment
+#   suppresses re-dispatch of the same PR head. Default 5400 (one review-sweep
+#   interval plus slack for a long review).
+#
+# REVIEW_LANE_RIGS=""
+# REVIEW_LANE_BASE="staging"
+# REVIEW_LANE_HOLD_LABEL="do-not-merge"
+# REVIEW_LANE_MARKER="Verdict: APPROVE"
+# REVIEW_LANE_REJECT_MARKER="Verdict: REQUEST CHANGES"
+# REVIEW_ASSIGNMENT_TTL="5400"
+
+# ---------------------------------------------------------------------------
+# Rework lane (agents/rework, routed by orders/repair-sweep.toml) — a
+# dedicated repair specialist for judge-rejected criteria. By default
+# repair-sweep routes repairs to the shared brakeman pool; a rig listed here
+# gets them routed to `<rig>/switchyard-ops.rework` instead, whose prompt is
+# written for repair (read the rejection first, prior delivery is the
+# starting point) rather than for fresh builds. The sweep starts the session
+# itself when none is live. Empty = brakeman routing everywhere (the
+# pre-existing behaviour).
+#
+# REWORK_RIGS=""
+
+# ---------------------------------------------------------------------------
+# Security lane (orders/security-scan.toml). OFF until SECURITY_SCAN_RIGS
+# names at least one rig — it used to be on-by-default, which made an
+# unconfigured provider a weekly "lane idle" mail forever. The list is
+# honored per rig (it reaches lane-ensure's rig walk as a filter), matching
+# every sibling *_RIGS switch. SECURITY_SCOUT_PROVIDER still selects the
+# provider expectation; the readiness gate resolves a wrapped provider's
+# real binary (deepseek -> builtin:opencode probes `opencode`).
+#
+# SECURITY_SCAN_RIGS=""

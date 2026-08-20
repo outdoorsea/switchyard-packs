@@ -15,8 +15,10 @@
 #
 # Prerequisites checked:
 #   1. the provider is registered in the resolved city config
-#   2. its CLI is on PATH
-#   3. an API key is present in the environment
+#   2. its CLI is on PATH (the resolved BINARY — a wrapped provider like
+#      deepseek -> builtin:opencode spawns `opencode`, not `deepseek`)
+#   3. an API key is present in the environment (skipped for wrapped
+#      providers, whose wrapper CLI holds its own credential store)
 #
 # Override the provider expectation via roster.conf when running the lane on the
 # default provider (see agents/security-scout/agent.toml):
@@ -26,7 +28,21 @@ set -u
 . "$(dirname "$0")/../lib/roster.sh"
 sy_load_conf
 
+# OPT-IN PER RIG, the *_RIGS roster idiom every sibling lane switch uses
+# (MERGE_LANE_RIGS, CONDUCTOR_RIGS, REVIEW_LANE_RIGS, ...): unset means off
+# for the whole city, silently — no spawn, no marker, no mail. The lane used
+# to be on-by-default, which meant a city that never configured kimi received
+# a "lane idle" notice every week forever: an error posture for what is
+# really an operator choice. The list is honored per rig for real, not as a
+# boolean: it reaches lane-ensure's rig walk as LANE_RIGS_FILTER, so a rig
+# not named here is out of the lane's scope entirely.
+SECURITY_SCAN_RIGS="${SECURITY_SCAN_RIGS:-}"
+[ -n "$SECURITY_SCAN_RIGS" ] || exit 0
+LANE_RIGS_FILTER="$SECURITY_SCAN_RIGS"
+export LANE_RIGS_FILTER
+
 PROVIDER="${SECURITY_SCOUT_PROVIDER:-kimi}"
+BIN="$(sy_provider_bin "$PROVIDER")"
 MARKER="$(sy_state_dir)/security-scan.unconfigured"
 
 # The default provider is always usable — skip the readiness gate entirely.
@@ -41,16 +57,20 @@ if [ "$PROVIDER" != "claude" ]; then
   - [providers.$PROVIDER] is not registered in city.toml"
   fi
 
-  # 2. CLI on PATH.
-  if ! command -v "$PROVIDER" >/dev/null 2>&1; then
+  # 2. CLI on PATH — the resolved binary, not the provider name.
+  if ! command -v "$BIN" >/dev/null 2>&1; then
     missing="$missing
-  - the '$PROVIDER' CLI is not on PATH"
+  - the '$BIN' CLI (provider '$PROVIDER') is not on PATH"
   fi
 
-  # 3. an API key. Name is conventional: KIMI_API_KEY, CURSOR_API_KEY, etc.
+  # 3. an API key — only for a provider that IS its own binary. A wrapped
+  #    provider authenticates through the wrapper CLI's credential store,
+  #    which no env-var convention can see; a genuinely unauthenticated
+  #    wrapper still surfaces at spawn time. Name is conventional:
+  #    KIMI_API_KEY, CURSOR_API_KEY, etc.
   keyvar="$(printf '%s' "$PROVIDER" | tr '[:lower:]' '[:upper:]')_API_KEY"
   eval "keyval=\${$keyvar:-}"
-  if [ -z "${keyval:-}" ]; then
+  if [ "$BIN" = "$PROVIDER" ] && [ -z "${keyval:-}" ]; then
     missing="$missing
   - \$$keyvar is not set"
   fi

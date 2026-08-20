@@ -1087,6 +1087,22 @@ if [ -z "$SY_SESSION_SNAPSHOT" ]; then
 fi
 
 for rig in $rigs; do
+  # PER-LANE RIG RESTRICTION. A wrapper (security-scan.sh) can export
+  # LANE_RIGS_FILTER as a space-separated allowlist; a rig not on it is
+  # skipped ENTIRELY — no spawn, no reap, no escalation — because for a
+  # filtered lane that rig is not merely unstaffed, it is out of the lane's
+  # scope, exactly as if the roster never named it. Empty/unset means no
+  # restriction (every existing caller). This is the *_RIGS roster idiom
+  # reaching the lanes that delegate their rig walk to this script instead of
+  # walking rigs themselves.
+  if [ -n "${LANE_RIGS_FILTER:-}" ]; then
+    _lrf_hit=0
+    for _lrf in $LANE_RIGS_FILTER; do
+      [ "$_lrf" = "$rig" ] && { _lrf_hit=1; break; }
+    done
+    [ "$_lrf_hit" -eq 0 ] && continue
+  fi
+
   # SPEND THE BUDGET, THEN NAME WHAT WAS MISSED — do not just stop.
   #
   # `continue` rather than `break` so the remaining rigs are still collected by

@@ -561,3 +561,34 @@ sy_session_aliases_for() {
   printf '%s\n' "$_ssm_out" | awk 'NF'
   return 0
 }
+
+# sy_rig_root RIG — the rig's repository root, resolved from gc's own rig
+# registry rather than assumed to live under the city directory.
+#
+# THE ASSUMPTION THIS RETIRES WAS SILENTLY FATAL. merge-lane and
+# staging-promote both derived `rig_root="$(sy_city)/$rig"` and `continue`d
+# when no such directory existed — but a gc rig lives WHEREVER `gc rig add`
+# registered it (`gc rig list` prints the path), and on the first city this
+# ran against, every rig lives outside the city root. Result: the pack's
+# entire merge authority — both orders of the 2026-08-19 owner directive —
+# ran green on every cycle while merging nothing, ever, for anyone. The
+# lane's own "silence is success" posture (an empty queue is quiet) is what
+# let an unreachable repo wear the same face as a drained one.
+#
+# Resolution: the rig's `path` from `gc rig list --json` (both output shapes,
+# roster.sh's own guard), falling back to `<city>/<rig>` — the old behaviour
+# — when the registry cannot be read or does not name the rig. Empty is never
+# returned: callers keep their existing `[ -d "$root/.git" ]` guards, and the
+# fallback keeps a city whose rigs DO live under the city root working even
+# with a broken `gc` on PATH.
+sy_rig_root() {
+  _srr_path="$(gc rig list --json 2>/dev/null | jq -r --arg n "$1" '
+    (if type == "array" then . else (.rigs // []) end)[]
+    | select((.name // "") == $n)
+    | (.path // "")' 2>/dev/null | awk 'NF' | head -n1)"
+  if [ -n "${_srr_path:-}" ]; then
+    printf '%s' "$_srr_path"
+  else
+    printf '%s/%s' "$(sy_city)" "$1"
+  fi
+}

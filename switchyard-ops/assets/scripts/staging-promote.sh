@@ -55,7 +55,7 @@ report_once() { # <key> <subject> <body>
 }
 
 for rig in $STAGING_PROMOTE_RIGS; do
-  rig_root="$(sy_city)/$rig"
+  rig_root="$(sy_rig_root "$rig")"
   [ -d "$rig_root/.git" ] || continue
 
   default_branch=$(gc rig list --json 2>/dev/null | jq -r --arg r "$rig" '

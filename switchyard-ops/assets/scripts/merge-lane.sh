@@ -34,7 +34,7 @@ LOG="$(sy_state_dir)/merge-lane.log"
 mkdir -p "$(dirname "$LOG")" 2>/dev/null
 
 for rig in $MERGE_LANE_RIGS; do
-  rig_root="$(sy_city)/$rig"
+  rig_root="$(sy_rig_root "$rig")"
   [ -d "$rig_root/.git" ] || continue
 
   # owner/repo straight off the rig's own remote (integration-lane's pattern).

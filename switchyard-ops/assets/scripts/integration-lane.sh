@@ -992,7 +992,7 @@ rigs=$(gc rig list --json 2>/dev/null \
 [ -n "${INTEGRATION_LANE_RIGS:-}" ] && rigs="$INTEGRATION_LANE_RIGS"
 
 for rig in $rigs; do
-  rig_root="$(sy_city)/$rig"
+  rig_root="$(sy_rig_root "$rig")"
   [ -d "$rig_root/.git" ] || continue
 
   default_branch=$(gc rig list --json 2>/dev/null | jq -r --arg r "$rig" '

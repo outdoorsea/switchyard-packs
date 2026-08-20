@@ -117,7 +117,7 @@ for rig in $REVIEW_LANE_RIGS; do
   done
   [ "$_rig_suspended" -eq 1 ] && continue
 
-  rig_root="$(sy_city)/$rig"
+  rig_root="$(sy_rig_root "$rig")"
   [ -d "$rig_root/.git" ] || continue
 
   # owner/repo straight off the rig's own remote (merge-lane's pattern).

@@ -481,6 +481,33 @@
 # REWORK_RIGS=""
 
 # ---------------------------------------------------------------------------
+# Balancer target freshness — the CONSUMER side of balancer.targets.
+#
+# The balancer publishes concurrency targets on a 5m cadence and deliberately
+# leaves a stale file on disk when it is switched off, so retiring one is the
+# consumer's job. A spawn site honours a target only while the file is
+# PRESENT, FRESH and WELL-FORMED, and treats every other case as no cap at
+# all — absent, unreadable, past this window, stamped far in the future, a
+# version it does not recognise, or carrying a single line it cannot parse.
+# In each of those the lane behaves byte-for-byte as it does with no balancer.
+#
+# Well-formedness is all-or-nothing: the writer emits the file atomically, so
+# one unparseable line means it was written by something the consumer does not
+# understand, and honouring the lines it happens to recognise would be acting
+# on a contract it has already failed to verify.
+#
+# The window is symmetric — a clock skewed far forward cannot pin a long-dead
+# file as permanently current. Default 900 = three missed 5m cycles: long
+# enough that one slow sweep does not drop the cap and re-flood the lane,
+# short enough that a balancer which died an hour ago stops steering.
+#
+# A target NEVER raises a ceiling. The balancer turns the dial within the
+# operator's bounds, so a target above the lane agent's own
+# max_active_sessions leaves capacity where city.toml put it.
+#
+# BALANCER_TARGET_MAX_AGE="900"
+
+# ---------------------------------------------------------------------------
 # Security lane (orders/security-scan.toml). OFF until SECURITY_SCAN_RIGS
 # names at least one rig — it used to be on-by-default, which made an
 # unconfigured provider a weekly "lane idle" mail forever. The list is

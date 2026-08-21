@@ -222,6 +222,13 @@ POOL_SPAWN_TIMEOUT="${POOL_SPAWN_TIMEOUT:-20}"
 POOL_SPAWN_RECONCILE_ATTEMPTS="${POOL_SPAWN_RECONCILE_ATTEMPTS:-2}"
 POOL_SPAWN_RECONCILE_DELAY="${POOL_SPAWN_RECONCILE_DELAY:-5}"
 POOL_SPAWN_CYCLE_TIMEOUT="${POOL_SPAWN_CYCLE_TIMEOUT:-300}"
+# BALANCER TARGET FRESHNESS (switchyard PRD #397, crit:5c690f312dc5). The
+# balancer publishes balancer.targets on a 5m cadence and deliberately leaves a
+# stale file on disk when it is switched off — retiring one is the CONSUMER's
+# job, which is this. Three missed cycles is the default tolerance: long enough
+# that one slow sweep does not drop the cap and re-flood the lane, short enough
+# that a balancer which died an hour ago stops steering.
+BALANCER_TARGET_MAX_AGE="${BALANCER_TARGET_MAX_AGE:-900}"
 # PER-CYCLE WALL-CLOCK BUDGET (switchyard PRD #185 / sw-jqrx guard).
 #
 # Pool-spawn runs on a 1-minute cadence, but a single slow `gc bd list --all`
@@ -533,6 +540,76 @@ sy_pool_brakeman_max() {
       end' 2>/dev/null | awk 'NF')" || return 2
   case "$_max" in ''|*[!0-9]*) return 2 ;; esac
   printf '%s' "$_max"
+}
+
+# sy_pool_balancer_cap RIG LANE — the balancer's published concurrency target
+# for RIG's LANE, or rc 1 and NO output when there is not one to honour
+# (switchyard PRD #397, crit:5c690f312dc5).
+#
+# FAILS OPEN, and that direction is the criterion: an absent, stale, malformed
+# or unreadable file must leave this order behaving exactly as it does today.
+# So every rejection is the same answer — no cap — and the caller keeps the
+# capacity city.toml gave it. The inverse (failing closed to zero) would let a
+# corrupt state file silently stop all dispatch, which is the outage the
+# balancer exists to prevent rather than cause.
+#
+# WELL-FORMED IS ALL-OR-NOTHING. One unparseable line rejects the whole file
+# rather than being skipped: the writer emits it atomically (temp file + mv),
+# so a partial read is not a case that happens by accident — a file that does
+# not parse cleanly is one written by something this consumer does not
+# understand, and honouring the lines it happens to recognise would be acting
+# on a contract it has already failed to verify. `version 1` gates exactly that.
+#
+# A FAR-FUTURE STAMP IS NOT FRESH. The window is symmetric, so a clock skewed
+# far forward cannot pin a long-dead file as permanently current — the one way
+# a staleness check keyed only on an upper bound never expires.
+sy_pool_balancer_cap() {
+  _pbc_file="$(sy_state_dir)/balancer.targets"
+  [ -f "$_pbc_file" ] && [ -r "$_pbc_file" ] || return 1
+
+  _pbc_val="$(awk -v rig="$1" -v lane="$2" \
+      -v now="$(date +%s 2>/dev/null)" -v ttl="$BALANCER_TARGET_MAX_AGE" '
+    BEGIN { if (now !~ /^[0-9]+$/ || ttl !~ /^[0-9]+$/) { bad = 1; exit } }
+    NR == 1 { if ($0 != "version 1") { bad = 1; exit } ; next }
+    NR == 2 {
+      if ($1 != "generated_at" || NF != 2 || $2 !~ /^[0-9]+$/) { bad = 1; exit }
+      age = now - $2
+      if (age > ttl || age < -ttl) { bad = 1; exit }
+      next
+    }
+    /^[ \t]*$/ { next }
+    {
+      if ($1 != "target" || NF != 4 || $4 !~ /^[0-9]+$/) { bad = 1; exit }
+      if ($2 == rig && $3 == lane) { found = 1; val = $4 }
+      next
+    }
+    END { if (bad || !found) exit 1; print val }
+  ' "$_pbc_file" 2>/dev/null)" || return 1
+
+  case "$_pbc_val" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s' "$_pbc_val"
+}
+
+# sy_pool_capped_max RIG MAX — MAX lowered to the balancer's brakeman target
+# when one is published, and MAX untouched otherwise.
+#
+# ONE function for both dispatch topologies on purpose. The bd-ledger path and
+# the cloud path resolve capacity at two separate sites ~100 lines apart, and a
+# cap applied at only one of them is a half-built criterion that looks whole
+# from either site's test alone.
+#
+# min(), never max(): the balancer turns the dial WITHIN the operator's bounds,
+# so a target above city.toml's max_active_sessions is not authority to exceed
+# it. The clamp is here as well as in the writer because the two are separately
+# deployable — a writer rebuilt against different bounds must not be able to
+# raise this lane's ceiling.
+sy_pool_capped_max() {
+  _pcm_cap="$(sy_pool_balancer_cap "$1" brakeman)" || { printf '%s' "$2"; return 0; }
+  if [ "$_pcm_cap" -lt "$2" ] 2>/dev/null; then
+    printf '%s' "$_pcm_cap"
+  else
+    printf '%s' "$2"
+  fi
 }
 
 # sy_pool_brakeman_live RIG — count of RIG's brakeman sessions in a live state.
@@ -1206,6 +1283,7 @@ $_preserved"
     [ "$depth" -gt 0 ] || continue   # a confidently empty queue is the silent case
 
     max="$(sy_pool_brakeman_max "$rig" "$agents_census")"; max_rc=$?
+    [ "$max_rc" -ne 0 ] || max="$(sy_pool_capped_max "$rig" "$max")"
     if [ "$max_rc" -ne 0 ]; then
       report="$report
 - $rig: $depth claimable cloud-pool bead(s), WIP slot UNKNOWN
@@ -1309,6 +1387,7 @@ $rig $pb"
   done
 
   max="$(sy_pool_brakeman_max "$rig" "$agents_census")"; max_rc=$?
+  [ "$max_rc" -ne 0 ] || max="$(sy_pool_capped_max "$rig" "$max")"
   if [ "$max_rc" -ne 0 ]; then
     report="$report
 - $rig: $count claimable bead(s), WIP slot UNKNOWN; spawn-ready: none

@@ -523,6 +523,186 @@ fi
 rm -rf "$city"
 
 # ---------------------------------------------------------------------------
+# HYSTERESIS (crit:8624d71e0801). A target RAISES only after the raise signal
+# has persisted 2 consecutive cycles and LOWERS only after 6, and every applied
+# change appends an old-to-new entry citing the justifying snapshot.
+#
+# These cases reuse ONE city across several runs on purpose — the whole subject
+# is state carried BETWEEN cycles, so a fresh fixture per run would test
+# nothing. That is the one deliberate exception to the fresh-city rule above.
+#
+# The asymmetry is the point: cheap to add a worker, expensive to lose one. A
+# gate written with a single shared threshold passes every raise assertion and
+# silently lowers just as eagerly, so both counts are pinned separately, and
+# each is pinned at its boundary (holds at N-1, applies at N) rather than
+# somewhere past it — a gate of 2 and a gate of 1 agree on every cycle except
+# the first.
+# ---------------------------------------------------------------------------
+LOG="state/balancer.log"
+
+# set_pool <city> <n> — the claimable depth the next cycle will measure.
+set_pool() { printf '{"total":%s,"beads":[]}\n' "$2" >"$1/pool.json"; }
+
+# log_has <city> <regex> — does the balancer log carry a matching entry?
+log_has() { grep -Eq "$2" "$1/$LOG" 2>/dev/null; }
+
+# log_count <city> — how many entries the balancer log carries.
+log_count() { [ -f "$1/$LOG" ] && wc -l <"$1/$LOG" | tr -d ' ' || echo 0; }
+
+# --- 12. The first publish is immediate: there is no old value to damp. ------
+city="$(new_city 3 0)"
+printf 'BALANCER_RIGS="rigA"\n' >"$city/state/roster.conf"
+run_sweep "$city" >/dev/null
+if [ "$(target_for "$city" brakeman)" = 3 ]; then
+	report ok "the first-ever publish applies immediately (no prior target to damp)"
+else
+	report FAIL "the first-ever publish applies immediately" "brakeman=$(target_for "$city" brakeman)"
+fi
+
+# --- 13. A RAISE holds for one cycle and applies on the second. -------------
+set_pool "$city" 7
+run_sweep "$city" >/dev/null
+held="$(target_for "$city" brakeman)"
+if [ "$held" = 3 ]; then
+	report ok "a raise is HELD on its first cycle (3 -> 7 suppressed, still 3)"
+else
+	report FAIL "a raise is HELD on its first cycle" "brakeman=${held:-<none>}, expected 3"
+fi
+
+run_sweep "$city" >/dev/null
+applied="$(target_for "$city" brakeman)"
+if [ "$applied" = 7 ]; then
+	report ok "a raise APPLIES on its second consecutive cycle (3 -> 7)"
+else
+	report FAIL "a raise applies on its second consecutive cycle" "brakeman=${applied:-<none>}, expected 7"
+fi
+
+# The applied change is logged old-to-new, citing the snapshot that justified
+# it. A log carrying only the new value cannot be audited against the file the
+# consumers actually read.
+if log_has "$city" '^.*rigA[[:space:]]+brakeman[[:space:]]+3[[:space:]]+->[[:space:]]+7' &&
+	log_has "$city" 'snapshot=' && log_has "$city" 'demand=7'; then
+	report ok "an applied raise appends an old-to-new entry citing the snapshot"
+else
+	report FAIL "an applied raise appends an old-to-new entry citing the snapshot" "$(cat "$city/$LOG" 2>&1)"
+fi
+
+# A HELD cycle changed no target, so it must add no entry. A log that recorded
+# every cycle would make "every target change is logged" unfalsifiable.
+before="$(log_count "$city")"
+run_sweep "$city" >/dev/null
+if [ "$(log_count "$city")" = "$before" ] && [ "$(target_for "$city" brakeman)" = 7 ]; then
+	report ok "a cycle that changes no target appends no log entry"
+else
+	report FAIL "a cycle that changes no target appends no log entry" "before=$before after=$(log_count "$city")"
+fi
+rm -rf "$city"
+
+# --- 14. A LOWER needs SIX consecutive cycles, not two. ---------------------
+city="$(new_city 8 0)"
+printf 'BALANCER_RIGS="rigA"\n' >"$city/state/roster.conf"
+run_sweep "$city" >/dev/null   # publish 8
+
+set_pool "$city" 1
+i=1
+lower_leak=""
+while [ "$i" -le 5 ]; do
+	run_sweep "$city" >/dev/null
+	[ "$(target_for "$city" brakeman)" = 8 ] || lower_leak="cycle $i -> $(target_for "$city" brakeman)"
+	i=$((i + 1))
+done
+if [ -z "$lower_leak" ]; then
+	report ok "a lower is HELD for five cycles (8 -> 1 suppressed each time)"
+else
+	report FAIL "a lower is HELD for five cycles" "$lower_leak"
+fi
+
+run_sweep "$city" >/dev/null
+if [ "$(target_for "$city" brakeman)" = 1 ]; then
+	report ok "a lower APPLIES on its sixth consecutive cycle (8 -> 1)"
+else
+	report FAIL "a lower applies on its sixth consecutive cycle" "brakeman=$(target_for "$city" brakeman)"
+fi
+if log_has "$city" '^.*rigA[[:space:]]+brakeman[[:space:]]+8[[:space:]]+->[[:space:]]+1'; then
+	report ok "an applied lower appends its own old-to-new entry"
+else
+	report FAIL "an applied lower appends its own old-to-new entry" "$(cat "$city/$LOG" 2>&1)"
+fi
+rm -rf "$city"
+
+# --- 15. A reversed signal RESETS the streak. -------------------------------
+# Without a reset, a lane whose demand oscillates accumulates raise credit from
+# non-consecutive cycles and eventually raises on noise — which is the exact
+# flapping this criterion exists to prevent.
+city="$(new_city 2 0)"
+printf 'BALANCER_RIGS="rigA"\n' >"$city/state/roster.conf"
+run_sweep "$city" >/dev/null   # publish 2
+set_pool "$city" 6
+run_sweep "$city" >/dev/null   # raise streak 1, held
+set_pool "$city" 2
+run_sweep "$city" >/dev/null   # signal returns to the published value: reset
+set_pool "$city" 6
+run_sweep "$city" >/dev/null   # raise streak 1 again, must still be held
+if [ "$(target_for "$city" brakeman)" = 2 ]; then
+	report ok "a reversed signal resets the streak (interrupted raise does not apply)"
+else
+	report FAIL "a reversed signal resets the streak" "brakeman=$(target_for "$city" brakeman), expected 2"
+fi
+rm -rf "$city"
+
+# --- 16. An unreadable probe PRESERVES the streak. --------------------------
+# An unreadable demand read is not a demand signal — the same stance the
+# backpressure probe already takes. Dropping the streak on it would let a
+# flaky forge silently reset the gate every few cycles.
+#
+# THE ASSERTION LANDS ON A HELD CYCLE, and it has to. Asserting that the lane
+# eventually REACHES the raised value proves nothing: a run that forgot the lane
+# entirely would treat the next cycle as a first publish and apply the same
+# number immediately, by a different mechanism. Only a cycle the gate is
+# supposed to SUPPRESS separates a preserved streak from a lost one — a lost
+# history applies at once, a preserved one holds.
+city="$(new_city 2 0)"
+printf 'BALANCER_RIGS="rigA"\n' >"$city/state/roster.conf"
+run_sweep "$city" >/dev/null   # publish 2
+mv "$city/pool.json" "$city/pool.hidden"
+run_sweep "$city" >/dev/null   # demand unreadable: lane skipped, memory must survive
+mv "$city/pool.hidden" "$city/pool.json"
+set_pool "$city" 9
+run_sweep "$city" >/dev/null   # first raise cycle AFTER the gap: must be HELD at 2
+held="$(target_for "$city" brakeman)"
+if [ "$held" = 2 ]; then
+	report ok "an unreadable probe preserves the streak rather than resetting it"
+else
+	report FAIL "an unreadable probe preserves the streak" "brakeman=${held:-<none>}, expected 2 (a lost history would publish 9 as a first publish)"
+fi
+# And the surviving streak still completes normally on the next cycle.
+run_sweep "$city" >/dev/null
+if [ "$(target_for "$city" brakeman)" = 9 ]; then
+	report ok "the preserved streak still completes on its second cycle (2 -> 9)"
+else
+	report FAIL "the preserved streak still completes on its second cycle" "brakeman=$(target_for "$city" brakeman)"
+fi
+rm -rf "$city"
+
+# --- 17. Backpressure is an override, not a demand signal. ------------------
+# The merged pass states it in its own words: "A THROTTLED LANE IS NOT
+# MEASURED." This criterion gates on a DEMAND signal persisting, and a
+# throttled lane has none to persist — so the clamp to floor lands at once.
+# Making it wait six cycles would leave the factory producing into a jammed
+# merge stage for half an hour, defeating the backpressure criterion outright.
+city="$(new_city 9 0)"
+printf 'BALANCER_RIGS="rigA"\nBALANCER_BOUNDS="brakeman=1:9"\n' >"$city/state/roster.conf"
+run_sweep "$city" >/dev/null   # publish 9
+merge_queue "$city" 9          # merge stage jams
+run_sweep "$city" >/dev/null
+if [ "$(target_for "$city" brakeman)" = 1 ]; then
+	report ok "backpressure clamps to the floor at once, bypassing the lower gate"
+else
+	report FAIL "backpressure clamps to the floor at once" "brakeman=$(target_for "$city" brakeman), expected 1"
+fi
+rm -rf "$city"
+
+# ---------------------------------------------------------------------------
 echo
 echo "balance-sweep self-test: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

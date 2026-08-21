@@ -68,6 +68,21 @@ DEFAULT_BACKPRESSURE=6
 # second knob.
 BALANCER_READ_TIMEOUT="${BALANCER_READ_TIMEOUT:-15}"
 
+# HYSTERESIS: how many CONSECUTIVE cycles a demand signal must persist before
+# the target it asks for is actually published. Raising is cheap and reversible;
+# losing a worker mid-queue is neither, so the two directions are deliberately
+# asymmetric and are NOT operator knobs — the criterion fixes them at 2 and 6,
+# and a knob here would let an operator tune the flapping back in.
+#
+# WHAT COUNTS AS PERSISTING is the DIRECTION, not the exact number. Demand that
+# reads 7, 6, 8 against a published 3 is three cycles of the same answer — the
+# lane is under-provisioned — and a gate keyed on the exact value would never
+# raise under any real load, which is the failure mode of requiring too much
+# agreement. The value published when the gate opens is the CURRENT cycle's, not
+# the one that opened the streak: it is the freshest measurement available.
+RAISE_CYCLES=2
+LOWER_CYCLES=6
+
 # ---------------------------------------------------------------------------
 # Bounds
 # ---------------------------------------------------------------------------
@@ -279,6 +294,49 @@ sy_clamp() {
 }
 
 # ---------------------------------------------------------------------------
+# Hysteresis
+# ---------------------------------------------------------------------------
+
+# sy_hist_load RIG LANE — load the (rig, lane) demand streak into HIST_PREV,
+# HIST_DIR and HIST_COUNT. HIST_PREV is empty when the pair has never been
+# published, which is the first-publish case.
+#
+# THE HISTORY FILE, NOT THE TARGETS FILE, REMEMBERS WHAT WAS PUBLISHED, and the
+# distinction is load-bearing. A lane whose probe fails writes NO target line at
+# all — deliberately, so consumers fall back to their city.toml ceiling — so
+# reading the previous target back out of balancer.targets would forget the lane
+# after a single unreadable cycle and let the next one apply a raise instantly,
+# with the gate silently skipped. Keeping the memory here leaves the published
+# file's meaning exactly as the measure-and-clamp pass defined it.
+#
+# It sets globals rather than printing because a command substitution runs in a
+# subshell: three values would have to be re-split by the caller, and a
+# malformed line would then be indistinguishable from an absent one.
+sy_hist_load() {
+  HIST_PREV=""
+  HIST_DIR=none
+  HIST_COUNT=0
+  [ -f "$HIST" ] || return 0
+  while read -r _hl_kind _hl_rig _hl_lane _hl_prev _hl_dir _hl_count; do
+    [ "$_hl_kind" = hist ] || continue
+    [ "$_hl_rig" = "$1" ] || continue
+    [ "$_hl_lane" = "$2" ] || continue
+    HIST_PREV="$_hl_prev"
+    HIST_DIR="$_hl_dir"
+    HIST_COUNT="$_hl_count"
+    break
+  done <"$HIST"
+
+  # A hand-edited or truncated line is treated as NO history rather than as a
+  # zero: reverting to first-publish behaviour republishes the measured target,
+  # where a zero would read as "we last published 0" and gate a six-cycle
+  # climb out of a number nobody ever published.
+  case "${HIST_PREV:-}" in '' | *[!0-9]*) HIST_PREV=""; HIST_DIR=none; HIST_COUNT=0 ;; esac
+  case "${HIST_COUNT:-}" in '' | *[!0-9]*) HIST_COUNT=0 ;; esac
+  return 0
+}
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -302,6 +360,8 @@ BACKPRESSURE="$(sy_backpressure)"
 STATE="$(sy_state_dir)"
 mkdir -p "$STATE" 2>/dev/null || :
 OUT="$STATE/balancer.targets"
+HIST="$STATE/balancer.history"
+LOG="$STATE/balancer.log"
 
 # Fetched ONCE per cycle, not per rig: it is a gc invocation, and re-reading it
 # per rig would also let a mid-cycle roster change answer differently for two
@@ -311,17 +371,26 @@ TOKEN="$(sy_api_token 2>/dev/null)"
 PROJECTS="$(sy_api_projects "$TOKEN" 2>/dev/null)"
 
 TMP="$(mktemp "$OUT.XXXXXX" 2>/dev/null)" || exit 0
+HTMP="$(mktemp "$HIST.XXXXXX" 2>/dev/null)" || { rm -f "$TMP" 2>/dev/null; exit 0; }
+LTMP="$(mktemp "$LOG.XXXXXX" 2>/dev/null)" || { rm -f "$TMP" "$HTMP" 2>/dev/null; exit 0; }
 # The temp file is created BESIDE the target, not in /tmp, because the publish
 # below is a rename and a rename is only atomic within one filesystem. A temp in
 # /tmp would silently degrade to a copy — the half-written read this whole
 # mechanism exists to prevent.
-trap 'rm -f "$TMP" 2>/dev/null' EXIT INT TERM
+trap 'rm -f "$TMP" "$HTMP" "$LTMP" 2>/dev/null' EXIT INT TERM
 
 notes=""
 throttled=""
+decided=""
+
+# The cycle stamp is captured ONCE and used twice: it stamps the published file
+# and it is what each log entry cites as the snapshot that justified the change.
+# Re-reading the clock for the log would let an entry name a generation that was
+# never published, which is precisely the correlation the citation exists for.
+CYCLE="$(date +%s)"
 {
   printf 'version 1\n'
-  printf 'generated_at %s\n' "$(date +%s)"
+  printf 'generated_at %s\n' "$CYCLE"
 } >"$TMP"
 
 if sy_backpressure_malformed; then
@@ -402,18 +471,110 @@ for rig in $BALANCER_RIGS; do
     # moment the factory is under strain, leaving the spawn site chasing it every
     # cycle until the queue drains.
     target="$(sy_clamp "$demand" "$floor" "$ceiling" "$max")"
-    printf 'target %s %s %s\n' "$rig" "$lane" "$target" >>"$TMP"
+
+    # THE HYSTERESIS GATE. The clamp above says where the lane SHOULD be; this
+    # says whether it has been asking long enough to be moved there. A raise
+    # needs RAISE_CYCLES consecutive cycles, a lower LOWER_CYCLES, and a
+    # suppressed change republishes the previous target unchanged rather than
+    # dropping the line — a dropped line means "unreadable" to the consumers,
+    # which would spend the lane's ceiling every time the gate merely held.
+    sy_hist_load "$rig" "$lane"
+    published="$target"
+    ndir=none
+    ncount=0
+    changed=0
+    reason=""
+
+    if [ "$throttle" = 1 ]; then
+      # BACKPRESSURE IS AN OVERRIDE, NOT A DEMAND SIGNAL, so the gate does not
+      # apply to it. This pass states above that a throttled lane is not
+      # measured; with no demand read there is nothing to persist, and the gate
+      # is defined over exactly that signal. Making the clamp wait six cycles
+      # would leave the factory producing into a jammed merge stage for half an
+      # hour — the backpressure rule undone by the smoothing rule.
+      reason=backpressure
+      [ "${HIST_PREV:-}" = "$target" ] || changed=1
+    elif [ -z "$HIST_PREV" ]; then
+      # Nothing was ever published for this pair, so there is no change to damp.
+      reason=first-publish
+      changed=1
+    elif [ "$target" = "$HIST_PREV" ]; then
+      # The lane is where it should be. Any part-built streak is spent: the
+      # signal that opened it is no longer being made.
+      published="$HIST_PREV"
+    elif [ "$target" -gt "$HIST_PREV" ]; then
+      if [ "$HIST_DIR" = up ]; then ncount=$((HIST_COUNT + 1)); else ncount=1; fi
+      if [ "$ncount" -ge "$RAISE_CYCLES" ]; then
+        reason="raise-after-${ncount}c"
+        changed=1
+        ndir=none
+        ncount=0
+      else
+        published="$HIST_PREV"
+        ndir=up
+      fi
+    else
+      if [ "$HIST_DIR" = down ]; then ncount=$((HIST_COUNT + 1)); else ncount=1; fi
+      if [ "$ncount" -ge "$LOWER_CYCLES" ]; then
+        reason="lower-after-${ncount}c"
+        changed=1
+        ndir=none
+        ncount=0
+      else
+        published="$HIST_PREV"
+        ndir=down
+      fi
+    fi
+
+    printf 'target %s %s %s\n' "$rig" "$lane" "$published" >>"$TMP"
+    printf 'hist %s %s %s %s %s\n' "$rig" "$lane" "$published" "$ndir" "$ncount" >>"$HTMP"
+    decided="$decided $rig/$lane"
+
+    # ONLY AN APPLIED CHANGE IS LOGGED. Recording every cycle would make "every
+    # target change is logged" unfalsifiable — the entry an operator needs is
+    # the one that moved a lane, next to the reading that moved it.
+    if [ "$changed" = 1 ]; then
+      printf '%s %s %s %s -> %s reason=%s snapshot=cycle:%s demand=%s floor=%s ceiling=%s max=%s\n' \
+        "$CYCLE" "$rig" "$lane" "${HIST_PREV:-none}" "$published" "$reason" \
+        "$CYCLE" "$demand" "$floor" "$ceiling" "$max" >>"$LTMP"
+    fi
   done
 done
+
+# A PAIR THIS CYCLE DID NOT DECIDE KEEPS ITS STREAK. A lane skipped for an
+# unreadable probe, a rig dropped from BALANCER_RIGS for one cycle, a lane whose
+# capacity could not be read: none of those is a demand signal, and rewriting
+# the history without them would silently reset the gate every time the forge
+# hiccuped. The whole file is rebuilt each cycle, so what is not carried here is
+# forgotten.
+if [ -f "$HIST" ]; then
+  while read -r _cf_kind _cf_rig _cf_lane _cf_rest; do
+    [ "$_cf_kind" = hist ] || continue
+    [ -n "$_cf_rest" ] || continue
+    case " $decided " in *" $_cf_rig/$_cf_lane "*) continue ;; esac
+    printf 'hist %s %s %s\n' "$_cf_rig" "$_cf_lane" "$_cf_rest" >>"$HTMP"
+  done <"$HIST"
+fi
 
 # THE PUBLISH. One rename, so a consumer reading concurrently sees either the
 # whole previous generation or the whole new one. It also replaces rather than
 # appends: two targets for one (rig, lane) would be a file whose meaning depends
 # on which line the reader stopped at.
+#
+# THE STREAK AND THE LOG FOLLOW THE PUBLISH, and only a successful one. An
+# advanced streak behind a failed rename would count cycles against a generation
+# no consumer ever read — the gate would open on evidence that never existed —
+# and a log entry for it would describe a target change that did not happen.
+# Leaving the old history in place instead costs at most a repeated cycle.
 if mv "$TMP" "$OUT" 2>/dev/null; then
   trap - EXIT INT TERM
+  mv "$HTMP" "$HIST" 2>/dev/null || rm -f "$HTMP" 2>/dev/null
+  if [ -s "$LTMP" ]; then
+    cat "$LTMP" >>"$LOG" 2>/dev/null || :
+  fi
+  rm -f "$LTMP" 2>/dev/null
 else
-  rm -f "$TMP" 2>/dev/null
+  rm -f "$TMP" "$HTMP" "$LTMP" 2>/dev/null
   printf 'balance-sweep: could not publish %s\n' "$OUT" >&2
   exit 0
 fi

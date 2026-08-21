@@ -601,6 +601,39 @@
 # BALANCER_TARGET_MAX_AGE="900"
 
 # ---------------------------------------------------------------------------
+# PR rework lane (orders/pr-rework-sweep.toml) — the dispatcher that puts the
+# rework agent onto an open PR whose STANDING review verdict is a rejection
+# (a `Verdict: REQUEST CHANGES` marker comment or a formal CHANGES_REQUESTED
+# review on the current head, including a head review-sweep settled as
+# rejected across a content-identical rebase). PR authors here are ephemeral
+# sessions, so "the author's ball" is a ball handed to nobody without this
+# lane. OFF until PR_REWORK_RIGS is set: pushing fixes onto other sessions'
+# PR branches is authority an operator grants deliberately.
+#
+# PR_REWORK_RIGS — rigs whose standing-rejected open PRs (against
+#   PR_REWORK_BASE) are dispatched to the rig's rework session, one PR per
+#   nudge, marker-guarded per PR head. Empty = off.
+#
+# PR_REWORK_BASE / PR_REWORK_HOLD_LABEL — default to the review lane's
+#   REVIEW_LANE_BASE / REVIEW_LANE_HOLD_LABEL (staging / do-not-merge); the
+#   verdict literals are REVIEW_LANE_MARKER / REVIEW_LANE_REJECT_MARKER,
+#   shared with review-sweep on purpose — this lane consumes exactly the
+#   verdicts that lane trades in.
+#
+# PR_REWORK_ASSIGNMENT_TTL — seconds a dispatched-but-undelivered assignment
+#   suppresses re-dispatch of the same PR head AND counts its session busy.
+#   Default 14400, paired to the rework agent's max_session_age (4h): at
+#   expiry the holder cannot still be alive, so re-dispatch is recovery,
+#   never a mid-fix restart. Completed work is released early — the sweep
+#   stamps an assignment `delivered` when its PR's head moves. Keep >= the
+#   agent's max_session_age; shorten both together or neither.
+#
+# PR_REWORK_RIGS=""
+# PR_REWORK_BASE="staging"
+# PR_REWORK_HOLD_LABEL="do-not-merge"
+# PR_REWORK_ASSIGNMENT_TTL="14400"
+
+# ---------------------------------------------------------------------------
 # Security lane (orders/security-scan.toml). OFF until SECURITY_SCAN_RIGS
 # names at least one rig — it used to be on-by-default, which made an
 # unconfigured provider a weekly "lane idle" mail forever. The list is

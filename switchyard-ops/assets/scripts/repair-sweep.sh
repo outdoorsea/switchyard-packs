@@ -547,6 +547,40 @@ $prev"
       continue
     fi
 
+    # THE REWORK SESSION MAY BE MID-PR-REWORK. pr-rework-sweep routes
+    # review-rejected PRs to this same singleton session (max_active_sessions
+    # = 1, wake_mode = fresh), and its assignment markers carry the target
+    # alias in field 2 exactly like ours — so a fresh, undelivered marker
+    # naming our target means a nudge now would drop that in-flight PR rework
+    # on the floor while its marker still suppressed re-dispatch for the rest
+    # of its TTL. This is the mirror image of pr-rework-sweep's own check of
+    # OUR ledger; the two must stay paired, or the unchecked direction
+    # silently drops work again. Waiting is not a failure: the repair routes
+    # on a later cycle, which is the serialization the agent's pool ceiling
+    # already chose. The TTL default must equal pr-rework-sweep's (it pairs
+    # that value to the rework agent's max_session_age); a `delivered` stamp
+    # (appended line — the PR rework pushed and the head moved) releases the
+    # hold early, same as our own `consumed` stamp shape.
+    if [ "$worker_suffix" = ".rework" ]; then
+      _prw_ttl="${PR_REWORK_ASSIGNMENT_TTL:-14400}"
+      _prw_busy=0
+      for _prw_m in "$(sy_state_dir)/pr-rework-assignments"/*; do
+        [ -f "$_prw_m" ] || continue
+        awk 'NR>1 && $1 == "delivered" { found = 1 } END { exit !found }' "$_prw_m" 2>/dev/null && continue
+        _prw_at="$(awk 'NR==1{print $1}' "$_prw_m" 2>/dev/null)"
+        case "${_prw_at:-}" in '' | *[!0-9]*) continue ;; esac
+        [ $((now - _prw_at)) -lt "$_prw_ttl" ] || continue
+        if [ "$(awk 'NR==1{print $2}' "$_prw_m" 2>/dev/null)" = "$target" ]; then
+          _prw_busy=1
+          break
+        fi
+      done
+      if [ "$_prw_busy" -eq 1 ]; then
+        echo "repair-sweep: $rig rework session holds a live PR rework; waiting a cycle"
+        continue
+      fi
+    fi
+
     # Assembled only for a criterion that IS being routed — after both guards, so
     # a suppressed rejection costs no extra call — and never allowed to fail the
     # dispatch: repair_brief always succeeds, degrading its content instead.

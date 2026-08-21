@@ -20,7 +20,16 @@
 # the criterion, the PRD, and the rejection. The one claim it takes — the
 # criterion claim named in that nudge — it takes itself, so a second worker is
 # not routed onto the same repair (the nudge says so too).
-description = "Repairs one judge-rejected criterion per dispatch: reads the rejecting verdict and the prior delivery first, fixes what was refused, lands it as a PR"
+#
+# THE SAME SPECIALIST ALSO WORKS REVIEW-REJECTED PULL REQUESTS: pr-rework-sweep
+# dispatches a `PR REWORK` block (repo, number, findings, conflict state) for
+# an open PR whose standing review verdict is a rejection and whose author
+# session no longer exists. Same job from the session's point of view — read
+# the refusal first, fix what was refused — which is why it is one agent, not
+# two: the two sweeps' assignment markers both carry the target alias, and
+# each checks the other's ledger before nudging, so the singleton session is
+# never handed two jobs at once.
+description = "Repairs one refused piece of work per dispatch — a judge-rejected criterion or a review-rejected PR: reads the refusal and the prior delivery first, fixes what was refused, lands it on the PR"
 
 scope = "rig"
 
@@ -39,8 +48,8 @@ work_dir = ".gc/worktrees/{{.Rig}}/rework/{{.AgentBase}}"
 pre_start = ["{{.ConfigDir}}/assets/scripts/worktree-setup.sh {{.RigRoot}} {{.WorkDir}} {{.AgentBase}} --sync"]
 
 # The bare nudge is a stand-down (conductor precedent): work arrives only in
-# repair-sweep's dispatch nudge, which carries the REPAIR block.
-nudge = "Stand by. If this wake carries no REPAIR block you have no work: say IDLE: no repair dispatched, exiting turn. and stop. Never hunt for rejected criteria yourself — repair-sweep routes them."
+# a sweep's dispatch nudge, which carries the REPAIR or PR REWORK block.
+nudge = "Stand by. If this wake carries no REPAIR block and no PR REWORK block you have no work: say IDLE: no repair dispatched, exiting turn. and stop. Never hunt for rejected criteria or rejected PRs yourself — the sweeps route them."
 
 idle_timeout = "30m"
 max_session_age = "4h"

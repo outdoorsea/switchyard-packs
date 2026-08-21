@@ -122,6 +122,121 @@ marker_fresh() {
   [ $((now - _mf_at)) -lt "$2" ]
 }
 
+# rs_settle MKEY VERDICT PATCHID — record a finished review of one exact head.
+#
+# The settled marker used to be an empty touch-file; it now carries
+# `<epoch> <verdict> <patch-id>` so two consumers can read it back:
+#   * THIS sweep's rebase short-circuit below, which needs the patch-id to
+#     recognise the same content under a new head sha;
+#   * pr-rework-sweep, which needs the VERDICT to know a rebased head is
+#     standing-rejected (its comment predates the rebase, so no comment-time
+#     gate can show it).
+# `-` stands for "patch-id unavailable" so the line always has three fields.
+# Existing empty markers keep working: every reader treats a missing field as
+# absent, which costs one re-review at worst, never a wrong verdict.
+rs_settle() {
+  printf '%s %s %s\n' "$now" "$2" "${3:--}" > "$1.settled" 2>/dev/null || true
+}
+
+# rs_base_ready — resolve the rig's base tip ONCE per rig, cached in
+# $rig_base_sha (reset at the top of the rig loop). rc=0 with the cache
+# populated, rc=1 when the base cannot be resolved this cycle.
+#
+# One fetch per rig, not per candidate: the base tip cannot change the
+# answer within a run, and a post-base-move cycle is exactly when many
+# candidates need a patch-id at once — per-candidate fetches multiplied a
+# constant read into real forge rate-limit pressure. The sha is read from
+# the remote-tracking ref when the clone's refspec maintains one (immune to
+# another process overwriting the shared FETCH_HEAD file between our fetch
+# and our read — this runs in the rig's LIVE clone), falling back to
+# FETCH_HEAD for exotic clone shapes. A failed resolve is cached too
+# ($rig_base_failed), so a broken origin costs one attempt per cycle, not
+# one per candidate.
+rs_base_ready() {
+  [ -n "${rig_base_sha:-}" ] && return 0
+  [ "${rig_base_failed:-0}" -eq 1 ] && return 1
+  if git -C "$rig_root" fetch --quiet origin "$REVIEW_LANE_BASE" >/dev/null 2>&1; then
+    rig_base_sha="$(git -C "$rig_root" rev-parse --verify --quiet "refs/remotes/origin/$REVIEW_LANE_BASE" 2>/dev/null)"
+    [ -n "${rig_base_sha:-}" ] || rig_base_sha="$(git -C "$rig_root" rev-parse --verify --quiet FETCH_HEAD 2>/dev/null)"
+  fi
+  [ -n "${rig_base_sha:-}" ] && return 0
+  rig_base_failed=1
+  return 1
+}
+
+# rs_patch_id NUM HEAD BASE_SHA — the PR's merge-base diff patch-id, or rc=1.
+#
+# `git patch-id --stable` hashes the diff's hunks with line numbers ignored,
+# so a clean rebase of UNCHANGED hunks onto a moved base yields the same id —
+# while a rebase whose hunks actually interacted with the new base yields a
+# different one, which is exactly the case that deserves a fresh review.
+#
+# The PR head is fetched per call and read back through FETCH_HEAD,
+# cross-checked against the sha we are judging: refs/pull/N/head may have
+# moved since the list call, and a patch-id of some OTHER head would be
+# attributed to this one. The base sha arrives as an argument (rs_base_ready,
+# once per rig). Every failure (fetch, moved head, empty diff) returns rc=1
+# and the caller falls through to a normal dispatch: the cost of degrading is
+# one review, the old behaviour, never a wrong settle.
+rs_patch_id() {
+  git -C "$rig_root" fetch --quiet origin "refs/pull/$1/head" >/dev/null 2>&1 || return 1
+  [ "$(git -C "$rig_root" rev-parse --verify --quiet FETCH_HEAD 2>/dev/null)" = "$2" ] || return 1
+  _rpi_out="$(git -C "$rig_root" diff "$3...$2" 2>/dev/null \
+    | git patch-id --stable 2>/dev/null | awk '{print $1; exit}')"
+  [ -n "${_rpi_out:-}" ] || return 1
+  printf '%s' "$_rpi_out"
+}
+
+# rs_prior_has_pid SLUG NUM — does ANY settled marker for this PR carry a real
+# patch-id? The cheap existence probe that gates the rebase short-circuit: a
+# fresh PR with no settled history must not cost a fetch. The candidate's OWN
+# head cannot appear here (its settled marker would have skipped it earlier),
+# so every match is a PRIOR head. The key prefix is mkey_for's transform of
+# `slug#num@`, so the two cannot drift apart without drifting mkey_for itself.
+rs_prior_has_pid() {
+  _rph_pfx="$(printf '%s' "$1#$2@" | tr -c 'A-Za-z0-9' '-')"
+  for _rph_f in "$markers/$_rph_pfx"*.settled; do
+    [ -f "$_rph_f" ] || continue
+    _rph_pid="$(awk 'NR==1{print $3}' "$_rph_f" 2>/dev/null)"
+    [ -n "${_rph_pid:-}" ] && [ "$_rph_pid" != "-" ] && return 0
+  done
+  return 1
+}
+
+# rs_settled_verdict_for_pid SLUG NUM PID — the verdict of any settled marker
+# for this PR whose patch-id equals PID, or nothing. EQUALITY against every
+# sibling, not "the newest": a PR whose content returns to an EARLIER head's
+# content (a reverted fixup) still matches the marker that actually judged
+# that content — a newest-only pick missed it and burned a full re-review of
+# content already on the record.
+rs_settled_verdict_for_pid() {
+  _rvp_pfx="$(printf '%s' "$1#$2@" | tr -c 'A-Za-z0-9' '-')"
+  # One patch-id can match SEVERAL settled markers (the same content judged
+  # under different head shas), and glob order is head-sha order — arbitrary.
+  # An approve among them wins outright: the only caller acts on "reject",
+  # and carrying a reject that a sibling approve of the SAME content
+  # supersedes would rework a PR the record already cleared. With no approve,
+  # the NEWEST matching marker (field 1, the settle epoch) speaks for the
+  # content, so a stale sibling cannot outvote the latest judgement.
+  _rvp_verdict='' _rvp_best=0
+  for _rvp_f in "$markers/$_rvp_pfx"*.settled; do
+    [ -f "$_rvp_f" ] || continue
+    [ "$(awk 'NR==1{print $3}' "$_rvp_f" 2>/dev/null)" = "$3" ] || continue
+    _rvp_v="$(awk 'NR==1{print $2}' "$_rvp_f" 2>/dev/null)"
+    if [ "$_rvp_v" = "approve" ]; then
+      printf 'approve'
+      return 0
+    fi
+    _rvp_at="$(awk 'NR==1{print $1}' "$_rvp_f" 2>/dev/null)"
+    case "${_rvp_at:-}" in '' | *[!0-9]*) _rvp_at=0 ;; esac
+    if [ "$_rvp_at" -ge "$_rvp_best" ]; then
+      _rvp_best="$_rvp_at"
+      _rvp_verdict="$_rvp_v"
+    fi
+  done
+  printf '%s' "$_rvp_verdict"
+}
+
 now="$(date +%s)"
 failed=""
 suspended_rigs="$(sy_suspended_rigs)"
@@ -138,6 +253,11 @@ for rig in $REVIEW_LANE_RIGS; do
 
   rig_root="$(sy_rig_root "$rig")"
   [ -d "$rig_root/.git" ] || continue
+
+  # Per-rig patch-id base cache (rs_base_ready): reset so one rig's base — or
+  # one rig's failed resolve — can never answer for the next rig's.
+  rig_base_sha=""
+  rig_base_failed=0
 
   # owner/repo straight off the rig's own remote (merge-lane's pattern).
   slug=$(git -C "$rig_root" remote get-url origin 2>/dev/null \
@@ -239,7 +359,13 @@ for rig in $REVIEW_LANE_RIGS; do
     [ -n "$num" ] || continue
 
     mkey="$(mkey_for "$slug" "$num" "$head")"
-    [ -f "$mkey.settled" ] && continue
+    # The touch is load-bearing, not hygiene: the 7-day marker prune above
+    # keys on mtime, and a settled marker skipped here every cycle otherwise
+    # keeps its FIRST-write mtime — on day 8 the prune would delete a live
+    # PR's entire verdict history and re-arm one full re-review per week for
+    # any long-lived rejected PR. Refreshing on each skip means aging only
+    # starts once the PR leaves the open list.
+    [ -f "$mkey.settled" ] && { touch "$mkey.settled" 2>/dev/null || true; continue; }
 
     gh pr view "$num" --repo "$slug" --json comments,commits,statusCheckRollup \
       > "$TMP/meta.json" 2>/dev/null
@@ -253,15 +379,30 @@ for rig in $REVIEW_LANE_RIGS; do
     # the TTL expired. The view call this spends per in-flight assignment per
     # cycle is bounded by the reviewer pool, and buys the busy set its
     # accuracy.
+    #
+    # The NEWEST matching comment decides WHICH verdict stands (the reviewer
+    # prompt forbids a reject containing the approve literal, so a comment
+    # carrying both classifies as approve by that contract). The old form
+    # only counted matches — "reviewed or not" — which was all this lane
+    # needed; the ledger now records which, because pr-rework-sweep routes on
+    # a standing REJECT and must never read an approve as one.
     last_commit=$(jq -r '
       [.commits[]
        | select(.messageHeadline | test("^Merge (branch|remote-tracking branch) ") | not)
        | .committedDate] | max // ""' "$TMP/meta.json")
-    reviewed=$(jq -r --arg a "$REVIEW_LANE_MARKER" --arg r "$REVIEW_LANE_REJECT_MARKER" --arg t "$last_commit" '
+    verdict=$(jq -r --arg a "$REVIEW_LANE_MARKER" --arg r "$REVIEW_LANE_REJECT_MARKER" --arg t "$last_commit" '
       [.comments[]? | select((.body | contains($a)) or (.body | contains($r)))
-       | select(.createdAt > $t)] | length' "$TMP/meta.json")
-    if [ "${reviewed:-0}" != "0" ]; then
-      : > "$mkey.settled" 2>/dev/null || true
+       | select(.createdAt > $t)]
+      | sort_by(.createdAt) | last
+      | if . == null then ""
+        elif (.body | contains($a)) then "approve"
+        else "reject" end' "$TMP/meta.json")
+    if [ -n "${verdict:-}" ]; then
+      _sp_pid=""
+      if rs_base_ready; then
+        _sp_pid="$(rs_patch_id "$num" "$head" "$rig_base_sha")" || _sp_pid=""
+      fi
+      rs_settle "$mkey" "$verdict" "$_sp_pid"
       continue
     fi
 
@@ -269,6 +410,49 @@ for rig in $REVIEW_LANE_RIGS; do
     # nudged session never delivered (died, drained, wedged) and the PR is
     # dispatched again rather than stranded behind a marker.
     marker_fresh "$mkey" "$REVIEW_ASSIGNMENT_TTL" && continue
+
+    # REBASE-IDENTICAL SHORT-CIRCUIT — REJECTS ONLY. A rebase rewrites
+    # committer dates, so a verdict that was on the head's last commit
+    # yesterday predates it today — while the CONTENT may be byte-identical
+    # (pr-refresh rebases open PRs whenever the base moves, and a clean
+    # rebase changes nothing but shas). Without this, the same content is
+    # re-reviewed after every base move: the verdict comment predates the new
+    # head, the sweep re-dispatches, a full review's tokens are spent
+    # producing the same verdict, forever. If a PRIOR head of this PR was
+    # settled with a patch-id and the current head's patch-id matches a
+    # REJECTED one, the reject carries over: settle this head with it (which
+    # is what pr-rework-sweep reads) and dispatch nothing.
+    #
+    # It runs AFTER the live-assignment skip deliberately: a head already
+    # carrying a fresh assignment has a reviewer working on it right now, and
+    # settling under them would tell the busy set that reviewer is free —
+    # earning it a second PR while it is mid-review. The carry loses nothing
+    # by waiting: the first cycle after a rebase mints a NEW head key, which
+    # has no assignment marker at all, so the short-circuit fires there.
+    #
+    # AN APPROVE NEVER CARRIES, deliberately. merge-lane's approve evidence
+    # is a formal APPROVED review or a marker COMMENT newer than the head's
+    # last commit — it does not read this ledger — so a carried approve would
+    # suppress exactly the re-dispatch that regenerates the comment the merge
+    # needs: the PR would sit settled-approved, unmergeable and
+    # un-re-reviewable, until the marker prune. A rebased approved PR falls
+    # through to a fresh dispatch instead; the re-review it costs is the one
+    # that makes the approval mergeable again.
+    #
+    # Any failure to compute falls through to a normal dispatch — one review,
+    # the old behaviour, never a wrong settle.
+    if rs_prior_has_pid "$slug" "$num"; then
+      cur_pid=""
+      if rs_base_ready; then
+        cur_pid="$(rs_patch_id "$num" "$head" "$rig_base_sha")" || cur_pid=""
+      fi
+      if [ -n "$cur_pid" ] && [ "$(rs_settled_verdict_for_pid "$slug" "$num" "$cur_pid")" = "reject" ]; then
+        rs_settle "$mkey" "reject" "$cur_pid"
+        printf '%s settled-by-patch-id %s#%s@%s (reject)\n' \
+          "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$slug" "$num" "$head" >> "$LOG" 2>/dev/null || true
+        continue
+      fi
+    fi
 
     # Grace window: a young head belongs to the primary reviewer first. The
     # age is judged from the head's last authored commit (already in hand),

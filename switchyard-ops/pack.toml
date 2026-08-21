@@ -21,6 +21,9 @@
 #                    enabled (SECURITY_SCAN_RIGS) and its provider usable (12h)
 #   review-sweep   — dispatch a reviewer onto each open PR lacking a finished
 #                    review on its head (15m; opt-in via REVIEW_LANE_RIGS)
+#   pr-rework-sweep — dispatch the rework agent onto each open PR whose
+#                    standing review verdict is a rejection, with the findings
+#                    and conflict state (30m; opt-in via PR_REWORK_RIGS)
 #   token-audit    — start the city token auditor (7d)
 #   refactor-scan  — start one refactor-scout per rig (7d)
 #
@@ -81,12 +84,13 @@
 #                    REQUEST CHANGES comment. Never merges, never edits the
 #                    branch; like the conductor it does not pick its own work —
 #                    review-sweep assigns PRs. Off until REVIEW_LANE_RIGS.
-#   rework         — the REPAIR specialist: fixes one judge-rejected criterion
-#                    per dispatch, reading the rejecting verdict and the prior
-#                    delivery FIRST (a brakeman's prompt is written for fresh
-#                    builds; repeated identical rejections are what that
-#                    mismatch looks like). Routed to by repair-sweep on rigs
-#                    opted in via REWORK_RIGS; brakeman routing is the default.
+#   rework         — the REPAIR specialist: fixes one refused piece of work
+#                    per dispatch — a judge-rejected criterion (routed by
+#                    repair-sweep on rigs opted in via REWORK_RIGS; brakeman
+#                    routing is the default) or a review-rejected pull request
+#                    (routed by pr-rework-sweep on PR_REWORK_RIGS rigs, whose
+#                    authors are ephemeral sessions that no longer exist) —
+#                    reading the refusal and the prior delivery FIRST.
 #   token-auditor  — the SPEND-REVIEW lane, and the only CITY-SCOPED agent here
 #                    (spend is a city property, and the useful comparisons are
 #                    cross-rig). Attributes .gc/usage.jsonl to agents and rigs via

@@ -1,0 +1,59 @@
+# Put a worker on every pull request whose standing review verdict is a
+# rejection — the review pipeline's missing REWORK half.
+#
+# THE GAP THIS CLOSES. review-sweep treats a standing `Verdict: REQUEST
+# CHANGES` (marker comment or CHANGES_REQUESTED reviewDecision) as "the
+# author's ball", and it is right to: a finished review of the current head
+# must not be re-dispatched. But the authors here are ephemeral — brakeman and
+# pool-spawned sessions that no longer exist minutes after the PR opens — so
+# "the author's ball" is a ball handed to nobody. repair-sweep routes only
+# judge `fail` verdicts from the switchyard verdict ledger, never PR review
+# rejections, and pr-refresh's conflict alert defers to "a human (or the PR's
+# author agent)". Measured 2026-08-21: two rejected PRs sat 6–8h unowned while
+# every lane reported healthy. This order is the symmetric dispatcher: it
+# notices a reject verdict standing on an open PR against the lane base and
+# nudges exactly one rework session with the PR, the reject findings, and (for
+# a CONFLICTING PR) the conflict state — one live assignment per PR head,
+# marker-guarded exactly like review-sweep's dispatch.
+#
+# WHAT COUNTS AS A STANDING REJECT. The newest finished verdict on the PR —
+# a marker comment (either literal) or a formal APPROVED/CHANGES_REQUESTED
+# review — is a reject, AND it stands on the CURRENT head: either it was
+# posted after the head's last non-merge commit, or review-sweep's settled
+# ledger records the current head as reviewed-rejected (which is how a
+# pr-refresh rebase of unchanged content keeps its verdict — see review-sweep's
+# patch-id settle). A PR whose head moved past its reject with NEW content is
+# the reviewer's ball again, not this lane's: dispatching rework onto a fix
+# that is merely awaiting re-review would put a second worker on done work.
+#
+# JUDGMENT LIVES IN THE SESSION. The sweep decides only WHICH PR and WHO to
+# wake; what the rework should change is decided by the rework session that
+# receives the assignment, which reads the findings, the diff and the repo.
+#
+# OFF BY DEFAULT. PR_REWORK_RIGS in roster.conf is the only switch; empty
+# means this order exits without reading anything. Same posture as review-sweep:
+# pushing fixes onto other sessions' PR branches is authority an operator
+# grants deliberately, per rig.
+#
+# CADENCE 30m, TTL 14400 — the TTL pairs with the REWORK AGENT'S
+# max_session_age (4h), not with the cadence (repair-sweep's one-interval
+# pairing is wrong here). At expiry an assignment simultaneously stops
+# suppressing re-dispatch and stops counting its session busy, so an expired
+# assignment whose holder were still alive would be re-nudged MID-FIX —
+# dropped on the fresh-wake floor. At the agent's own age ceiling the holder
+# cannot still be alive, so expiry is always recovery. Completed work never
+# waits on the window: the sweep stamps an assignment `delivered` the moment
+# its PR's head moves (or the PR leaves the open list), which frees the
+# session for the next rejected PR immediately.
+#
+# Configuration lives in roster.conf (all optional):
+#   PR_REWORK_RIGS           ""       rigs whose rejected PRs are dispatched; empty = lane off
+#   PR_REWORK_BASE           REVIEW_LANE_BASE (staging)      only PRs against this base
+#   PR_REWORK_HOLD_LABEL     REVIEW_LANE_HOLD_LABEL (do-not-merge)  exempts a PR
+#   PR_REWORK_ASSIGNMENT_TTL 14400    seconds an undelivered assignment suppresses re-dispatch (>= the rework agent's max_session_age)
+#   REVIEW_LANE_MARKER / REVIEW_LANE_REJECT_MARKER   the verdict literals (shared with review-sweep)
+[order]
+description = "Dispatch a rework session onto each open PR whose standing review verdict is a rejection, one PR per nudge with the findings and conflict state, so a rejected PR authored by a dead session is fixed rather than orphaned"
+trigger = "cooldown"
+interval = "30m"
+exec = "$PACK_DIR/assets/scripts/pr-rework-sweep.sh"

@@ -525,6 +525,40 @@ else
 fi
 rm -rf "$c"
 
+# A rework session holding a live PR-REWORK assignment is not nudged a
+# criterion repair on top: pr-rework-sweep routes review-rejected PRs to the
+# same singleton session, and a second job at a fresh-wake session drops the
+# first. The wait is quiet (no mail — serialization, not failure), and a
+# `delivered` stamp on the marker releases it.
+c="$(new_city)"
+reject "$c" 330 "crit:aaa"
+criterion "$c" 330 "crit:aaa"
+printf 'REWORK_RIGS="rigA"\n' >"$c/state/roster.conf"
+cat >"$c/sessions.json" <<'JSON'
+{"sessions":[{"template":"rigA/switchyard-ops.brakeman","alias":"rigA-brakeman-adhoc-stub","state":"active"},
+{"template":"rigA/switchyard-ops.rework","alias":"rigA-rework-adhoc-stub","state":"active"}]}
+JSON
+mkdir -p "$c/state/pr-rework-assignments"
+printf '%s rigA-rework-adhoc-stub stub/rigA#7 aaa111\n' "$(date +%s)" \
+	>"$c/state/pr-rework-assignments/stub-rigA-7-aaa111"
+run_sweep "$c"
+if [ "$(nudges "$c")" = 0 ] && ! grep -q 'could not route' "$c/mailed.log" 2>/dev/null; then
+	report ok "a rework session mid-PR-rework is not nudged a criterion repair"
+else
+	report FAIL "a rework session mid-PR-rework is not nudged a criterion repair" \
+		"routed $(nudges "$c"), mail: $(cat "$c/mailed.log" 2>/dev/null)"
+fi
+# The PR rework delivers (stamped): the repair routes on the next cycle.
+printf 'delivered %s\n' "$(date +%s)" >>"$c/state/pr-rework-assignments/stub-rigA-7-aaa111"
+run_sweep "$c"
+if [ "$(nudges "$c")" = 1 ]; then
+	report ok "a delivered PR-rework stamp releases the session for the repair"
+else
+	report FAIL "a delivered PR-rework stamp releases the session for the repair" \
+		"routed $(nudges "$c")"
+fi
+rm -rf "$c"
+
 # SY_NS override: a city that imported the pack under a different key sets
 # SY_NS in roster.conf, and every qualified-name construction follows it —
 # resolution, routing, and the nudge target alike.

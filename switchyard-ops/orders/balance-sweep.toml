@@ -1,0 +1,64 @@
+# Measure each lane's queue depth and publish demand-driven concurrency targets
+# (switchyard PRD #397).
+#
+# Every lane in this pipeline runs at a hand-set parallelism: max_active_sessions
+# in city.toml, changed only when a human notices a queue backing up, edits the
+# file and reloads. No order watches the whole pipeline, so bottlenecks persist
+# for hours — a 13-hour head-of-line stall, a ~100-bead pool with zero live
+# claimers — while the inverse failure, over-scaled lanes burning the shared
+# usage cap until sessions froze, goes equally unnoticed.
+#
+# This order measures the queue depth behind each PARALLEL lane, turns it into a
+# concurrency target inside operator-set bounds, and writes those targets to
+# balancer.targets in the pack state dir. The spawn sites read that file beneath
+# their own city.toml ceiling. The operator keeps the hard bounds and the ops
+# log; the balancer turns the dial within them.
+#
+# WHAT IT NEVER SCALES. merge-lane and staging-promote are serial BY DESIGN —
+# they are ordered for correctness, and "more concurrency" there means two
+# sessions merging into one branch. Their queue depths are backpressure that
+# throttles upstream spawning instead, never a lane to widen. No code path here
+# can publish a target for either: the balanced set is the two parallel lanes,
+# naming a serial stage in BALANCER_BOUNDS does nothing, and the order's own
+# self-test holds both halves of that — no serial stage in the set, and both
+# parallel lanes still in it, so a script that balanced nothing at all could not
+# pass by vacuously honouring the invariant.
+#
+# BACKPRESSURE IS HOW A SERIAL STAGE ANSWERS BACK. When the reviewed-but-
+# unmerged queue against MERGE_LANE_BASE runs deeper than
+# BALANCER_MERGE_BACKPRESSURE (default 6 — one hour of merge-lane's one-per-run
+# 10m drain), both upstream lanes clamp to their operator floors until it
+# drains: another builder would only add to the pile, and another reviewer would
+# only approve onto it. The clamp scales lanes DOWN and never up, kills nothing
+# already running, and counts only APPROVED non-draft PRs, so a busy review
+# queue is never mistaken for a jammed merge lane. An unreadable probe changes
+# no target and is named in the report, because throttling the whole factory on
+# a timed-out forge call is the outage this order exists to prevent.
+#
+# OFF UNTIL BALANCER_RIGS NAMES A RIG. Unset, this order exits before it reads
+# anything and writes nothing at all, so an unopted city is byte-for-byte
+# unchanged — including any targets file already on disk, which is left exactly
+# as found. Retiring a stale file is the consumers' staleness check, not a
+# deletion here.
+#
+# THE FAILURE DIRECTION IS "PUBLISH NOTHING". A lane whose demand or capacity
+# cannot be read gets no target line, and a consumer with no line for its lane
+# falls back to its city.toml ceiling exactly as today. Publishing a target
+# computed from a queue nobody could read is how a balancer scales a lane on
+# imaginary demand, so every unreadable leg is skipped and named in the report
+# instead.
+#
+# Cadence is 5m: long enough that a lane is not retuned on one noisy sample,
+# short enough that a backed-up queue is answered within minutes rather than
+# whenever someone next looks at city.toml.
+#
+# Needs jq, and the pack's switchyard credential (SWITCHYARD_API_TOKEN, or the
+# switchyard-mcp CLI's own token file) for the brakeman lane's pool read — the
+# same credential every other queue probe uses. A rig whose name is not its
+# project slug needs a RIG_PROJECTS entry, same as every other consumer.
+
+[order]
+description = "Measure each balanced rig's lane queue depths and publish brakeman/reviewer concurrency targets to balancer.targets, clamped into BALANCER_BOUNDS and never above the lane agent's own max_active_sessions, or down to their floors when the reviewed-but-unmerged queue backs up"
+trigger = "cooldown"
+interval = "5m"
+exec = "$PACK_DIR/assets/scripts/balance-sweep.sh"

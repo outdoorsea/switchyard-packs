@@ -469,6 +469,99 @@
 # REVIEW_LANE_PRIMARY_LIMIT_MARKER="Review limit reached"
 
 # ---------------------------------------------------------------------------
+# Factory balancer (orders/balance-sweep.toml) — demand-driven lane concurrency
+# (switchyard PRD #397).
+#
+# Every lane runs at a hand-set parallelism until you edit city.toml. The
+# balancer measures each PARALLEL lane's queue depth every 5 minutes and
+# publishes a concurrency target the spawn sites honour BENEATH their own
+# city.toml ceiling. It never raises a lane past capacity you already granted;
+# it only moves the dial inside it.
+#
+# BALANCER_RIGS — the rigs whose lanes are balanced. Empty (the default) means
+#   the order exits before reading anything and writes no targets file, so an
+#   unopted city is byte-for-byte unchanged. A targets file already on disk is
+#   left exactly as found: retiring a stale one is the consumers' staleness
+#   check, not a deletion, because the file is also the evidence of why a lane
+#   was scaled before the balancer was switched off.
+#
+# BALANCER_BOUNDS — per-lane operator floors and ceilings, as
+#   `<lane>=<floor>:<ceiling>`, space-separated. A lane you do not name gets
+#   floor 0 and a ceiling of that lane agent's own resolved
+#   max_active_sessions — so this key is purely a NARROWING knob, and setting
+#   nothing yields a balancer free to range over exactly the capacity city.toml
+#   already grants.
+#
+#   The floor is a guarantee of PRESENCE and costs a session whether or not
+#   there is work, which is why the default is 0 rather than 1: an idle factory
+#   stays idle unless you ask for a warm lane.
+#
+#   max_active_sessions BEATS BOTH EDGES. A floor above the agent's resolved
+#   capacity resolves DOWN to that capacity, not up to the floor — the bounds
+#   are your preference, the capacity is what the lane actually has, and a
+#   target the lane can never reach would leave the spawn site chasing it every
+#   cycle. Raise max_active_sessions in city.toml if you want a higher floor to
+#   mean anything.
+#
+#   A malformed entry falls back to that lane's default rather than refusing to
+#   run — the same rule SY_FANOUT_THRESHOLD documents above, and for the same
+#   reason: a typo in a tuning knob must not take a lane down. The fallback is
+#   reported in the order's own output so you learn of it.
+#
+#   ONLY THE PARALLEL LANES ARE BALANCED. `brakeman` and `reviewer` are the
+#   whole set. merge-lane and staging-promote are serial by design — naming
+#   them here does nothing, deliberately, because "more concurrency" on an
+#   ordered stage means two sessions merging into one branch.
+#
+# BALANCER_MERGE_BACKPRESSURE — the reviewed-but-unmerged depth at which the
+#   two upstream lanes stop following their own demand and clamp to their
+#   floors. Default 6; 0 switches backpressure off entirely.
+#
+#   WHY A DOWNSTREAM QUEUE REACHES BACK. merge-lane and staging-promote are
+#   serial by design, so the answer to a queue they cannot drain is never more
+#   mergers — it is fewer producers. Once approved work is piling up unmerged,
+#   another builder adds to the pile and another reviewer approves onto it, so
+#   both clamp until it drains. It only ever scales lanes DOWN.
+#
+#   THE DEFAULT IS ONE HOUR OF DRAIN, not a round number: merge-lane merges one
+#   pull request per rig per run on a 10m cadence, so a backlog of 6 is what it
+#   clears in an hour. Raise it if your merges are cheaper than that, lower it
+#   if a deep queue costs you more than an idle builder.
+#
+#   ONLY APPROVED, NON-DRAFT PRs against MERGE_LANE_BASE count — that is the
+#   queue merge-lane actually drains. Counting every open PR would read a busy
+#   review lane as a jammed merge lane and throttle the factory on demand it
+#   was handling perfectly well.
+#
+#   Where the lanes land is your BALANCER_BOUNDS floor, and max_active_sessions
+#   still beats it. The default floor of 0 means backpressure stops upstream
+#   spawning entirely; set a floor if you want a lane kept warm through a jam.
+#   Live sessions are never killed — the clamp is attrition-only, so work in
+#   flight finishes and the pipeline drains rather than deepening.
+#
+#   AN UNREADABLE PROBE IS NOT A DEEP QUEUE. If the merge queue cannot be read
+#   the targets are left on their own demand and the order names it in its
+#   report: throttling the whole factory because one forge call timed out is
+#   the outage this order exists to prevent.
+#
+# BALANCER_MERGE_BASE — the base whose reviewed-but-unmerged queue is that
+#   signal. Defaults to MERGE_LANE_BASE (itself "staging"), so the balancer and
+#   the lane it throttles for can never disagree about which branch is under
+#   discussion when you retune one.
+#
+# Needs jq and the pack's switchyard credential (SWITCHYARD_API_TOKEN, or the
+# switchyard-mcp CLI's own token file) for the brakeman lane's pool read. A rig
+# whose name is not its project slug needs a RIG_PROJECTS entry, same as every
+# other consumer. A lane whose demand or capacity cannot be read is SKIPPED
+# rather than guessed — it gets no target line, and a consumer with no line
+# falls back to its city.toml ceiling exactly as today.
+#
+# BALANCER_RIGS=""
+# BALANCER_BOUNDS="brakeman=1:6 reviewer=1:3"
+# BALANCER_MERGE_BACKPRESSURE="6"
+# BALANCER_MERGE_BASE="staging"
+
+# ---------------------------------------------------------------------------
 # Rework lane (agents/rework, routed by orders/repair-sweep.toml) — a
 # dedicated repair specialist for judge-rejected criteria. By default
 # repair-sweep routes repairs to the shared brakeman pool; a rig listed here

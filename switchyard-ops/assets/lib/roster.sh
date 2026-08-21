@@ -251,6 +251,86 @@ sy_load_conf() {
   return 0
 }
 
+# sy_balancer_target RIG LANE — the concurrency target the balancer has
+# published for RIG's LANE, or rc 1 and NO output when there is not one to
+# honour (switchyard PRD #397).
+#
+# THE ONE READER FOR ONE RULE. Four separate spawn sites are specified to cap
+# themselves at these targets — pool-spawn's brakemen, review-sweep's
+# reviewers, and judge-sweep and repair-sweep after them — each "under the
+# same present-fresh-and-well-formed rule". A rule re-implemented per caller
+# is the same rule only by coincidence, and drifts the first time one of them
+# is fixed alone; it lives here, beside sy_state_dir, because where the file
+# is and what counts as a usable one are the same piece of knowledge.
+#
+# FAILS OPEN, and that direction is the whole safety property: an absent,
+# stale, malformed or unreadable file must leave every caller behaving exactly
+# as it does today. So every rejection is one answer — no target — and the
+# caller keeps the capacity city.toml gave it. Failing CLOSED to zero would
+# let one corrupt state file silently stop all dispatch, which is the outage
+# the balancer exists to prevent rather than cause.
+#
+# STALENESS IS THE CONSUMER'S JOB. The writer deliberately leaves its file on
+# disk when the balancer is switched off, because deleting one is a balancer
+# reaching outside its own state — so nothing but this check retires it. The
+# window is SYMMETRIC: keyed only on an upper bound, a clock skewed far
+# forward pins a long-dead file as permanently current and the check never
+# expires at all. Three missed 5-minute cycles is the default tolerance —
+# long enough that one slow sweep does not drop every cap and re-flood the
+# lanes, short enough that a balancer which died an hour ago stops steering.
+#
+# WELL-FORMED IS ALL-OR-NOTHING. One unparseable line rejects the whole file
+# rather than being skipped: the writer emits it atomically (temp file beside
+# the target, then mv), so a torn read is not something that happens by
+# accident — a file that does not parse cleanly was written by something this
+# reader does not understand, and honouring the lines it happens to recognise
+# would be acting on a contract it has already failed to verify. The
+# `version 1` header gates exactly that.
+sy_balancer_target() {
+  _sbt_file="$(sy_state_dir)/balancer.targets"
+  [ -f "$_sbt_file" ] && [ -r "$_sbt_file" ] || return 1
+
+  _sbt_val="$(awk -v rig="$1" -v lane="$2" \
+      -v now="$(date +%s 2>/dev/null)" -v ttl="${BALANCER_TARGET_MAX_AGE:-900}" '
+    BEGIN { if (now !~ /^[0-9]+$/ || ttl !~ /^[0-9]+$/) { bad = 1; exit } }
+    NR == 1 { if ($0 != "version 1") { bad = 1; exit } ; next }
+    NR == 2 {
+      if ($1 != "generated_at" || NF != 2 || $2 !~ /^[0-9]+$/) { bad = 1; exit }
+      age = now - $2
+      if (age > ttl || age < -ttl) { bad = 1; exit }
+      next
+    }
+    /^[ \t]*$/ { next }
+    {
+      if ($1 != "target" || NF != 4 || $4 !~ /^[0-9]+$/) { bad = 1; exit }
+      if ($2 == rig && $3 == lane) { found = 1; val = $4 }
+      next
+    }
+    END { if (bad || !found) exit 1; print val }
+  ' "$_sbt_file" 2>/dev/null)" || return 1
+
+  case "$_sbt_val" in '' | *[!0-9]*) return 1 ;; esac
+  printf '%s' "$_sbt_val"
+}
+
+# sy_balancer_capped RIG LANE MAX — MAX lowered to the balancer's target for
+# that lane when one is published, and MAX returned untouched otherwise.
+#
+# min(), never max(): the balancer turns the dial WITHIN the operator's
+# bounds, so a target above the agent's resolved max_active_sessions is not
+# authority to exceed it. The clamp is applied here as well as in the writer
+# because the two are separately deployable — a writer rebuilt against
+# different bounds must never be able to raise a lane's ceiling past the one
+# city.toml grants.
+sy_balancer_capped() {
+  _sbc_target="$(sy_balancer_target "$1" "$2")" || { printf '%s' "$3"; return 0; }
+  if [ "$_sbc_target" -lt "$3" ] 2>/dev/null; then
+    printf '%s' "$_sbc_target"
+  else
+    printf '%s' "$3"
+  fi
+}
+
 # Agents the reconciler is pinning: pool.min >= 1 and not suspended.
 #
 # `.suspended` here is the per-AGENT flag ONLY. It says nothing about whether

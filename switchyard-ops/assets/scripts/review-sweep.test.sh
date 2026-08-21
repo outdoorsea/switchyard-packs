@@ -238,6 +238,24 @@ spawns() {
 	echo "${n:-0}"
 }
 
+# set_pool_max CITY N — the reviewer agent's resolved ceiling, as
+# `gc agent list --json` reports it. The balancer cap is only observable
+# against a ceiling with headroom above the live pool, so the balancer cases
+# below raise it above the fixture default.
+set_pool_max() {
+	cat >"$1/agents.json" <<JSON
+{"agents":[{"qualified_name":"rigA/switchyard-ops.reviewer","pool":{"max":$2},"suspended":false}]}
+JSON
+}
+
+# balancer_targets CITY BODY — publish BODY as the balancer's targets file in
+# the state dir the sweep reads. BODY is written VERBATIM on purpose: a case
+# asserting on a malformed file must be able to write one, which a helper that
+# formatted the fields for it could not express.
+balancer_targets() {
+	printf '%s\n' "$2" >"$1/state/balancer.targets"
+}
+
 # ---------------------------------------------------------------------------
 # 1. POSITIVE CONTROL — load-bearing. If a qualified PR did not dispatch, every
 #    negative case below would pass vacuously by dispatching nothing at all.
@@ -482,6 +500,179 @@ if [ "$n" = 2 ]; then
 else
 	report FAIL "an expired assignment on a still-open unreviewed PR is dispatched again" \
 		"nudges=$n"
+fi
+rm -rf "$c"
+
+# ---------------------------------------------------------------------------
+# 10. THE BALANCER CAP (switchyard PRD #397, crit:ab69e4cb6de0).
+#
+#     The balancer publishes a per-lane concurrency target; this sweep must
+#     honour it as a CEILING on the reviewer lane, and must fall back to
+#     today's behaviour byte-for-byte when there is no target to honour.
+#
+#     Every case below is the same scenario — three open PRs, one live
+#     reviewer, an agent ceiling of 4 — so the spawn count is the whole
+#     verdict. Today's behaviour spawns TWO: demand is 2 beyond the reviewer
+#     that just took a PR, and the ceiling (4) minus the live pool (1) leaves
+#     room for both. A honoured target of 2 leaves room for ONE.
+#
+#     The fall-back cases are deliberately paired with the positive one. On
+#     their own they pass VACUOUSLY — a sweep that ignores the file entirely
+#     satisfies every one of them — so they are only worth their runtime
+#     beside a case that proves the file is read at all.
+# ---------------------------------------------------------------------------
+
+# balancer_scenario CITY — the shared shape described above.
+balancer_scenario() {
+	set_pool_max "$1" 4
+	open_pr "$1" 1 aaa111
+	open_pr "$1" 2 bbb222
+	open_pr "$1" 3 ccc333
+}
+
+now="$(date +%s)"
+
+# 10a. A present, fresh, well-formed target CAPS the ceiling. The load-bearing
+#      case: without it every fall-back below is satisfied by doing nothing.
+c="$(new_city)"
+balancer_scenario "$c"
+balancer_targets "$c" "version 1
+generated_at $now
+target rigA reviewer 2"
+run_sweep "$c"
+s="$(spawns "$c")"
+if [ "$s" = 1 ]; then
+	report ok "a fresh well-formed target caps the reviewer spawn ceiling"
+else
+	report FAIL "a fresh well-formed target caps the reviewer spawn ceiling" \
+		"spawns=$s (want 1, today's uncapped behaviour is 2)"
+fi
+rm -rf "$c"
+
+# 10b. NO FILE — the control for every case above and below, and the state of
+#      any city that never opted the balancer in.
+c="$(new_city)"
+balancer_scenario "$c"
+run_sweep "$c"
+s="$(spawns "$c")"
+if [ "$s" = 2 ]; then
+	report ok "an absent targets file leaves the reviewer ceiling at today's value"
+else
+	report FAIL "an absent targets file leaves the reviewer ceiling at today's value" \
+		"spawns=$s (want 2)"
+fi
+rm -rf "$c"
+
+# 10c. A STALE FILE STEERS NOTHING. The balancer leaves its file behind when it
+#      is switched off — retiring one is this consumer's job — so a balancer
+#      that died an hour ago must stop capping rather than pin the lane at its
+#      last target forever.
+c="$(new_city)"
+balancer_scenario "$c"
+balancer_targets "$c" "version 1
+generated_at $((now - 100000))
+target rigA reviewer 2"
+run_sweep "$c"
+s="$(spawns "$c")"
+if [ "$s" = 2 ]; then
+	report ok "a stale targets file leaves the reviewer ceiling at today's value"
+else
+	report FAIL "a stale targets file leaves the reviewer ceiling at today's value" \
+		"spawns=$s (want 2)"
+fi
+rm -rf "$c"
+
+# 10d. A FAR-FUTURE STAMP IS NOT FRESH EITHER. The freshness window is
+#      symmetric: keyed only on an upper bound, a clock skewed far forward
+#      pins a long-dead file as permanently current and the check never
+#      expires at all.
+c="$(new_city)"
+balancer_scenario "$c"
+balancer_targets "$c" "version 1
+generated_at $((now + 100000))
+target rigA reviewer 2"
+run_sweep "$c"
+s="$(spawns "$c")"
+if [ "$s" = 2 ]; then
+	report ok "a far-future targets stamp leaves the reviewer ceiling at today's value"
+else
+	report FAIL "a far-future targets stamp leaves the reviewer ceiling at today's value" \
+		"spawns=$s (want 2)"
+fi
+rm -rf "$c"
+
+# 10e. MALFORMED IS ALL-OR-NOTHING. An unknown version, a missing stamp and a
+#      non-numeric target each reject the file; so does a file whose lines are
+#      individually fine except for one that is not. That last shape is the
+#      one worth the case: a parser that skipped the junk line would honour
+#      the good one beside it and cap the lane off a contract it has already
+#      failed to verify.
+for body in \
+	"version 2
+generated_at $now
+target rigA reviewer 2" \
+	"version 1
+target rigA reviewer 2" \
+	"version 1
+generated_at $now
+target rigA reviewer two" \
+	"version 1
+generated_at $now
+target rigA reviewer 2
+nonsense"; do
+	malformed=$((${malformed:-0} + 1))
+	c="$(new_city)"
+	balancer_scenario "$c"
+	balancer_targets "$c" "$body"
+	run_sweep "$c"
+	s="$(spawns "$c")"
+	if [ "$s" = 2 ]; then
+		report ok "malformed targets file #$malformed leaves the reviewer ceiling at today's value"
+	else
+		report FAIL "malformed targets file #$malformed leaves the reviewer ceiling at today's value" \
+			"spawns=$s (want 2)"
+	fi
+	rm -rf "$c"
+done
+
+# 10f. ANOTHER LANE'S TARGET IS NOT THIS LANE'S. A brakeman target and another
+#      rig's reviewer target are both well-formed and fresh; neither says
+#      anything about rigA's reviewers, and a lookup matching on too little
+#      would let the balancer throttle a lane it never measured.
+c="$(new_city)"
+balancer_scenario "$c"
+balancer_targets "$c" "version 1
+generated_at $now
+target rigA brakeman 1
+target rigB reviewer 1"
+run_sweep "$c"
+s="$(spawns "$c")"
+if [ "$s" = 2 ]; then
+	report ok "a target for another lane or rig leaves the reviewer ceiling at today's value"
+else
+	report FAIL "a target for another lane or rig leaves the reviewer ceiling at today's value" \
+		"spawns=$s (want 2)"
+fi
+rm -rf "$c"
+
+# 10g. A TARGET ABOVE THE CEILING NEVER RAISES IT. city.toml stays the
+#      operator's hard bound: the balancer turns the dial within it. Run
+#      against the fixture's own ceiling of 2 (one live reviewer, so one
+#      slot), where a max() in place of the min() would spawn both.
+c="$(new_city)"
+open_pr "$c" 1 aaa111
+open_pr "$c" 2 bbb222
+open_pr "$c" 3 ccc333
+balancer_targets "$c" "version 1
+generated_at $now
+target rigA reviewer 9"
+run_sweep "$c"
+s="$(spawns "$c")"
+if [ "$s" = 1 ]; then
+	report ok "a target above the agent ceiling does not raise the reviewer ceiling"
+else
+	report FAIL "a target above the agent ceiling does not raise the reviewer ceiling" \
+		"spawns=$s (want 1)"
 fi
 rm -rf "$c"
 

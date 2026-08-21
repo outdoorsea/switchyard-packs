@@ -2,20 +2,21 @@
 # validate-sweep: the pack-native CONTRACT validator lane.
 #
 # WHY THIS EXISTS. COMPANION.md carried two COMPANION-REQUIRED rows — the
-# contract re-run against merged main (`switchyard-companion validate`) and the
-# SSE event bridge (`watch`). On a city that runs no companion (companion is for
-# non-city users; a city's lanes come from the pack), those rows meant a fully
-# contract-bearing PRD was reachable by NO validator at all: the judge agent
-# deliberately takes only criteria declaring no command, and nothing else may
-# self-validate (separation of duties). This order closes the validate row;
-# event-pump closes the watch row.
+# contract re-run against the merged integration branch (`switchyard-companion
+# validate`) and the SSE event bridge (`watch`). On a city that runs no
+# companion (companion is for non-city users; a city's lanes come from the
+# pack), those rows meant a fully contract-bearing PRD was reachable by NO
+# validator at all: the judge agent deliberately takes only criteria declaring
+# no command, and nothing else may self-validate (separation of duties). This
+# order closes the validate row; event-pump closes the watch row.
 #
 # THE VERDICT IS THE EXIT CODE, NOTHING ELSE. This lane never reasons about the
 # work: claim a delivered contract-bearing criterion (lane=contract — the server
 # partitions the lanes, so a judgment criterion can never be handed to us), run
-# its declared `verify_command` against merged main, post `done` on exit 0 and
-# `fail` otherwise, with the run recorded verbatim in the verdict's
-# `verification` block. Judgment stays in the judge agent's session.
+# its declared `verify_command` against the branch the project SAYS its work
+# lands on (see vs_validate_branch), post `done` on exit 0 and `fail`
+# otherwise, with the run recorded verbatim in the verdict's `verification`
+# block. Judgment stays in the judge agent's session.
 #
 # A FAIL RELEASES, NEVER COMPLETES. `validations/action done` is for a `done`
 # verdict only: a fail resets the criterion to `outstanding` for re-work, and
@@ -59,9 +60,12 @@ VALIDATE_RIGS="${VALIDATE_RIGS:-}"
 # checkout from on first run. A rig with no entry and no existing checkout is
 # skipped WITH MAIL: silently skipping would read as a drained backlog.
 VALIDATE_REPOS="${VALIDATE_REPOS:-}"
-# `<rig>=<branch>` pairs — the branch contracts are validated against, when the
-# code lands somewhere other than origin's default branch (an integration
-# branch policy). Unset = origin's default branch.
+# `<rig>=<branch>` pairs — an operator OVERRIDE of the branch contracts are
+# validated against. Rarely needed: the branch is normally read from the
+# project's own Switchyard branch policy (vs_validate_branch), which is where
+# an integration-branch policy is already declared and maintained. Set this
+# only to validate somewhere the project does not declare — a fork, a
+# migration branch, a rig whose policy is not yet recorded.
 VALIDATE_BRANCHES="${VALIDATE_BRANCHES:-}"
 # Per-cycle drain bound and per-command wall clock. The lease must outlive the
 # command by enough to post the verdict; 1800s lease vs 900s command leaves the
@@ -122,6 +126,51 @@ vs_branch() {
   printf ''
 }
 
+# vs_policy_branch PROJECT — the integration branch Switchyard stores for
+# PROJECT, or empty when it declares none.
+#
+# The server already knows this. A project's branch policy is set in its
+# settings and is served on the briefing, the claim response and the context
+# pack, precisely so a worker is told what to base on rather than guessing —
+# and this lane was the one reader still guessing. Reading it here means an
+# operator who records the policy once, where it belongs, does not also have
+# to restate it in roster.conf for the validator to agree with the workers.
+#
+# Absent rather than empty when unset: the API omits branch_policy entirely
+# for a project that declared nothing, so `// empty` cannot be talked into
+# returning "" as though a branch had been named.
+#
+# $token is the cycle's API token, as every other read in this file takes it.
+vs_policy_branch() {
+  sy_api_get "/api/v1/projects/$1/briefing" "$token" 2>/dev/null |
+    jq -r '.branch_policy.integration_branch // empty' 2>/dev/null
+}
+
+# vs_validate_branch RIG PROJECT — the branch this rig's contracts are run
+# against, in precedence order: the operator's explicit VALIDATE_BRANCHES
+# override, then the project's declared integration branch, then origin's
+# default branch, then main.
+#
+# Origin's default is LAST among the derived answers for a reason. It is the
+# only one that is a guess: on a project whose work lands on an integration
+# branch, main is a release marker rather than the code under test, and a
+# criterion's tests usually do not exist there yet. `go test -run <pattern>`
+# then exits 0 printing "no tests to run", which this lane correctly banks as
+# a contract FAILURE — so guessing main flips DELIVERED criteria back to
+# outstanding and reports that their contracts no longer exist, about tests
+# that are merged and passing one branch over. That is the expensive
+# direction: it reads as a regression and invites a worker to rebuild work
+# that already landed.
+#
+# $repo is the rig's checkout, which the caller has already cloned.
+vs_validate_branch() {
+  _b="$(vs_branch "$1")"
+  [ -n "$_b" ] || _b="$(vs_policy_branch "$2")"
+  [ -n "$_b" ] || _b="$(git -C "$repo" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##')"
+  [ -n "$_b" ] || _b=main
+  printf '%s' "$_b"
+}
+
 # vs_release PRD CRIT WHO — return a held stake to the queue. Best-effort by
 # design: the server's lease reclaim self-heals a lost release.
 vs_release() {
@@ -154,7 +203,7 @@ for rig in $VALIDATE_RIGS; do
   # separation of duties from starving the lane.
   validator="$rig/$SY_NS.validator"
 
-  # --- Guard 1: the lane's own checkout, hard-reset to merged main -----------
+  # --- Guard 1: the lane's own checkout, hard-reset to the merged branch -----
   repo="$state/validate-repo.$rig"
   if [ ! -d "$repo/.git" ]; then
     url="$(vs_repo_url "$rig")"
@@ -171,15 +220,11 @@ for rig in $VALIDATE_RIGS; do
       continue
     }
   fi
-  default_branch="$(vs_branch "$rig")"
-  if [ -z "$default_branch" ]; then
-    default_branch="$(git -C "$repo" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##')"
-  fi
-  [ -n "$default_branch" ] || default_branch=main
-  if ! git -C "$repo" fetch --quiet origin "$default_branch" >/dev/null 2>&1 ||
-     ! git -C "$repo" reset --hard --quiet "origin/$default_branch" >/dev/null 2>&1; then
+  validate_branch="$(vs_validate_branch "$rig" "$project")"
+  if ! git -C "$repo" fetch --quiet origin "$validate_branch" >/dev/null 2>&1 ||
+     ! git -C "$repo" reset --hard --quiet "origin/$validate_branch" >/dev/null 2>&1; then
     vs_mail_once "fresh-$rig" \
-      "validate-sweep: cannot refresh $rig checkout to merged $default_branch" \
+      "validate-sweep: cannot refresh $rig checkout to merged $validate_branch" \
       "fetch/reset in $repo failed. Validating against a stale tree banks verdicts about the wrong code, so the lane refused to run for $project this cycle."
     continue
   fi
@@ -356,7 +401,7 @@ for rig in $VALIDATE_RIGS; do
         outcome="failed (exit $code)"
       fi
     fi
-    rationale="Automated validation (switchyard-ops validate-sweep). Re-ran the criterion's declared contract against merged $default_branch: \`$cmd\` — $outcome. The verdict is derived from the exit code alone; no judgment was applied."
+    rationale="Automated validation (switchyard-ops validate-sweep). Re-ran the criterion's declared contract against merged $validate_branch: \`$cmd\` — $outcome. The verdict is derived from the exit code alone; no judgment was applied."
 
     body="$(jq -nc \
       --arg c "$crit" --arg v "$verdict" --arg e "$evidence" --arg r "$validator" \

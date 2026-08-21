@@ -383,6 +383,15 @@ diff is the one that would merge." </dev/null >/dev/null 2>&1; then
       | select((.qualified_name // .name // "") == $q)
       | (.pool.max // .max_active_sessions // 2)' 2>/dev/null | head -n1)"
     case "${pool_max:-}" in '' | *[!0-9]*) pool_max=2 ;; esac
+    # Lower the ceiling to the balancer's reviewer target when it has
+    # published a fresh, well-formed one (switchyard PRD #397). The cap lands
+    # on pool_max rather than on the slot count below, so the target governs
+    # TOTAL reviewer concurrency — live sessions included — instead of how
+    # many may be added on top of a pool that already exceeds it. With no
+    # target to honour this returns pool_max unchanged, which is the whole
+    # fall-back: an unopted city, or one whose balancer stopped writing,
+    # spawns exactly as it does today.
+    pool_max="$(sy_balancer_capped "$rig" reviewer "$pool_max")"
     cap=$((pool_max - n_live))
     [ "$unassigned" -lt "$cap" ] && cap="$unassigned"
     i=0

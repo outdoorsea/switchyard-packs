@@ -194,9 +194,9 @@ POOL_LIVE_STATES="active start-pending start_pending creating draining"
 # made `switchyard` and `switchyard-forge` fail the census every cycle for five
 # hours while the escalation mail blamed "unreadable or timed out".
 POOL_KNOWN_SESSION_STATES="$POOL_LIVE_STATES suspended closed asleep"
-POOL_GC_READ_TIMEOUT="${POOL_GC_READ_TIMEOUT:-30}"
+POOL_GC_READ_TIMEOUT="${POOL_GC_READ_TIMEOUT:-15}"
 POOL_GC_WRITE_TIMEOUT="${POOL_GC_WRITE_TIMEOUT:-30}"
-POOL_SESSION_LOOKUP_TIMEOUT="${POOL_SESSION_LOOKUP_TIMEOUT:-15}"
+POOL_SESSION_LOOKUP_TIMEOUT="${POOL_SESSION_LOOKUP_TIMEOUT:-10}"
 # The once-per-cycle capacity census, deliberately NOT sharing the budget above.
 # POOL_SESSION_LOOKUP_TIMEOUT bounds a lookup paid up to POOL_SPAWN_RECONCILE_
 # ATTEMPTS (7) times per spawn, so it has to stay small; this one is paid ONCE
@@ -206,10 +206,21 @@ POOL_SESSION_LOOKUP_TIMEOUT="${POOL_SESSION_LOOKUP_TIMEOUT:-15}"
 # rows -- the cost is gc's session enumeration, not the payload, so no filter
 # fixes it. At the 15s lookup budget that census could never once succeed, and
 # every rig fell to "capacity is UNKNOWN. No brakeman was spawned."
-POOL_SESSION_CENSUS_TIMEOUT="${POOL_SESSION_CENSUS_TIMEOUT:-60}"
-POOL_SPAWN_TIMEOUT="${POOL_SPAWN_TIMEOUT:-90}"
-POOL_SPAWN_RECONCILE_ATTEMPTS="${POOL_SPAWN_RECONCILE_ATTEMPTS:-7}"
-POOL_SPAWN_RECONCILE_DELAY="${POOL_SPAWN_RECONCILE_DELAY:-20}"
+# ...but 60 could never actually be spent: the order runner's exec deadline is
+# ~60s (measured on a live city 2026-08-20 — every cycle that spawned died at
+# `context deadline exceeded` while empty cycles completed), so a census that
+# used its full old budget consumed the whole cycle and the runner killed the
+# script before any later stage OR the escalation mail ran. 35 keeps the
+# under-load outcome (census times out -> capacity UNKNOWN -> spawn withheld,
+# retried in 1m) while leaving the rest of the cycle alive to SAY so — the
+# load-55 census measured 38.6s, so under that load this reads UNKNOWN, which
+# is the honest degradation the old value only pretended to avoid.
+POOL_SESSION_CENSUS_TIMEOUT="${POOL_SESSION_CENSUS_TIMEOUT:-35}"
+# Spawn identity wait: cold starts measure ~13s on a live city; 90 was sized
+# for a deadline the runner does not grant (see POOL_SPAWN_BUDGET_SECONDS).
+POOL_SPAWN_TIMEOUT="${POOL_SPAWN_TIMEOUT:-20}"
+POOL_SPAWN_RECONCILE_ATTEMPTS="${POOL_SPAWN_RECONCILE_ATTEMPTS:-2}"
+POOL_SPAWN_RECONCILE_DELAY="${POOL_SPAWN_RECONCILE_DELAY:-5}"
 POOL_SPAWN_CYCLE_TIMEOUT="${POOL_SPAWN_CYCLE_TIMEOUT:-300}"
 # PER-CYCLE WALL-CLOCK BUDGET (switchyard PRD #185 / sw-jqrx guard).
 #
@@ -217,12 +228,20 @@ POOL_SPAWN_CYCLE_TIMEOUT="${POOL_SPAWN_CYCLE_TIMEOUT:-300}"
 # against a large ledger can exceed the order runner's own exec deadline before
 # the script's 300s POOL_SPAWN_CYCLE_TIMEOUT ever fires. The result is a silent
 # `context deadline exceeded` with no record of which rigs were examined. This
-# budget is the sweep's own, deliberately set inside any plausible order-exec
-# deadline, so a cycle that cannot finish SAYS SO (below) instead of being killed
-# mid-rig. It is checked before each rig's demand read, so a slow read consumes
-# at most its own timeout and the remaining rigs are reported as unexamined.
-# 0 disables the cap for hand-run debugging.
-POOL_SPAWN_BUDGET_SECONDS="${POOL_SPAWN_BUDGET_SECONDS:-180}"
+# budget is the sweep's own, deliberately set inside the order-exec deadline —
+# which is REAL and SMALL: ~60 seconds, measured on a live city (2026-08-20;
+# fired->failed deltas, and the kill always landed right after the demand
+# header). The old default of 180 was three times that, so this guard never
+# fired before the runner's kill and the "SAYS SO" promise below was
+# unreachable: every cycle that spawned died silently mid-flight (97/day on
+# the measuring city) while the spawn itself survived controller-side and
+# assignment, census bookkeeping and escalation were simply skipped.
+#
+# 40 fits: it is checked before each rig's demand read AND before each spawn
+# (sy_pool_budget_allows, sized to the full spawn+reconcile worst case), so a
+# cycle that cannot finish reports skipped rigs and deferred spawns instead
+# of being killed mid-rig. 0 disables the cap for hand-run debugging.
+POOL_SPAWN_BUDGET_SECONDS="${POOL_SPAWN_BUDGET_SECONDS:-40}"
 # Optional cap on how many claimable bead ids the local-`bd` demand read
 # enumerates per rig. Dispatch only needs one bead to assign, and a large ledger
 # can make the full jq filter plus `gc bd list --all` payload exceed the cycle
@@ -249,9 +268,27 @@ sy_pool_bounded_uint "$POOL_SPAWN_CYCLE_TIMEOUT" 1 600 || exit 0
 # cycle timeout.
 _reconcile_budget=$((POOL_SPAWN_TIMEOUT + (POOL_SPAWN_RECONCILE_ATTEMPTS - 1) * POOL_SPAWN_RECONCILE_DELAY))
 [ "$_reconcile_budget" -le "$POOL_SPAWN_CYCLE_TIMEOUT" ] || exit 0
-
 sy_pool_bounded_uint "$POOL_SPAWN_BUDGET_SECONDS" 0 3600 || exit 0
 sy_pool_bounded_uint "$POOL_DEMAND_BOUND" 0 10000 || exit 0
+# The per-cycle budget must be able to afford its own stages, or the guard
+# degenerates: a census it cannot fit runs anyway at cycle start (the first
+# spend has full budget by definition), and a spawn it can never fit defers
+# forever while reading as load. Both shapes are config faults, and a config
+# fault must FAIL the cycle, not slip out as a quiet success: this runs under
+# the order runner, where exit 0 with no dispatch reads as a healthy idle
+# cycle, so a silent exit here would park dispatch forever with nothing to
+# escalate. (The bounded_uint exits above predate this rule and keep their
+# convention; these two are the checks a live retune actually trips.)
+if [ "$POOL_SPAWN_BUDGET_SECONDS" -gt 0 ]; then
+  if [ "$POOL_SESSION_CENSUS_TIMEOUT" -gt "$POOL_SPAWN_BUDGET_SECONDS" ]; then
+    echo "pool-spawn: config fault: POOL_SESSION_CENSUS_TIMEOUT (${POOL_SESSION_CENSUS_TIMEOUT}s) exceeds POOL_SPAWN_BUDGET_SECONDS (${POOL_SPAWN_BUDGET_SECONDS}s) — the census could never fit the cycle budget; refusing to dispatch" >&2
+    exit 1
+  fi
+  if [ "$_reconcile_budget" -gt "$POOL_SPAWN_BUDGET_SECONDS" ]; then
+    echo "pool-spawn: config fault: spawn+reconcile worst case (${_reconcile_budget}s) exceeds POOL_SPAWN_BUDGET_SECONDS (${POOL_SPAWN_BUDGET_SECONDS}s) — no spawn could ever fit the cycle budget; refusing to dispatch" >&2
+    exit 1
+  fi
+fi
 
 # sy_pool_now — current Unix time, or 0 if the clock is unreadable.
 # Fails toward "keep going" on an unreadable clock.
@@ -268,6 +305,21 @@ sy_pool_over_budget() {
   _spob_now="$(sy_pool_now)"
   [ "$_spob_now" -gt 0 ] || return 1
   [ "$(( _spob_now - POOL_CYCLE_STARTED ))" -ge "$POOL_SPAWN_BUDGET_SECONDS" ]
+}
+
+# sy_pool_budget_allows SECONDS — can this cycle still afford a stage that may
+# take SECONDS? The over-budget check above catches exhaustion at rig-loop
+# entry; this one keeps a stage from STARTING work it cannot finish — a spawn
+# begun at second 35 of a 40s budget dies at the runner's deadline with its
+# reconciliation and every later stage unrun, which is exactly the silent kill
+# this budget exists to replace. Fails toward "allowed" on a disabled cap or an
+# unreadable clock, matching sy_pool_over_budget's contract.
+sy_pool_budget_allows() {
+  [ "$POOL_SPAWN_BUDGET_SECONDS" -gt 0 ] || return 0
+  [ "$POOL_CYCLE_STARTED" -gt 0 ] || return 0
+  _spba_now="$(sy_pool_now)"
+  [ "$_spba_now" -gt 0 ] || return 0
+  [ "$(( _spba_now - POOL_CYCLE_STARTED + $1 ))" -le "$POOL_SPAWN_BUDGET_SECONDS" ]
 }
 
 # sy_pool_nonsuspended_rigs — the name of every rig gc is not suspending AND that
@@ -1105,6 +1157,7 @@ assigned_stalled=""   # prior rows whose alert has not yet been confirmed delive
 bd_rigs_seen=""   # did the local-`bd` path run for ANY rig this cycle?
 spawn_seq=0        # monotonic suffix for every spawn alias in this locked cycle
 uncovered=""       # rigs skipped because the per-cycle budget was exhausted
+deferred_spawns="" # rigs whose spawn was deferred: budget could not fit one
 rigs="$(sy_pool_nonsuspended_rigs)"; rigs_rc=$?
 if [ "$rigs_rc" -ne 0 ]; then
   escalations="$escalations
@@ -1173,7 +1226,17 @@ $_preserved"
       continue
     fi
 
-    if [ "$max" -gt "$live" ]; then
+    if [ "$max" -gt "$live" ] && ! sy_pool_budget_allows "$_reconcile_budget"; then
+      # A spawn the budget cannot fit is DEFERRED, never started: begun now it
+      # would be killed mid-reconcile at the runner's deadline, taking the rest
+      # of the cycle (and this report) with it. Demand is untouched; the next
+      # 1-minute cycle retries with a fresh budget. Named in the summary
+      # escalation below — recurring deferrals mean earlier stages eat the
+      # budget, which is a tuning fact the mayor should see once, not per rig.
+      deferred_spawns="$deferred_spawns $rig"
+      action="spawn DEFERRED (cycle budget cannot fit a spawn; retried next cycle)"
+      slot="free ($live/$max)"
+    elif [ "$max" -gt "$live" ]; then
       spawn_seq=$((spawn_seq + 1))
       sess="$(sy_pool_spawn_brakeman "$rig" "$spawn_seq")"; _spawn_rc=$?
       if [ -z "$sess" ] && [ "$_spawn_rc" -eq 3 ]; then
@@ -1298,6 +1361,12 @@ $rig $pb"
     # $assigned_now so the NEXT cycle can catch one that silently did not take.
     if sy_pool_holder_is_live "$rig" "$target" ""; then
       action="none ($target already held by a live worker — no spawn)"
+    elif ! sy_pool_budget_allows "$_reconcile_budget"; then
+      # Same deferral as the cloud path: a spawn the budget cannot fit would be
+      # killed mid-reconcile at the runner's deadline. Demand and cursor state
+      # are untouched; next cycle retries.
+      deferred_spawns="$deferred_spawns $rig"
+      action="spawn DEFERRED (cycle budget cannot fit a spawn; retried next cycle)"
     else
       spawn_seq=$((spawn_seq + 1))
       sess="$(sy_pool_spawn_brakeman "$rig" "$spawn_seq")"; _spawn_rc=$?
@@ -1374,6 +1443,10 @@ if [ -n "$uncovered" ]; then
 - city: cycle budget exhausted, the following rigs were NOT examined this cycle:$uncovered"
   escalations="$escalations
 - city: pool-spawn hit its ${POOL_SPAWN_BUDGET_SECONDS}s per-cycle budget and stopped before examining these rigs:$uncovered. No brakeman was spawned for them. This bound is the order's own, deliberately inside gc's order-exec deadline, so this notice replaces the silent \`order exec pool-spawn failed: context deadline exceeded\` that hid this condition. Raise POOL_SPAWN_BUDGET_SECONDS, reduce the per-rig demand read cost (e.g. POOL_DEMAND_BOUND), or investigate why \`gc bd list --all --json\` for this rig is slow."
+fi
+if [ -n "$deferred_spawns" ]; then
+  escalations="$escalations
+- city: pool-spawn DEFERRED spawning for:$deferred_spawns — the ${POOL_SPAWN_BUDGET_SECONDS}s per-cycle budget could not fit a spawn's ${_reconcile_budget}s worst case by the time those rigs were reached. Each is retried next cycle with demand intact; a deferral that RECURS across cycles means the cycle's earlier stages are eating the whole budget (slow census or demand reads), which is what to investigate."
 fi
 
 # What this order detected AND did is observed through its own log (gc captures

@@ -36,6 +36,17 @@ REVIEW_LANE_MARKER="${REVIEW_LANE_MARKER:-Verdict: APPROVE}"
 # cycle, burying the PR thread in identical rejections.
 REVIEW_LANE_REJECT_MARKER="${REVIEW_LANE_REJECT_MARKER:-Verdict: REQUEST CHANGES}"
 REVIEW_ASSIGNMENT_TTL="${REVIEW_ASSIGNMENT_TTL:-5400}"
+# This lane is the FALLBACK reviewer, and a fallback that outdraws the primary
+# is just a second reviewer: with the repo's standing reviewer (CodeRabbit)
+# healthy, dispatching on the first cycle after a push would double-review
+# every PR. So a head younger than the grace window is left for the primary —
+# UNLESS the primary has already said it cannot review (its rate-limit banner
+# on this head), in which case waiting serves nobody and the grace is skipped.
+# 0 disables the wait entirely.
+REVIEW_LANE_GRACE_SECONDS="${REVIEW_LANE_GRACE_SECONDS:-1200}"
+# The literal that identifies the primary reviewer's own "cannot review"
+# notice. CodeRabbit's Fair Usage banner carries this heading verbatim.
+REVIEW_LANE_PRIMARY_LIMIT_MARKER="${REVIEW_LANE_PRIMARY_LIMIT_MARKER:-Review limit reached}"
 
 # Off by default: posting verdicts under the repo's review bar is authority an
 # operator grants per rig, deliberately, in roster.conf — merge-lane's exact
@@ -180,6 +191,21 @@ for rig in $REVIEW_LANE_RIGS; do
     if [ "${reviewed:-0}" != "0" ]; then
       : > "$mkey.settled" 2>/dev/null || true
       continue
+    fi
+
+    # Grace window: a young head belongs to the primary reviewer first. The
+    # age is judged from the head's last authored commit (already in hand),
+    # in jq because POSIX sh has no portable ISO-8601 parser. The primary's
+    # own rate-limit banner on this head waives the wait — it has told us it
+    # is not coming. No marker is written either way: a waived or expired
+    # grace simply falls through to dispatch on this or a later cycle.
+    if [ "${REVIEW_LANE_GRACE_SECONDS:-0}" -gt 0 ]; then
+      in_grace=$(jq -r --arg t "$last_commit" --arg lim "$REVIEW_LANE_PRIMARY_LIMIT_MARKER"         --argjson g "$REVIEW_LANE_GRACE_SECONDS" '
+        if ($t | length) == 0 then 0
+        elif ([.comments[]? | select(.body | contains($lim)) | select(.createdAt > $t)] | length) > 0 then 0
+        elif (now - ($t | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601)) < $g then 1
+        else 0 end' "$TMP/meta.json" 2>/dev/null)
+      [ "${in_grace:-0}" = "1" ] && continue
     fi
 
     # Red CI: the author's problem, not a reviewer's. Pending is fine — review

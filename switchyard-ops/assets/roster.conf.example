@@ -450,12 +450,23 @@
 #   suppresses re-dispatch of the same PR head. Default 5400 (one review-sweep
 #   interval plus slack for a long review).
 #
+# REVIEW_LANE_GRACE_SECONDS — how long a fresh head is left to the repo's
+#   PRIMARY reviewer (CodeRabbit) before this fallback dispatches. Waived the
+#   moment the primary posts its rate-limit banner on that head. 0 = dispatch
+#   immediately (no primary reviewer configured). Default 1200.
+#
+# REVIEW_LANE_PRIMARY_LIMIT_MARKER — the literal in the primary reviewer's
+#   own cannot-review notice that waives the grace. Default
+#   "Review limit reached" (CodeRabbit's Fair Usage banner heading).
+#
 # REVIEW_LANE_RIGS=""
 # REVIEW_LANE_BASE="staging"
 # REVIEW_LANE_HOLD_LABEL="do-not-merge"
 # REVIEW_LANE_MARKER="Verdict: APPROVE"
 # REVIEW_LANE_REJECT_MARKER="Verdict: REQUEST CHANGES"
 # REVIEW_ASSIGNMENT_TTL="5400"
+# REVIEW_LANE_GRACE_SECONDS="1200"
+# REVIEW_LANE_PRIMARY_LIMIT_MARKER="Review limit reached"
 
 # ---------------------------------------------------------------------------
 # Rework lane (agents/rework, routed by orders/repair-sweep.toml) — a

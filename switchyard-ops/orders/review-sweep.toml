@@ -17,7 +17,13 @@
 # PR — a reviewer that picked its own work would race its sibling onto the
 # newest diff. Assignment markers (state dir, keyed slug#num@head-sha) also
 # stop the SWEEP dispatching the same PR twice while a review is in flight;
-# a new head is a new key, so a re-push is re-reviewed by construction.
+# a new head is a new key, so a re-push is re-reviewed by construction. A
+# marker settles — and its reviewer reads FREE — the moment its PR's current
+# head carries a verdict; a marker whose PR LEAVES the open list (merged,
+# closed, retargeted) is deleted outright, because departure is reversible
+# and only a verdict may suppress a head durably. The TTL is only the
+# recovery window for a nudge that produced neither, so a merged PR never
+# idles its reviewer for the rest of the window.
 #
 # WHAT QUALIFIES for dispatch: open, not draft, against the lane's base, no
 # hold label, no APPROVED reviewDecision, no standing CHANGES_REQUESTED (that

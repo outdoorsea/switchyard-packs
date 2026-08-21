@@ -36,6 +36,14 @@ REVIEW_LANE_MARKER="${REVIEW_LANE_MARKER:-Verdict: APPROVE}"
 # cycle, burying the PR thread in identical rejections.
 REVIEW_LANE_REJECT_MARKER="${REVIEW_LANE_REJECT_MARKER:-Verdict: REQUEST CHANGES}"
 REVIEW_ASSIGNMENT_TTL="${REVIEW_ASSIGNMENT_TTL:-5400}"
+# One page of open PRs, newest-first. The size is load-bearing for the
+# departed-marker cleanup below: absence from the page is read as departure,
+# so a page that OVERFLOWS the limit — a truncated view of a longer queue —
+# must clear nothing. Operator-settable, so validated like every other
+# numeric knob here: a malformed value would fail the gh call itself and
+# read as an empty queue — the lane down with nothing accounted.
+REVIEW_LANE_LIST_LIMIT="${REVIEW_LANE_LIST_LIMIT:-100}"
+case "$REVIEW_LANE_LIST_LIMIT" in '' | *[!0-9]* | 0*) REVIEW_LANE_LIST_LIMIT=100 ;; esac
 # This lane is the FALLBACK reviewer, and a fallback that outdraws the primary
 # is just a second reviewer: with the repo's standing reviewer (CodeRabbit)
 # healthy, dispatching on the first cycle after a push would double-review
@@ -139,9 +147,71 @@ for rig in $REVIEW_LANE_RIGS; do
     *)   continue ;;
   esac
 
-  gh pr list --repo "$slug" --state open --base "$REVIEW_LANE_BASE" --limit 100 \
+  # Fetch ONE more than the limit: a count past the limit then proves the
+  # page is a truncated view of a longer queue, while a complete queue of
+  # exactly the limit still counts at most the limit and cleans up normally.
+  gh pr list --repo "$slug" --state open --base "$REVIEW_LANE_BASE" \
+    --limit "$((REVIEW_LANE_LIST_LIMIT + 1))" \
     --json number,isDraft,labels,createdAt,headRefOid,reviewDecision \
     > "$TMP/queue.json" 2>/dev/null || : > "$TMP/queue.json"
+
+  # CLEAR DEPARTED PRs' MARKERS BEFORE ANYTHING READS THEM. The verdict settle
+  # below iterates only PRs still in the open queue, so a PR approved and then
+  # MERGED between sweeps kept its marker live and its reviewer reading busy
+  # for the full REVIEW_ASSIGNMENT_TTL while idle — dispatch moved in waves
+  # exactly one TTL apart with qualified PRs waiting hours (observed
+  # 2026-08-21). A marker names its PR in field 3; one whose PR is absent
+  # from a trustworthy open list is done HERE — so the marker is DELETED,
+  # never `.settled`: departure is reversible (a mistaken close can be
+  # reopened, a retargeted base restored — same head, same key), and a
+  # durable settle for a returning head would suppress its dispatch for the
+  # 7-day GC window with no alarm, where deletion just lets the PR re-enter
+  # every gate. The cost of deletion is a possible SECOND review when a
+  # departure flaps mid-review (retargeted away and back inside one
+  # assignment) — accepted deliberately: a duplicate review is loud and
+  # cheap, a suppressed one is silent and unbounded. repair-sweep's
+  # rm-on-settle states the same rationale. Only a VERDICT may settle
+  # durably, because only a verdict cannot un-happen.
+  # Two guards decide "trustworthy":
+  #   - parse-or-nothing: a failed `gh pr list` leaves an EMPTY file, and jq
+  #     accepts empty input as zero documents at rc=0, so the count check
+  #     also rejects emptiness — a fetch blip must never read as "no PRs are
+  #     open" and free every busy reviewer at once. A genuinely empty list
+  #     is `[]`: parses, counts 0, clears everything — correctly.
+  #   - a count past the limit means the page is a truncated view of a
+  #     longer queue (newest-first fetch, oldest-first dispatch — the PRs
+  #     beyond the page are exactly the ones old enough to hold
+  #     assignments): absence from it proves nothing, so cleanup is
+  #     suspended AND the mayor is mailed once, because a queue that STAYS
+  #     past the limit would otherwise reinstate the one-TTL waves silently,
+  #     forever, on the busiest repos.
+  # (Markers from before field 3 existed are skipped and age out on the TTL,
+  # exactly as before.)
+  _open_count="$(jq 'if type == "array" then length else -1 end' "$TMP/queue.json" 2>/dev/null)"
+  case "${_open_count:-x}" in *[!0-9]*) _open_count="" ;; esac
+  _rs_slug_key="$(printf '%s' "$slug" | tr -c 'A-Za-z0-9' '-')"
+  if [ -n "$_open_count" ] && [ "$_open_count" -gt "$REVIEW_LANE_LIST_LIMIT" ]; then
+    rs_mail_once "list-truncated-$_rs_slug_key" \
+      "review-sweep: $slug has more open PRs than one page" \
+      "gh pr list returned more than REVIEW_LANE_LIST_LIMIT ($REVIEW_LANE_LIST_LIMIT) open PRs against $REVIEW_LANE_BASE for $slug, so departed-PR marker cleanup is suspended (absence from a truncated page proves nothing) and reviewer busy-ness recovers only on the assignment TTL. Raise REVIEW_LANE_LIST_LIMIT in roster.conf or drain the queue."
+  elif [ -n "$_open_count" ]; then
+    # Clear the standing-overflow alert only on a TRUSTWORTHY in-limit
+    # count; an unreadable fetch says nothing about the queue draining, and
+    # clearing on it would re-arm the once-mail across every fetch blip.
+    rm -f "$state/review-sweep.alert.list-truncated-$_rs_slug_key" 2>/dev/null
+  fi
+  if [ -n "$_open_count" ] && [ "$_open_count" -le "$REVIEW_LANE_LIST_LIMIT" ] \
+    && jq -r '.[].number' "$TMP/queue.json" > "$TMP/open-nums" 2>/dev/null; then
+    for _m in "$markers"/*; do
+      [ -f "$_m" ] || continue
+      case "$_m" in *.settled) continue ;; esac
+      [ -f "$_m.settled" ] && continue
+      _mpr="$(awk 'NR==1{print $3}' "$_m" 2>/dev/null)"
+      case "${_mpr:-}" in "$slug#"*) : ;; *) continue ;; esac
+      grep -qx "${_mpr##*#}" "$TMP/open-nums" && continue
+      rm -f "$_m" 2>/dev/null || true
+    done
+  fi
 
   # First cut from the list call alone: open, not draft, no hold label, and no
   # verdict already standing in reviewDecision. APPROVED needs no reviewer;
@@ -170,10 +240,6 @@ for rig in $REVIEW_LANE_RIGS; do
 
     mkey="$(mkey_for "$slug" "$num" "$head")"
     [ -f "$mkey.settled" ] && continue
-    # A live assignment suppresses re-dispatch; an expired one means the
-    # nudged session never delivered (died, drained, wedged) and the PR is
-    # dispatched again rather than stranded behind a marker.
-    marker_fresh "$mkey" "$REVIEW_ASSIGNMENT_TTL" && continue
 
     gh pr view "$num" --repo "$slug" --json comments,commits,statusCheckRollup \
       > "$TMP/meta.json" 2>/dev/null
@@ -181,6 +247,12 @@ for rig in $REVIEW_LANE_RIGS; do
 
     # A verdict after the head's last authored commit = reviewed. Same
     # merge-from-base exclusion as merge-lane, for the same starvation reason.
+    # This runs BEFORE the live-assignment skip on purpose: a verdict on an
+    # assigned head is that assignment DELIVERED, and checking freshness first
+    # meant the delivery was not noticed — and its reviewer not freed — until
+    # the TTL expired. The view call this spends per in-flight assignment per
+    # cycle is bounded by the reviewer pool, and buys the busy set its
+    # accuracy.
     last_commit=$(jq -r '
       [.commits[]
        | select(.messageHeadline | test("^Merge (branch|remote-tracking branch) ") | not)
@@ -192,6 +264,11 @@ for rig in $REVIEW_LANE_RIGS; do
       : > "$mkey.settled" 2>/dev/null || true
       continue
     fi
+
+    # A live assignment suppresses re-dispatch; an expired one means the
+    # nudged session never delivered (died, drained, wedged) and the PR is
+    # dispatched again rather than stranded behind a marker.
+    marker_fresh "$mkey" "$REVIEW_ASSIGNMENT_TTL" && continue
 
     # Grace window: a young head belongs to the primary reviewer first. The
     # age is judged from the head's last authored commit (already in hand),
@@ -226,7 +303,12 @@ for rig in $REVIEW_LANE_RIGS; do
   # its fresh-wake contract drop the first one on the floor while that PR's
   # marker still suppresses re-dispatch. Busy-ness is read from the markers
   # themselves (field 2 of a fresh marker is the target), the same ledger
-  # that gates the PR side.
+  # that gates the PR side — but only a marker whose PR is still open WITHOUT
+  # a verdict counts. A verdict-settled marker is finished work, and a
+  # departed PR's marker was deleted by the pre-pass above: counting either
+  # kept the reviewer idle-but-busy for the rest of the TTL after every
+  # review it completed. The TTL itself stays what it was — the recovery
+  # window for a nudge that never produced a verdict OR a departure.
   if ! sy_session_aliases_for "$rig/$SY_NS.reviewer" active > "$TMP/live-all"; then
     failed="$failed $rig(roster-unreadable)"
     continue
@@ -238,6 +320,7 @@ for rig in $REVIEW_LANE_RIGS; do
     for _m in "$markers"/*; do
       [ -f "$_m" ] || continue
       case "$_m" in *.settled) continue ;; esac
+      [ -f "$_m.settled" ] && continue
       if marker_fresh "$_m" "$REVIEW_ASSIGNMENT_TTL" &&
         [ "$(awk 'NR==1{print $2}' "$_m" 2>/dev/null)" = "$_alias" ]; then
         _busy=1
@@ -264,8 +347,13 @@ dispatch is exactly: $REVIEW_LANE_MARKER
 The reject literal is exactly: $REVIEW_LANE_REJECT_MARKER
 If the head has moved past $head, review the current head instead — the newer
 diff is the one that would merge." </dev/null >/dev/null 2>&1; then
+      # Marker line: routed-at epoch, target alias, slug#num. Field 3 exists
+      # because the FILENAME cannot answer "which PR is this marker about" —
+      # tr is lossy and one slug can be a prefix of another (acme/app,
+      # acme/app-packs), so the departed-PR cleanup pre-pass keys on this
+      # field, exactly, never on the name.
       mkey="$(mkey_for "$slug" "$num" "$head")"
-      if ! printf '%s %s\n' "$now" "$target" > "$mkey" 2>/dev/null; then
+      if ! printf '%s %s %s\n' "$now" "$target" "$slug#$num" > "$mkey" 2>/dev/null; then
         # The nudge went out but nothing suppresses a re-dispatch: the next
         # cycle puts a second reviewer on this PR. Report it — an unwritable
         # state dir is one incident, not a per-cycle nag, so via the once-path.

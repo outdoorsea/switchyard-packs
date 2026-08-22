@@ -95,7 +95,7 @@ without the line they look identical.
 **Attach the delivering PR to the owning PRD — and only once it has merged.** A
 merged, attached pull request is the only delivery signal switchyard reads: until
 one exists the criterion reads as unbuilt however much code landed. So pass the
-`pr` payload — `{ url, number, merged_at }`, carrying the forge's own merge
+`pr` payload — `{ url, number, merged_at }`, carrying the repo's own merge
 timestamp rather than one you stamped yourself — on `complete`:
 
 ```sh

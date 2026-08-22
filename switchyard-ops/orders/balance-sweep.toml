@@ -33,7 +33,7 @@
 # already running, and counts only APPROVED non-draft PRs, so a busy review
 # queue is never mistaken for a jammed merge lane. An unreadable probe changes
 # no target and is named in the report, because throttling the whole factory on
-# a timed-out forge call is the outage this order exists to prevent.
+# a timed-out repo call is the outage this order exists to prevent.
 #
 # OFF UNTIL BALANCER_RIGS NAMES A RIG. Unset, this order exits before it reads
 # anything and writes nothing at all, so an unopted city is byte-for-byte

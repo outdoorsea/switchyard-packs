@@ -129,26 +129,26 @@ fi
 
 **4. Open the pull request, and record its URL on the bead.**
 
-Use the forge the rig's `origin` actually points at — `gh` for GitHub,
+Use the repo host the rig's `origin` actually points at — `gh` for GitHub,
 `glab` for GitLab. Resolve it rather than assuming; several rigs are GitLab.
 
 ```bash
 ORIGIN_URL=$(git remote get-url origin)
 case "$ORIGIN_URL" in
-    *github.com*)  FORGE=gh  ;;
-    *gitlab*)      FORGE=glab ;;
-    *)             FORGE=""  ;;
+    *github.com*)  REPO_CLI=gh  ;;
+    *gitlab*)      REPO_CLI=glab ;;
+    *)             REPO_CLI=""  ;;
 esac
 
 **Capture the status, never just the last line.** `2>&1 | tail -1` takes the
 tail of the *combined* stream and throws the exit code away through the pipe, so
-a failed create yields the forge's ERROR TEXT in `PR_URL` — which then gets
+a failed create yields the repo's ERROR TEXT in `PR_URL` — which then gets
 written to the bead. `publish-gate` only reports beads whose `pr_url` is
 **empty**, so a non-empty garbage value sails past the very check meant to catch
 this. Keep the output, keep the status, and only accept a real URL.
 
 ```bash
-case "$FORGE" in
+case "$REPO_CLI" in
   gh)
     CREATE_OUT=$(gh pr create --base "$TARGET_BASE" --head "$CURRENT_BRANCH" \
         --title "<title>" --body "<what changed, and how it was verified>" 2>&1)
@@ -171,10 +171,10 @@ case "$FORGE" in
     fi
     ;;
   *)
-    echo "UNKNOWN FORGE for origin '$ORIGIN_URL' — cannot open a PR."
+    echo "UNKNOWN REPO HOST for origin '$ORIGIN_URL' — cannot open a PR."
     echo "Escalate rather than closing: the branch is pushed but unreviewed."
-    gc mail send mayor --subject "sy-item-work: unknown forge, PR not opened" \
-        -m "Bead $WORK_BEAD_ID pushed $CURRENT_BRANCH but origin '$ORIGIN_URL' matched no known forge."
+    gc mail send mayor --subject "sy-item-work: unknown repo host, PR not opened" \
+        -m "Bead $WORK_BEAD_ID pushed $CURRENT_BRANCH but origin '$ORIGIN_URL' matched no known repo host."
     exit 1
     ;;
 esac
@@ -192,10 +192,10 @@ case "$PR_URL" in
   https://*) ;;
   *)
     echo "PR NOT OPENED — no usable URL for '$CURRENT_BRANCH'."
-    echo "  forge exit: ${CREATE_RC:-?}"
-    echo "  forge said: ${CREATE_OUT:-<no output>}"
+    echo "  repo CLI exit: ${CREATE_RC:-?}"
+    echo "  repo CLI said: ${CREATE_OUT:-<no output>}"
     gc mail send mayor --subject "sy-item-work: PR not opened, bead left open" \
-        -m "Bead $WORK_BEAD_ID pushed $CURRENT_BRANCH but no PR could be opened or found. Forge exit ${CREATE_RC:-?}. Output: ${CREATE_OUT:-<none>}"
+        -m "Bead $WORK_BEAD_ID pushed $CURRENT_BRANCH but no PR could be opened or found. Repo CLI exit ${CREATE_RC:-?}. Output: ${CREATE_OUT:-<none>}"
     exit 1
     ;;
 esac

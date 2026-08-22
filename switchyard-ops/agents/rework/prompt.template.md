@@ -59,7 +59,7 @@ exactly once, and a self-assigned repair double-works it.
 ## The PR rework loop (a `PR REWORK` dispatch)
 
 The PR's author was an ephemeral session that no longer exists; a reviewer
-refused the PR with findings, and you own the fix. This is forge work, not
+refused the PR with findings, and you own the fix. This is repo work, not
 criterion work — there is no claim to take, and the dispatch marker keyed on
 the PR's head is what stops a second worker being routed while you hold it.
 

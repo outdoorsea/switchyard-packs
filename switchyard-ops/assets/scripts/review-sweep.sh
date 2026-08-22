@@ -145,7 +145,7 @@ rs_settle() {
 # One fetch per rig, not per candidate: the base tip cannot change the
 # answer within a run, and a post-base-move cycle is exactly when many
 # candidates need a patch-id at once — per-candidate fetches multiplied a
-# constant read into real forge rate-limit pressure. The sha is read from
+# constant read into real repo rate-limit pressure. The sha is read from
 # the remote-tracking ref when the clone's refspec maintains one (immune to
 # another process overwriting the shared FETCH_HEAD file between our fetch
 # and our read — this runs in the rig's LIVE clone), falling back to

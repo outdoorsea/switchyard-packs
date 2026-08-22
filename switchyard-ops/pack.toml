@@ -162,7 +162,7 @@
 # build formulas of its own ([[patches.agent]] suspended = true) without
 # touching anything this pack does — switchyard-build's sy-build-from-prd is
 # what needs the design/planning roles, and only on rigs importing it.
-# A `gh` or `glab` on PATH, authenticated for the rig's forge, since the worker
+# A `gh` or `glab` on PATH, authenticated for the rig's repo host, since the worker
 # opens its own pull request. And — for the sweeps to be useful — the
 # switchyard-mcp overlay in any rig whose coordinator should drive switchyard.
 #

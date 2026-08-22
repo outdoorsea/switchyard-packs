@@ -45,7 +45,7 @@
 #
 # It runs hermetically: a throwaway city plus stub `gc` and `gh` on PATH, and
 # one real (empty) git repo per city because the sweep reads the rig's origin
-# remote for its owner/repo slug. No real city, session, or forge is involved.
+# remote for its owner/repo slug. No real city, session, or repo is involved.
 # Needs jq and git (skips without them).
 #
 # Run:  bash packs/switchyard-ops/assets/scripts/review-sweep.test.sh

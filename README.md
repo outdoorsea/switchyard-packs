@@ -294,7 +294,7 @@ straight to it fails loudly.
 
 > **GitLab rigs work here.** The old refinery's `mr` mode shelled out to `gh`
 > only, so a GitLab remote could not be handed off to at all. `sy-item-work`'s
-> publish step resolves the forge from `git remote get-url origin` and uses `gh`
+> publish step resolves the repo host from `git remote get-url origin` and uses `gh`
 > or `glab` accordingly; an unrecognised host escalates to the mayor rather than
 > closing the bead.
 
@@ -389,7 +389,7 @@ failures follow.
 one above is a verify failure. The other is a merge **conflict** between two
 constituents — and it is the more common one, because every candidate has
 already re-queried as `MERGEABLE` against the base, so a collision inside the
-bundle is by definition invisible to the forge. The lane reads the conflicted
+bundle is by definition invisible to the repo. The lane reads the conflicted
 paths *before* `merge --abort` discards them, then intersects them with each
 merged constituent's own change set — measured from that constituent's
 merge-base, not the base tip — to name the counterpart exactly: "CONFLICTS with
@@ -779,8 +779,8 @@ depends on where the fragment came from:
 
 - `gc` (Gas City), `jq`, `tmux`, `python3`
 - the **gascity** pack imported (city scope) and **gascity/roles** per rig
-- `gh` and/or `glab` on `PATH`, authenticated for each rig's forge — the worker
-  opens its own pull request, so a rig whose forge CLI is missing cannot publish
+- `gh` and/or `glab` on `PATH`, authenticated for each rig's repo host — the worker
+  opens its own pull request, so a rig whose repo CLI is missing cannot publish
 - `switchyard-mcp` on `PATH`, authenticated via `switchyard-mcp login`
 
 The overlay ships **no token**. The MCP server resolves it from

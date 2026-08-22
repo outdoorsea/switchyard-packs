@@ -324,7 +324,7 @@ sy_demand_brakeman() {
 
 # sy_rig_slug RIG — the owner/repo the rig's origin remote points at, or empty.
 #
-# ONE resolution shared by both forge reads. Two copies of this sed would be two
+# ONE resolution shared by both repo reads. Two copies of this sed would be two
 # chances for the reviewer queue and the backpressure probe to disagree about
 # which repository they are counting, which is the one thing that would make the
 # clamp fire against the wrong queue.
@@ -347,7 +347,7 @@ sy_rig_slug() {
 #
 # The empty-body/`[]` distinction is the same trap sy_demand_reviewer documents,
 # and it bites harder here: an empty read taken as a depth of 0 would silently
-# withdraw backpressure at exactly the moment the forge is struggling.
+# withdraw backpressure at exactly the moment the repo is struggling.
 sy_merge_backlog() {
   _mb_slug="$(sy_rig_slug "$1")" || return 1
   _mb_body="$(sy_timeout "$READ_TIMEOUT" gh pr list --repo "$_mb_slug" \
@@ -369,7 +369,7 @@ sy_merge_backlog() {
 # An EMPTY BODY IS NOT AN EMPTY QUEUE. `gh` prints nothing on failure and `[]`
 # on a genuinely empty list, and the two mean opposite things here: one is "do
 # not publish a target", the other is "publish zero". Parsing through jq -e
-# separates them, so a forge blip cannot read as a drained queue and scale the
+# separates them, so a repo blip cannot read as a drained queue and scale the
 # lane to its floor.
 sy_demand_reviewer() {
   _dr_slug="$(sy_rig_slug "$1")" || return 1
@@ -920,7 +920,7 @@ for rig in $BALANCER_RIGS; do
     # A THROTTLED LANE IS NOT MEASURED. Its own demand cannot change the answer
     # once the stage it feeds has stopped draining, so backpressure sends it
     # straight to its floor and the demand reads are skipped rather than taken
-    # and discarded — which also spares two forge round-trips per rig in exactly
+    # and discarded — which also spares two repo round-trips per rig in exactly
     # the cycle where the factory is already under strain.
     #
     # The floor is assigned HERE and nowhere else. An earlier draft initialised
@@ -1083,7 +1083,7 @@ fi
 # A PAIR THIS CYCLE DID NOT DECIDE KEEPS ITS STREAK. A lane skipped for an
 # unreadable probe, a rig dropped from BALANCER_RIGS for one cycle, a lane whose
 # capacity could not be read: none of those is a demand signal, and rewriting
-# the history without them would silently reset the gate every time the forge
+# the history without them would silently reset the gate every time the repo
 # hiccuped. The whole file is rebuilt each cycle, so what is not carried here is
 # forgotten.
 if [ -f "$HIST" ]; then

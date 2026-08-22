@@ -1303,7 +1303,7 @@ case_silent_when_nothing_to_add() {
 # `gh` fixture, so requery_mergeable filters it out BEFORE the merge loop and it
 # never reaches the conflict path either.
 #
-# The conflict that matters is the one the forge cannot see. Both PRs re-query
+# The conflict that matters is the one the repo cannot see. Both PRs re-query
 # as MERGEABLE because each merges clean against `main` ALONE; they collide only
 # with each other. That is a combination-only defect in exactly the sense this
 # lane exists to catch, and it is the most common one in a busy queue.
@@ -1319,7 +1319,7 @@ $(pr_json 2 shared-2 "$(sha_of "$city" shared-2)"),\
 $(pr_json 3 shared-3 "$(sha_of "$city" shared-3)")]"
 
 	# Every fixture answers MERGEABLE. add_pr's default is what makes this case
-	# meaningful: the collision is invisible to the forge and appears only when
+	# meaningful: the collision is invisible to the repo and appears only when
 	# the lane puts them on one branch.
 	run_lane "$city" INTEGRATION_LANE_VERIFY='true'
 

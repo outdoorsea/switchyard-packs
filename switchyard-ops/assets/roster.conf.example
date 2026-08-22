@@ -541,7 +541,7 @@
 #
 #   AN UNREADABLE PROBE IS NOT A DEEP QUEUE. If the merge queue cannot be read
 #   the targets are left on their own demand and the order names it in its
-#   report: throttling the whole factory because one forge call timed out is
+#   report: throttling the whole factory because one repo call timed out is
 #   the outage this order exists to prevent.
 #
 # BALANCER_MERGE_BASE — the base whose reviewed-but-unmerged queue is that

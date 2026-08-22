@@ -37,7 +37,7 @@
 #   unopted city byte-for-byte unchanged.
 #
 # It runs hermetically: a throwaway city plus stub `gc`, `gh` and `curl` on
-# PATH. No real city, session, forge or switchyard instance is involved.
+# PATH. No real city, session, repo or switchyard instance is involved.
 # Needs jq (skips without it).
 #
 # The order is POSIX sh and ships to cities that are not Ubuntu, so CI runs this
@@ -753,7 +753,7 @@ rm -rf "$city"
 # --- 16. An unreadable probe PRESERVES the streak. --------------------------
 # An unreadable demand read is not a demand signal — the same stance the
 # backpressure probe already takes. Dropping the streak on it would let a
-# flaky forge silently reset the gate every few cycles.
+# flaky repo silently reset the gate every few cycles.
 #
 # THE ASSERTION LANDS ON A HELD CYCLE, and it has to. Asserting that the lane
 # eventually REACHES the raised value proves nothing: a run that forgot the lane

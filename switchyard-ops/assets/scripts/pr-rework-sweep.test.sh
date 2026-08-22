@@ -32,7 +32,7 @@
 #   order exists to remove, reintroduced by its own bookkeeping.
 #
 # It runs hermetically: a throwaway city plus stub `gc`, `gh` and `git` on
-# PATH, answering from per-case fixtures. No real city, forge or session is
+# PATH, answering from per-case fixtures. No real city, repo or session is
 # involved. Needs jq (skips without it).
 #
 # Run:  bash packs/switchyard-ops/assets/scripts/pr-rework-sweep.test.sh

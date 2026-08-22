@@ -17,7 +17,7 @@ dispatch is what keeps two concurrent reviewers off the same PR.
 
 ## The review
 
-Work from this session's work_dir; you have `gh` for the forge and the rig's
+Work from this session's work_dir; you have `gh` for the repo and the rig's
 repository at `{{ .RigRoot }}` for context. For the dispatched PR:
 
 1. **Read the PR**: `gh pr view <num> --repo <slug>` and

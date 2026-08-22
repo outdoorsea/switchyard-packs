@@ -106,6 +106,17 @@ DEFAULT_BUDGET=45
 RAISE_CYCLES=2
 LOWER_CYCLES=6
 
+# How many open pull requests one stage read will look at. The same bound the
+# demand reads above use, named once so a repo whose queue outgrows it does so
+# for every stage at once rather than for three of the six.
+BALANCER_PR_LIMIT="${BALANCER_PR_LIMIT:-100}"
+
+# How many snapshot lines to retain: 2880 is ten days at the 5m cadence. The
+# file is append-only and nothing else prunes it, so the bound lives with the
+# writer that creates it. 0 retains everything, for an operator who would rather
+# rotate it themselves.
+BALANCER_SNAPSHOT_KEEP="${BALANCER_SNAPSHOT_KEEP:-2880}"
+
 # ---------------------------------------------------------------------------
 # Bounds
 # ---------------------------------------------------------------------------
@@ -370,6 +381,286 @@ sy_demand_reviewer() {
 }
 
 # ---------------------------------------------------------------------------
+# The six-stage snapshot
+# ---------------------------------------------------------------------------
+#
+# WHY THIS MEASURES FOR ITSELF, when three of its six stages look at queues the
+# demand reads above already touch. The quantities are not the same one.
+# sy_demand_reviewer counts every open PR on the review base — the reviewer
+# lane's shipped demand — while this pass's review depth is the narrower
+# "unreviewed", which needs the verdict as well as the number. Feeding one
+# number to both would silently redefine a published target from inside a
+# reporting artifact, so the target computation above is left exactly as it
+# shipped and this pass reads its own.
+#
+# WHAT IT COSTS, bounded on purpose: the three forge-side stages share ONE
+# memoized `gh pr list` per (repo, base), so six stages cost one PR read, one
+# compare and two switchyard reads per rig per cycle — and when the review and
+# merge bases are the same branch, which is the default, that is one PR read
+# serving three stages rather than three reads.
+#
+# A KNOWN LIMIT, named rather than papered over. The criterion asks for PRs
+# unreviewed ON THEIR CURRENT HEAD, and this pass does not check whether the
+# head moved after the verdict — an approval surviving a force-push is still
+# counted approved. Binding a verdict to a head needs the head's last non-merge
+# commit date, and `commits` cannot ride this read: at BALANCER_PR_LIMIT=100
+# GitHub refuses the query outright ("requesting up to 1,000,000 possible nodes
+# which exceeds the maximum limit of 500,000") because `commits` drags in an
+# authors connection. The per-PR `gh pr view` that would answer it is the wrong
+# trade for a 5-minute sweep, and `gh pr list` returns latestReviews[].commit.oid
+# empty. So the limit is bounded and disclosed: pr-rework-sweep, which can
+# afford one view per PR, owns the staleness call; this gauge reports depth
+# without it.
+
+# sy_count — a depth is a count or it is UNKNOWN, never a zero standing in for a
+# read that failed. The distinction is the artifact's whole value: 0 says a
+# stage is drained, null says nobody could see it, and an operator reading a
+# snapshot back to explain why a lane was scaled needs to tell those apart.
+# Collapsing them is how a timed-out probe becomes evidence of an idle factory.
+sy_count() {
+  case "${1:-}" in
+    '' | *[!0-9]*) printf 'null' ;;
+    *)             printf '%s' "$1" ;;
+  esac
+}
+
+# sy_json_num FILE FILTER — one number out of a JSON body, or null.
+#
+# `// empty` rather than `// 0`: jq treats only null and false as absent, so a
+# genuine depth of 0 survives it while a missing key becomes null. The awk NF
+# drops a blank line so an empty answer reaches sy_count as unknown.
+sy_json_num() {
+  [ -s "$1" ] || { printf 'null'; return 0; }
+  sy_count "$(jq -r "$2 // empty" "$1" 2>/dev/null | awk 'NF' | head -n1)"
+}
+
+# The review lane's OWN verdict literals, read here under the lane's own knob
+# names deliberately: this gauge and merge-lane consume the SAME channel, so an
+# operator who retunes the literal for the lane must not have to discover a
+# second name to keep the snapshot honest. One knob, two consumers.
+REVIEW_LANE_MARKER="${REVIEW_LANE_MARKER:-Verdict: APPROVE}"
+REVIEW_LANE_REJECT_MARKER="${REVIEW_LANE_REJECT_MARKER:-Verdict: REQUEST CHANGES}"
+
+# sy_stage_prs SLUG BASE — the open-PR queue for one (repo, base), memoized for
+# the cycle. Prints a file path; returns 1 when the queue could not be read.
+#
+# THE FAILURE IS MEMOIZED TOO. Without the .failed marker a repo whose `gh` read
+# times out would be retried once per stage, tripling the cost of exactly the
+# case that is already too slow.
+sy_stage_prs() {
+  _sp_key="$(printf '%s' "$1/$2" | tr -c 'A-Za-z0-9' '_')"
+  _sp_file="$SNAP_TMP/prs.$_sp_key.json"
+  _sp_fail="$SNAP_TMP/prs.$_sp_key.failed"
+
+  [ -f "$_sp_fail" ] && return 1
+  [ -f "$_sp_file" ] && { printf '%s' "$_sp_file"; return 0; }
+
+  if sy_timeout "$BALANCER_READ_TIMEOUT" gh pr list --repo "$1" --state open \
+      --base "$2" --limit "$BALANCER_PR_LIMIT" \
+      --json number,isDraft,reviewDecision,comments,reviews >"$_sp_file" 2>/dev/null &&
+    jq -e 'type=="array"' "$_sp_file" >/dev/null 2>&1; then
+    printf '%s' "$_sp_file"
+    return 0
+  fi
+
+  rm -f "$_sp_file" 2>/dev/null
+  : >"$_sp_fail"
+  return 1
+}
+
+# sy_stage_count FILE MODE — the three verdict predicates, in one place so they
+# cannot drift apart. MODE is review|rework|merge.
+#
+# READS BOTH VERDICT CHANNELS, because this factory's dominant one is not the
+# formal review. `reviewDecision` is set only by a formal GitHub review, and the
+# reviewer lane cannot post one — its `gh` identity is usually the PR author's
+# own account and GitHub refuses self-reviews — so it posts a MARKER COMMENT,
+# which is exactly what merge-lane matches. Measured on this repo, the last 40
+# merged PRs on staging: reviewDecision "" = 32, APPROVED = 7,
+# CHANGES_REQUESTED = 1, and the channels are disjoint. Keying off
+# reviewDecision alone therefore reported a confident `merge: 0` while
+# marker-approved PRs sat waiting — a successful read of the wrong field, which
+# is worse than a failed read, because sy_count cannot mark it unknown.
+#
+# Newest verdict wins, across both channels, ordered by timestamp — the same
+# rule pr-rework-sweep applies, so the gauge and the lane agree about what a PR
+# is waiting for.
+#
+# Drafts are excluded from all three: nobody is asked to review, rework or merge
+# a draft, so counting them inflates a stage that has no work to do.
+#
+# `review` stays the COMPLEMENT of the two settled verdicts rather than a list
+# of unsettled spellings, so a PR carrying no verdict at all — the common case —
+# lands in the review queue without enumerating every empty-ish spelling.
+sy_stage_count() {
+  sy_count "$(jq -r --arg mode "$2" \
+    --arg a "$REVIEW_LANE_MARKER" --arg r "$REVIEW_LANE_REJECT_MARKER" '
+    [ .[]
+      | select((.isDraft // false) | not)
+      | ( [ .comments[]?
+            | select((.body | contains($a)) or (.body | contains($r)))
+            | {class: (if (.body | contains($a)) then "approve" else "reject" end),
+               at: (.createdAt // "")} ]
+        + [ .reviews[]?
+            | select(.state == "APPROVED" or .state == "CHANGES_REQUESTED")
+            | {class: (if .state == "APPROVED" then "approve" else "reject" end),
+               at: (.submittedAt // "")} ]
+        | sort_by(.at) | last ) as $v
+      | (($v // {}).class // "none") as $c
+      | select(
+          if   $mode == "rework" then $c == "reject"
+          elif $mode == "merge"  then $c == "approve"
+          else ($c != "approve" and $c != "reject")
+          end)
+    ] | length' "$1" 2>/dev/null | awk 'NF' | head -n1)"
+}
+
+# sy_stage_validation PROJECT TOKEN — the awaiting-validation depth.
+#
+# The two lanes PARTITION that set, and `lane` is required by the endpoint, so
+# the depth is their sum and neither alone is the total. EITHER read failing
+# makes the sum unknown rather than partial: a half-read total understates the
+# backlog, which is the direction that reads as "nothing to validate".
+sy_stage_validation() {
+  sy_api_get "/api/v1/projects/$1/validations?lane=contract" "$2" \
+    >"$SNAP_TMP/vc.json" 2>/dev/null || :
+  sy_api_get "/api/v1/projects/$1/validations?lane=judgment" "$2" \
+    >"$SNAP_TMP/vj.json" 2>/dev/null || :
+  _sv_c="$(sy_json_num "$SNAP_TMP/vc.json" '.count')"
+  _sv_j="$(sy_json_num "$SNAP_TMP/vj.json" '.count')"
+  if [ "$_sv_c" = null ] || [ "$_sv_j" = null ]; then
+    printf 'null'
+  else
+    printf '%s' "$((_sv_c + _sv_j))"
+  fi
+}
+
+# sy_stage_promote SLUG RIG — commits on the promote-from branch that the
+# default branch does not have: the unpromoted staging depth.
+#
+# `compare` is asked base...head so ahead_by counts what HEAD carries that BASE
+# lacks; reversing the pair silently answers the opposite question with a number
+# just as plausible.
+sy_stage_promote() {
+  _spr_default="$(gc rig list --json 2>/dev/null | jq -r --arg r "$2" '
+    (if type=="array" then . else (.rigs // []) end)[]
+    | select((.name // "") == $r) | (.default_branch // empty)' 2>/dev/null |
+    awk 'NF' | head -n1)"
+  [ -n "${_spr_default:-}" ] || _spr_default=main
+  [ "$_spr_default" = "$BALANCER_PROMOTE_FROM" ] && { printf '0'; return 0; }
+
+  sy_timeout "$BALANCER_READ_TIMEOUT" gh api \
+    "repos/$1/compare/$_spr_default...$BALANCER_PROMOTE_FROM" \
+    >"$SNAP_TMP/compare.json" 2>/dev/null || :
+  sy_json_num "$SNAP_TMP/compare.json" '.ahead_by'
+}
+
+# sy_write_snapshot — ONE JSON line per cycle, carrying every balanced rig's
+# depth at all six stages, appended to balancer.snapshots.jsonl in the pack
+# state dir.
+#
+# A LINE IS WRITTEN EVEN WHEN EVERY READ FAILED. An absent line and a line of
+# nulls look identical on a dashboard, but only one of them proves the order ran
+# at all — and "the balancer stopped" and "the balancer can see nothing" want
+# opposite responses from an operator.
+#
+# It never touches balancer.targets and nothing here can change a target: this
+# is the reporting artifact, and keeping the two apart is what lets an operator
+# trust the snapshot as evidence rather than as the balancer's own justification
+# of itself.
+sy_write_snapshot() {
+  command -v jq >/dev/null 2>&1 || return 0
+  SNAP_TMP="$(mktemp -d 2>/dev/null)" || return 0
+
+  _ws_out="$STATE/balancer.snapshots.jsonl"
+  : >"$SNAP_TMP/rigs.jsonl"
+
+  for _ws_rig in $BALANCER_RIGS; do
+    _ws_pool=null; _ws_review=null; _ws_rework=null
+    _ws_merge=null; _ws_validation=null; _ws_promote=null
+
+    # OBSERVABILITY YIELDS TO THE PRODUCT, so both reads below are gated on the
+    # budget the targets pass has already drawn against. Six stage reads per rig
+    # is the most expensive thing this order does; charging what the cycle could
+    # not afford to the REPORT would push the order past the same 60s exec
+    # deadline the budget exists to sit inside. A rig that cannot afford them is
+    # left at the nulls above — this writer's own "the balancer can see nothing"
+    # state, not a new one, and still a line proving the order ran.
+
+    _ws_project="$(sy_project_for_rig "$_ws_rig" "$PROJECTS" 2>/dev/null)" || _ws_project=""
+    if sy_affords "$READ_TIMEOUT" && [ -n "$_ws_project" ] && [ -n "${TOKEN:-}" ]; then
+      sy_api_get "/api/v1/projects/$_ws_project/pool?limit=1" "$TOKEN" \
+        >"$SNAP_TMP/pool.json" 2>/dev/null || :
+      _ws_pool="$(sy_json_num "$SNAP_TMP/pool.json" '.total')"
+      _ws_validation="$(sy_stage_validation "$_ws_project" "$TOKEN")"
+    fi
+
+    if sy_affords "$READ_TIMEOUT" && _ws_slug="$(sy_rig_slug "$_ws_rig")"; then
+      if _ws_q="$(sy_stage_prs "$_ws_slug" "$BALANCER_REVIEW_BASE")"; then
+        _ws_review="$(sy_stage_count "$_ws_q" review)"
+        _ws_rework="$(sy_stage_count "$_ws_q" rework)"
+      fi
+      if _ws_q="$(sy_stage_prs "$_ws_slug" "$BALANCER_MERGE_BASE")"; then
+        _ws_merge="$(sy_stage_count "$_ws_q" merge)"
+      fi
+      _ws_promote="$(sy_stage_promote "$_ws_slug" "$_ws_rig")"
+    fi
+
+    jq -nc --arg rig "$_ws_rig" \
+      --argjson pool "$_ws_pool" --argjson review "$_ws_review" \
+      --argjson rework "$_ws_rework" --argjson merge "$_ws_merge" \
+      --argjson validation "$_ws_validation" --argjson promote "$_ws_promote" \
+      '{rig: $rig, pool: $pool, review: $review, rework: $rework,
+        merge: $merge, validation: $validation, promote: $promote}' \
+      >>"$SNAP_TMP/rigs.jsonl" 2>/dev/null || :
+  done
+
+  jq -c -s --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --arg review "$BALANCER_REVIEW_BASE" --arg merge "$BALANCER_MERGE_BASE" \
+    --arg promote "$BALANCER_PROMOTE_FROM" \
+    '{at: $at, version: 1,
+      bases: {review: $review, merge: $merge, promote: $promote},
+      rigs: .}' \
+    "$SNAP_TMP/rigs.jsonl" >>"$_ws_out" 2>/dev/null || :
+
+  # THE WRITER CARRIES ITS OWN BOUND. Nothing else prunes an append-only file,
+  # so an order that creates one and walks away has created an unbounded disk
+  # leak on a 5-minute cadence. Trimmed through a temp file and moved into
+  # place, so a reader mid-cycle sees the whole old file or the whole new one;
+  # a failed trim leaves the file untouched rather than empty.
+  #
+  # The temp is staged BESIDE the destination, not under SNAP_TMP: `mv` is
+  # atomic only WITHIN one filesystem, and SNAP_TMP comes from a bare
+  # `mktemp -d` (so $TMPDIR). On a host with a tmpfs /tmp the rename would
+  # degrade to copy+unlink and a concurrent reader could observe a partial
+  # file — losing the very guarantee the sentence above claims. Same idiom the
+  # OUT/HIST writers below already use. The temp is removed either way, so a
+  # failed trim leaves no litter beside the state file.
+  case "${BALANCER_SNAPSHOT_KEEP:-}" in
+    '' | *[!0-9]*) : ;;
+    0) : ;;
+    *)
+      _ws_kept="$(wc -l <"$_ws_out" 2>/dev/null | tr -d ' ')"
+      case "${_ws_kept:-0}" in
+        '' | *[!0-9]*) : ;;
+        *)
+          _ws_trim="$(mktemp "$_ws_out.XXXXXX" 2>/dev/null)" || _ws_trim=''
+          if [ -n "$_ws_trim" ] &&
+            [ "$_ws_kept" -gt "$BALANCER_SNAPSHOT_KEEP" ] &&
+            tail -n "$BALANCER_SNAPSHOT_KEEP" "$_ws_out" >"$_ws_trim" 2>/dev/null &&
+            [ -s "$_ws_trim" ]; then
+            mv "$_ws_trim" "$_ws_out" 2>/dev/null || :
+          fi
+          rm -f "$_ws_trim" 2>/dev/null || :
+          ;;
+      esac
+      ;;
+  esac
+
+  rm -rf "$SNAP_TMP" 2>/dev/null
+}
+
+# ---------------------------------------------------------------------------
 # The clamp
 # ---------------------------------------------------------------------------
 
@@ -451,6 +742,13 @@ sy_load_conf
 # lane it throttles for can never disagree about which branch is under
 # discussion when an operator retunes one.
 BALANCER_MERGE_BASE="${BALANCER_MERGE_BASE:-${MERGE_LANE_BASE:-staging}}"
+
+# The snapshot's other two bases, resolved the same way and for the same reason:
+# each falls back to the lane's OWN roster.conf key rather than to a second
+# literal, so the balancer and the lane it reports on can never disagree about
+# which branch is under discussion when an operator retunes one.
+BALANCER_REVIEW_BASE="${BALANCER_REVIEW_BASE:-${REVIEW_LANE_BASE:-staging}}"
+BALANCER_PROMOTE_FROM="${BALANCER_PROMOTE_FROM:-${STAGING_PROMOTE_FROM:-staging}}"
 BACKPRESSURE="$(sy_backpressure)"
 READ_TIMEOUT="$(sy_read_timeout)"
 BUDGET="$(sy_cycle_budget)"
@@ -735,6 +1033,20 @@ for rig in $BALANCER_RIGS; do
     fi
   done
 done
+# THE SNAPSHOT RUNS AFTER THE TARGETS PASS, never before it. It is the
+# reporting artifact and the targets are the product: a snapshot that spent the
+# cycle budget first would make a slow forge publish NO targets while faithfully
+# recording how deep the queues are — the factory left unbalanced so that it
+# could report on being unbalanced. Running last also keeps the over-budget
+# notice precise, naming the stage a cycle stopped at (rigA/reviewer) instead of
+# charging the whole rig (rigA) for reads the report had already spent.
+#
+# PLACED ABOVE THE OVER-BUDGET RETURN ON PURPOSE, so the line is written on both
+# paths. An abandoned cycle is exactly when a dashboard needs to see that the
+# order ran and could see nothing; its reads are gated internally, so that line
+# costs nothing beyond the write. It reuses TOKEN/PROJECTS from above and cleans
+# up its own temp dir, so it cannot disturb the trap set for $TMP/$HTMP/$LTMP.
+sy_write_snapshot
 
 # AN OVER-BUDGET CYCLE PUBLISHES NOTHING. Targets accumulate in the temp file
 # lane by lane, so a cycle that stopped early and published anyway would ship a

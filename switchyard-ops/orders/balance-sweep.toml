@@ -48,6 +48,23 @@
 # imaginary demand, so every unreadable leg is skipped and named in the report
 # instead.
 #
+# THE SNAPSHOT IS THE OTHER HALF, and it is a REPORT rather than a decision.
+# Each cycle appends ONE JSON line to balancer.snapshots.jsonl in the pack state
+# dir carrying every balanced rig's depth at all six pipeline stages — cloud
+# claim pool, unreviewed PRs, rework queue, reviewed-but-unmerged PRs,
+# validation queue, unpromoted staging commits. Nothing in it can move a target;
+# it exists so an operator can read back WHY a lane was scaled instead of taking
+# the balancer's word for it, and so the three stages no target consumes are
+# visible before they become an outage.
+#
+# A stage that could not be read is recorded null, never 0: "drained" and "not
+# visible" are opposite facts, and collapsing them makes a timed-out probe look
+# like an idle factory. A cycle whose every read failed still writes its line,
+# because an absent line and a line of nulls are identical on a dashboard while
+# "the order stopped" and "the order can see nothing" want opposite responses.
+# The writer trims the file to BALANCER_SNAPSHOT_KEEP lines, since nothing else
+# prunes an append-only file on a 5-minute cadence.
+#
 # Cadence is 5m: long enough that a lane is not retuned on one noisy sample,
 # short enough that a backed-up queue is answered within minutes rather than
 # whenever someone next looks at city.toml.
@@ -58,7 +75,7 @@
 # project slug needs a RIG_PROJECTS entry, same as every other consumer.
 
 [order]
-description = "Measure each balanced rig's lane queue depths and publish brakeman/reviewer concurrency targets to balancer.targets, clamped into BALANCER_BOUNDS and never above the lane agent's own max_active_sessions, or down to their floors when the reviewed-but-unmerged queue backs up"
+description = "Snapshot every balanced rig's depth at all six pipeline stages as one JSON line per cycle in balancer.snapshots.jsonl, and publish brakeman/reviewer concurrency targets to balancer.targets, clamped into BALANCER_BOUNDS and never above the lane agent's own max_active_sessions, or down to their floors when the reviewed-but-unmerged queue backs up"
 trigger = "cooldown"
 interval = "5m"
 exec = "$PACK_DIR/assets/scripts/balance-sweep.sh"

@@ -556,10 +556,38 @@
 # rather than guessed — it gets no target line, and a consumer with no line
 # falls back to its city.toml ceiling exactly as today.
 #
+# THE SNAPSHOT. Every cycle the order also records the depth of all six pipeline
+#   stages per rig — cloud claim pool, unreviewed PRs, rework queue, reviewed-
+#   but-unmerged PRs, validation queue, unpromoted staging commits — as ONE JSON
+#   line appended to balancer.snapshots.jsonl in the pack state dir. It is a
+#   REPORT, not a decision: nothing in it can move a target, and it exists so you
+#   can read back why a lane was scaled instead of taking the balancer's word.
+#
+#   A stage that could not be read is recorded as null, never as 0. The two are
+#   opposite facts — 0 means drained, null means nobody could see it — and a
+#   snapshot that collapsed them would be evidence of an idle factory every time
+#   the forge times out.
+#
+# BALANCER_REVIEW_BASE / BALANCER_PROMOTE_FROM — the other two branches the
+#   snapshot measures against, defaulting to REVIEW_LANE_BASE and
+#   STAGING_PROMOTE_FROM for the same reason BALANCER_MERGE_BASE defaults to
+#   MERGE_LANE_BASE: retune the lane and the balancer follows it.
+#
+# BALANCER_SNAPSHOT_KEEP — how many snapshot lines to retain (default 2880, ten
+#   days at the 5m cadence). The file is append-only and nothing else prunes it,
+#   so the writer carries its own bound. 0 retains everything, if you would
+#   rather rotate it yourself.
+#
+# BALANCER_PR_LIMIT — how many open PRs one stage read looks at (default 100).
+#
 # BALANCER_RIGS=""
 # BALANCER_BOUNDS="brakeman=1:6 reviewer=1:3"
 # BALANCER_MERGE_BACKPRESSURE="6"
 # BALANCER_MERGE_BASE="staging"
+# BALANCER_REVIEW_BASE="staging"
+# BALANCER_PROMOTE_FROM="staging"
+# BALANCER_SNAPSHOT_KEEP="2880"
+# BALANCER_PR_LIMIT="100"
 
 # ---------------------------------------------------------------------------
 # Balancer cycle clock — how long the measuring pass may take.

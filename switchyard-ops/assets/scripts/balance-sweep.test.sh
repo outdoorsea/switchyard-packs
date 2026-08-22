@@ -128,8 +128,31 @@ STUB
 	# default, so every case that predates backpressure keeps its old answer.
 	echo '[]' >"$city/merge_queue.json"
 
+	# The three reads the six-stage snapshot adds. All are benign by default —
+	# an empty compare and two empty validation lanes — so every case written
+	# before the snapshot existed keeps the answer it already had.
+	printf '{"ahead_by":0}\n' >"$city/compare.json"
+	printf '{"count":0,"validations":[]}\n' >"$city/vc.json"
+	printf '{"count":0,"validations":[]}\n' >"$city/vj.json"
+
 	cat >"$city/bin/gh" <<'STUB'
 #!/bin/sh
+# `gh api .../compare/BASE...HEAD` is the unpromoted-staging read, and it is
+# dispatched FIRST: the fallback below answers every unrecognised invocation
+# with the PR queue, so a compare falling through would be handed a JSON array
+# and read as a depth of null — a passing test that measured nothing.
+if [ "${1:-}" = api ]; then
+	for a in "$@"; do
+		case "$a" in
+		*/compare/*)
+			[ -f "$GC_CITY/compare_fail" ] && exit 1
+			cat "$GC_CITY/compare.json"
+			exit 0
+			;;
+		esac
+	done
+	exit 1
+fi
 # The sweep makes TWO different `gh pr list` reads: the reviewer lane's own
 # open-PR queue (--json number) and the backpressure probe's reviewed-but-
 # unmerged queue (--json ...reviewDecision...). This stub dispatches on the
@@ -161,6 +184,17 @@ cat >/dev/null 2>&1
 for a in "$@"; do url="$a"; done
 case "$url" in
 */pool*) cat "$GC_CITY/pool.json" ;;
+# The two validation lanes PARTITION the awaiting-validation set, so they are
+# served separately: a stub answering both alike would let a sweep that read one
+# lane twice report the right total and still be wrong.
+*validations*lane=contract*)
+	[ -f "$GC_CITY/validation_fail" ] && exit 1
+	cat "$GC_CITY/vc.json"
+	;;
+*validations*lane=judgment*)
+	[ -f "$GC_CITY/validation_fail" ] && exit 1
+	cat "$GC_CITY/vj.json"
+	;;
 */api/v1/projects) cat "$GC_CITY/projects.json" ;;
 *) exit 1 ;;
 esac
@@ -203,11 +237,42 @@ target_for() {
 # The noise counts are sized to CROSS the threshold when wrongly included: 9
 # approved drafts push a 2-deep backlog to 11, past the default 6. A fixture
 # with fewer would pass whether or not drafts were excluded.
+# A fifth argument adds CHANGES_REQUESTED pull requests. The snapshot reads this
+# same queue for three of its six stages, and those three must partition it
+# rather than overlap: an approved PR is merge-queue depth, a rejected one is
+# rework depth, and neither is review depth.
+# A SIXTH and SEVENTH argument add MARKER-verdict pull requests: reviewDecision
+# empty, the verdict carried by a comment instead. That is this factory's
+# DOMINANT channel, not an edge case — the reviewer lane's `gh` identity is
+# usually the PR author's own account and GitHub refuses self-reviews, so it
+# posts a marker comment. Measured on switchyard, the last 40 merged staging
+# PRs: reviewDecision "" = 32, APPROVED = 7, CHANGES_REQUESTED = 1. A fixture
+# set built only from formal verdicts passes whether or not the sweep can see
+# the channel that carries four in five of its real verdicts.
+#
+# The marker literals are assembled from halves rather than written whole: the
+# bare string is what merge-lane matches in a PR COMMENT, and a bot that quotes
+# an added line back into the thread would otherwise post a live approve marker
+# on this very PR.
 merge_queue() {
-	jq -nc --argjson a "$2" --argjson u "${3:-0}" --argjson d "${4:-0}" '
-		[range($a) | {number: (. + 1),   isDraft: false, reviewDecision: "APPROVED"}]
-		+ [range($u) | {number: (. + 100), isDraft: false, reviewDecision: "REVIEW_REQUIRED"}]
-		+ [range($d) | {number: (. + 200), isDraft: true,  reviewDecision: "APPROVED"}]' \
+	jq -nc --argjson a "$2" --argjson u "${3:-0}" --argjson d "${4:-0}" --argjson c "${5:-0}" \
+		--argjson ma "${6:-0}" --argjson mc "${7:-0}" '
+		def formal($s): [{state: $s, submittedAt: "2026-01-01T00:00:00Z"}];
+		def marker($b): [{body: $b, createdAt: "2026-01-02T00:00:00Z"}];
+		("Verdict: " + "APPROVE") as $am
+		| ("Verdict: " + "REQUEST CHANGES") as $rm
+		| [range($a) | {number: (. + 1),   isDraft: false, reviewDecision: "APPROVED",
+			reviews: formal("APPROVED"), comments: []}]
+		+ [range($u) | {number: (. + 100), isDraft: false, reviewDecision: "REVIEW_REQUIRED",
+			reviews: [], comments: []}]
+		+ [range($d) | {number: (. + 200), isDraft: true,  reviewDecision: "APPROVED",
+			reviews: formal("APPROVED"), comments: []}]
+		+ [range($c) | {number: (. + 300), isDraft: false, reviewDecision: "CHANGES_REQUESTED",
+			reviews: formal("CHANGES_REQUESTED"), comments: []}]
+		+ [range($ma)| {number: (. + 400), isDraft: false, reviewDecision: "",
+			reviews: [], comments: marker($am)}]
+		+ [range($mc)| {number: (. + 500), isDraft: false, reviewDecision: "",
+			reviews: [], comments: marker($rm)}]' \
 		>"$1/merge_queue.json"
 }
 
@@ -229,6 +294,24 @@ stray_temps() {
 }
 
 TARGETS="state/balancer.targets"
+SNAPSHOTS="state/balancer.snapshots.jsonl"
+
+# snap_field <city> <rig> <field> — one stage depth from the LAST snapshot line,
+# printed as "null" when the stage could not be read.
+#
+# A missing depth is printed rather than dropped, because the whole point of the
+# artifact is that an unread stage and a drained one are different facts: a
+# helper that returned empty for both would make every unknown-vs-zero assertion
+# below pass on a script that never distinguished them.
+snap_field() {
+	tail -n 1 "$1/$SNAPSHOTS" 2>/dev/null |
+		jq -r --arg r "$2" --arg f "$3" '
+			(.rigs // [])[] | select(.rig == $r)
+			| .[$f] | if . == null then "null" else tostring end' 2>/dev/null
+}
+
+# snap_lines <city> — how many cycles have been recorded.
+snap_lines() { wc -l <"$1/$SNAPSHOTS" 2>/dev/null | tr -d ' '; }
 
 # ---------------------------------------------------------------------------
 # 1. Both lanes get a target, from one run.
@@ -1060,6 +1143,217 @@ if [ "$seen" = 15 ]; then
 	report ok "a mistyped read timeout is normalized for co-resident callers (abc -> 15)"
 else
 	report FAIL "a mistyped read timeout is normalized for co-resident callers" "saw '${seen:-<none>}', wanted 15; out: $out"
+fi
+rm -rf "$city"
+
+# ---------------------------------------------------------------------------
+# 10. THE SIX-STAGE SNAPSHOT.
+#
+#    The order records the depth of every stage in the pipeline as one JSON
+#    line per cycle, so an operator can read back WHY a lane was scaled rather
+#    than taking the balancer's word for it.
+#
+#    Each clause below has a cheap wrong version that survives a happy-path
+#    read, so each is pinned against it:
+#
+#      ALL SIX, NOT THE THREE THE TARGETS NEEDED. A snapshot of the stages the
+#      clamp already measures would look complete on any single-stage assertion
+#      while leaving rework, validation and promotion permanently invisible —
+#      which is the exact shape this criterion was rejected for once already.
+#      One run asserts all six, with six DISTINCT depths so a field wired to
+#      the wrong stage cannot coincide with the right answer.
+#
+#      UNKNOWN IS NOT ZERO. A read that failed and a stage that is drained are
+#      opposite facts, and a snapshot that wrote 0 for both would be evidence
+#      of an idle factory every time the forge times out.
+#
+#      ONE LINE PER CYCLE, APPENDED. A file rewritten each cycle keeps no
+#      history, and a run that wrote several lines would make "per cycle"
+#      unreadable from the file.
+# ---------------------------------------------------------------------------
+
+# Six distinct depths, so no field can be wired to the wrong stage and still
+# read correctly: pool 7, review 3, rework 1, merge 2, validation 6, promote 5.
+city="$(new_city 7 9)"
+merge_queue "$city" 2 3 4 1
+printf '{"ahead_by":5}\n' >"$city/compare.json"
+printf '{"count":2}\n' >"$city/vc.json"
+printf '{"count":4}\n' >"$city/vj.json"
+printf 'BALANCER_RIGS="rigA"\n' >"$city/state/roster.conf"
+out="$(run_sweep "$city")"
+
+got=""
+for f in pool review rework merge validation promote; do
+	got="$got $f=$(snap_field "$city" rigA "$f")"
+done
+if [ "$got" = " pool=7 review=3 rework=1 merge=2 validation=6 promote=5" ]; then
+	report ok "one cycle snapshots all six stage depths (${got# })"
+else
+	report FAIL "one cycle snapshots all six stage depths" \
+		"got${got}; line: $(tail -n 1 "$city/$SNAPSHOTS" 2>&1); out: $out"
+fi
+
+# The three forge-side stages PARTITION one queue: the 4 approved drafts are in
+# none of them. A predicate counting drafts would push merge from 2 to 6.
+if [ "$(snap_field "$city" rigA merge)" = 2 ]; then
+	report ok "the snapshot's forge stages exclude drafts"
+else
+	report FAIL "the snapshot's forge stages exclude drafts" "merge=$(snap_field "$city" rigA merge)"
+fi
+
+# ONE line, and it must parse as ONE object — the artifact is JSONL, so a
+# pretty-printed object would be a file no line-oriented reader can consume.
+if [ "$(snap_lines "$city")" = 1 ] && tail -n 1 "$city/$SNAPSHOTS" | jq -e 'type=="object"' >/dev/null 2>&1; then
+	report ok "a cycle appends exactly one parseable JSON line"
+else
+	report FAIL "a cycle appends exactly one parseable JSON line" \
+		"lines=$(snap_lines "$city"); $(cat "$city/$SNAPSHOTS" 2>&1)"
+fi
+
+# The line names the bases it measured against. Without them a depth of 4 is
+# unattributable — the reader cannot tell which branch was four commits behind.
+if tail -n 1 "$city/$SNAPSHOTS" |
+	jq -e '.bases.review=="staging" and .bases.merge=="staging" and .bases.promote=="staging"' \
+		>/dev/null 2>&1 &&
+	tail -n 1 "$city/$SNAPSHOTS" | jq -e 'has("at")' >/dev/null 2>&1; then
+	report ok "the snapshot line carries its timestamp and the bases it measured"
+else
+	report FAIL "the snapshot line carries its timestamp and the bases it measured" \
+		"$(tail -n 1 "$city/$SNAPSHOTS" 2>&1)"
+fi
+
+# A second cycle APPENDS. A writer that truncated would keep no history at all,
+# and the depths that justified an earlier scaling decision would be gone.
+run_sweep "$city" >/dev/null 2>&1
+if [ "$(snap_lines "$city")" = 2 ]; then
+	report ok "a second cycle appends a second line rather than replacing the first"
+else
+	report FAIL "a second cycle appends a second line rather than replacing the first" \
+		"lines=$(snap_lines "$city")"
+fi
+rm -rf "$city"
+
+# UNKNOWN IS NOT ZERO, asserted from ONE run carrying both kinds of answer: the
+# two unreadable stages must be null while a genuinely empty queue is 0. A
+# snapshot collapsing them would pass every assertion above.
+city="$(new_city 0 0)"
+echo '[]' >"$city/merge_queue.json"
+: >"$city/compare_fail"
+: >"$city/validation_fail"
+printf 'BALANCER_RIGS="rigA"\n' >"$city/state/roster.conf"
+out="$(run_sweep "$city")"
+if [ "$(snap_field "$city" rigA promote)" = null ] &&
+	[ "$(snap_field "$city" rigA validation)" = null ] &&
+	[ "$(snap_field "$city" rigA merge)" = 0 ] &&
+	[ "$(snap_field "$city" rigA pool)" = 0 ]; then
+	report ok "an unreadable stage is null while a drained stage is 0"
+else
+	report FAIL "an unreadable stage is null while a drained stage is 0" \
+		"promote=$(snap_field "$city" rigA promote) validation=$(snap_field "$city" rigA validation) merge=$(snap_field "$city" rigA merge) pool=$(snap_field "$city" rigA pool); out: $out"
+fi
+
+# A cycle that could read almost nothing still records that it RAN. An absent
+# line and a line of nulls are identical on a dashboard, but "the order stopped"
+# and "the order can see nothing" want opposite responses.
+if [ "$(snap_lines "$city")" = 1 ]; then
+	report ok "a cycle whose reads failed still records a line"
+else
+	report FAIL "a cycle whose reads failed still records a line" "lines=$(snap_lines "$city")"
+fi
+rm -rf "$city"
+
+# HALF THE VALIDATION QUEUE IS NOT THE QUEUE. The two lanes partition the
+# awaiting-validation set, so one lane failing makes the total unknown, not
+# partial — an understated backlog reads as "nothing to validate", which is the
+# direction that silently stops the lane being staffed.
+city="$(new_city 1 1)"
+printf '{"count":3}\n' >"$city/vc.json"
+cat >"$city/bin/curl" <<'STUB'
+#!/bin/sh
+cat >/dev/null 2>&1
+for a in "$@"; do url="$a"; done
+case "$url" in
+*/pool*) cat "$GC_CITY/pool.json" ;;
+*validations*lane=contract*) cat "$GC_CITY/vc.json" ;;
+*validations*lane=judgment*) exit 1 ;;
+*/api/v1/projects) cat "$GC_CITY/projects.json" ;;
+*) exit 1 ;;
+esac
+STUB
+chmod +x "$city/bin/curl"
+printf 'BALANCER_RIGS="rigA"\n' >"$city/state/roster.conf"
+out="$(run_sweep "$city")"
+if [ "$(snap_field "$city" rigA validation)" = null ]; then
+	report ok "one unreadable validation lane makes the queue depth unknown, not partial"
+else
+	report FAIL "one unreadable validation lane makes the queue depth unknown, not partial" \
+		"validation=$(snap_field "$city" rigA validation); out: $out"
+fi
+rm -rf "$city"
+
+# THE OPT-IN GATE COVERS THE SNAPSHOT TOO. With BALANCER_RIGS unset the order
+# exits before it reads anything, so no snapshot file may appear either —
+# otherwise an unopted city is no longer byte-for-byte unchanged, and the order
+# would be making forge and API calls nobody asked for.
+#
+# BOTH DIRECTIONS FROM ONE FIXTURE, and that is the whole point of this case.
+# "unset writes no snapshot" passes trivially on a script that never writes a
+# snapshot at all — it cannot tell a correctly gated order from an unbuilt one.
+# So the same city is run twice: silent with BALANCER_RIGS unset, and writing
+# with it set. Only an order that is BOTH gated and implemented passes.
+city="$(new_city 5 5)"
+printf '# no BALANCER_RIGS\n' >"$city/state/roster.conf"
+out="$(run_sweep "$city")"
+gated_silent=0
+[ ! -e "$city/$SNAPSHOTS" ] && gated_silent=1
+
+printf 'BALANCER_RIGS="rigA"\n' >"$city/state/roster.conf"
+out2="$(run_sweep "$city")"
+gated_writes=0
+[ -s "$city/$SNAPSHOTS" ] && [ "$(snap_field "$city" rigA pool)" = 5 ] && gated_writes=1
+
+if [ "$gated_silent" = 1 ] && [ "$gated_writes" = 1 ]; then
+	report ok "BALANCER_RIGS gates the snapshot: silent when unset, written when set"
+else
+	report FAIL "BALANCER_RIGS gates the snapshot: silent when unset, written when set" \
+		"silent=$gated_silent writes=$gated_writes; out: $out / $out2"
+fi
+rm -rf "$city"
+
+# THE WRITER CARRIES ITS OWN BOUND. Nothing else prunes an append-only file, so
+# an order that creates one on a 5-minute cadence and never trims it has created
+# an unbounded disk leak. The retained tail must be the NEWEST lines: a trim
+# keeping the oldest would bound the file and discard the only cycles anyone
+# would ever look at.
+city="$(new_city 4 4)"
+printf 'BALANCER_RIGS="rigA"\nBALANCER_SNAPSHOT_KEEP="2"\n' >"$city/state/roster.conf"
+mkdir -p "$city/state"
+printf '{"at":"old-1","rigs":[]}\n{"at":"old-2","rigs":[]}\n{"at":"old-3","rigs":[]}\n' \
+	>"$city/$SNAPSHOTS"
+out="$(run_sweep "$city")"
+if [ "$(snap_lines "$city")" = 2 ] &&
+	! grep -q 'old-1' "$city/$SNAPSHOTS" 2>/dev/null &&
+	[ "$(snap_field "$city" rigA pool)" = 4 ]; then
+	report ok "the snapshot file is trimmed to BALANCER_SNAPSHOT_KEEP newest lines"
+else
+	report FAIL "the snapshot file is trimmed to BALANCER_SNAPSHOT_KEEP newest lines" \
+		"lines=$(snap_lines "$city"); $(cat "$city/$SNAPSHOTS" 2>&1)"
+fi
+rm -rf "$city"
+
+# THE SNAPSHOT IS A REPORT, NOT A DECISION. It must not disturb the targets the
+# clamp publishes: the two artifacts are read by different consumers, and a
+# measurement pass that could move a target would make the snapshot the
+# balancer's justification of itself rather than evidence about it.
+city="$(new_city 3 2)"
+printf 'BALANCER_RIGS="rigA"\n' >"$city/state/roster.conf"
+out="$(run_sweep "$city")"
+if [ "$(target_for "$city" brakeman)" = 3 ] && [ "$(target_for "$city" reviewer)" = 2 ] &&
+	[ -s "$city/$SNAPSHOTS" ]; then
+	report ok "the snapshot leaves the published targets unchanged"
+else
+	report FAIL "the snapshot leaves the published targets unchanged" \
+		"brakeman=$(target_for "$city" brakeman) reviewer=$(target_for "$city" reviewer); out: $out"
 fi
 rm -rf "$city"
 

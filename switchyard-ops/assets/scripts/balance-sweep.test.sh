@@ -211,6 +211,23 @@ merge_queue() {
 		>"$1/merge_queue.json"
 }
 
+# stray_temps <city> — every temp file the sweep could leave beside its state.
+#
+# ALL THREE are checked, not just the targets temp. Each is `mktemp "<file>.XXXXXX"`
+# against a state path, so they land in the state dir beside balancer.targets,
+# balancer.history and balancer.log rather than in /tmp — nothing else collects
+# them, and the paths that abandon a publish must clear all three before they
+# drop the trap. An assertion written against the targets temp alone would keep
+# passing while the other two accumulated, one pair per abandoned cycle.
+#
+# The live files carry no suffix, so a single-dot name never matches.
+stray_temps() {
+	find "$1/state" \
+		\( -name 'balancer.targets.*' \
+		   -o -name 'balancer.history.*' \
+		   -o -name 'balancer.log.*' \) 2>/dev/null
+}
+
 TARGETS="state/balancer.targets"
 
 # ---------------------------------------------------------------------------
@@ -300,11 +317,11 @@ city="$(new_city 5 5)"
 printf 'BALANCER_RIGS="rigA"\n' >"$city/state/roster.conf"
 printf 'version 1\ngenerated_at 1\ntarget rigA brakeman 99\n' >"$city/$TARGETS"
 out="$(run_sweep "$city")"
-strays="$(find "$city/state" -name 'balancer.targets.*' 2>/dev/null | wc -l | tr -d ' ')"
-if [ "$strays" = 0 ]; then
-	report ok "no temp file is left beside the targets file"
+strays="$(stray_temps "$city")"
+if [ -z "$strays" ]; then
+	report ok "no temp file is left beside the state files"
 else
-	report FAIL "no temp file is left beside the targets file" "$strays stray file(s)"
+	report FAIL "no temp file is left beside the state files" "stray: $strays"
 fi
 # A rewrite must fully REPLACE the previous generation, not append to it: two
 # targets for one (rig, lane) is a file whose meaning depends on read order.
@@ -699,6 +716,350 @@ if [ "$(target_for "$city" brakeman)" = 1 ]; then
 	report ok "backpressure clamps to the floor at once, bypassing the lower gate"
 else
 	report FAIL "backpressure clamps to the floor at once" "brakeman=$(target_for "$city" brakeman), expected 1"
+fi
+rm -rf "$city"
+
+# 9. EVERY EXTERNAL READ IS BOUNDED.
+#
+#    The order runs under gc's 60-second exec deadline, so one forge or
+#    controller read that never returns does not merely lose its own answer —
+#    it takes the whole cycle down, and the failure surfaces as a silent
+#    `order exec balance-sweep failed: context deadline exceeded` naming
+#    neither the read nor the rig.
+#
+#    Asserted ON THE CLOCK rather than by grepping the source for sy_timeout: a
+#    wrapper applied with an unusable timeout value matches the grep and still
+#    hangs. Each case makes one read hang far longer than the cycle could
+#    afford and asserts the sweep returns anyway — and that the OTHER lane's
+#    target still lands, so "bounded" cannot be satisfied by giving up wholesale.
+# ---------------------------------------------------------------------------
+city="$(new_city 3 4)"
+printf 'BALANCER_RIGS="rigA"\n' >"$city/state/roster.conf"
+# Answers the backpressure probe instantly and HANGS on the reviewer queue, so
+# the hang is attributable to exactly one read.
+cat >"$city/bin/gh" <<'STUB'
+#!/bin/sh
+for a in "$@"; do
+	case "$a" in
+	*reviewDecision*) echo '[]'; exit 0 ;;
+	esac
+done
+sleep 20
+STUB
+chmod +x "$city/bin/gh"
+t0="$(date +%s)"
+out="$(run_sweep "$city" env BALANCER_READ_TIMEOUT=3 BALANCE_SWEEP_BUDGET_SECONDS=30)"
+elapsed=$(($(date +%s) - t0))
+if [ "$elapsed" -lt 12 ]; then
+	report ok "a hanging reviewer-queue read is cut off well inside the cycle (${elapsed}s)"
+else
+	report FAIL "a hanging reviewer-queue read is cut off well inside the cycle" "took ${elapsed}s; out: $out"
+fi
+# The bound must cost only the unreadable lane. A sweep that answered the hang
+# by publishing nothing would pass the clock assertion above while making the
+# timeout indistinguishable from an outage.
+if [ "$(target_for "$city" brakeman)" = 3 ]; then
+	report ok "a bounded-out reviewer read still leaves the brakeman target published"
+else
+	report FAIL "a bounded-out reviewer read still leaves the brakeman target published" "brakeman=$(target_for "$city" brakeman); out: $out"
+fi
+rm -rf "$city"
+
+# The controller read is fetched once per cycle before the rig loop, so a hang
+# there strands the sweep before any lane is even considered.
+city="$(new_city 3 4)"
+printf 'BALANCER_RIGS="rigA"\n' >"$city/state/roster.conf"
+cat >"$city/bin/gc" <<'STUB'
+#!/bin/sh
+case "$1 $2" in
+"agent list") sleep 20 ;;
+"mail send") printf 'MAIL\n' >>"$GC_CITY/mailed.log" ;;
+esac
+exit 0
+STUB
+chmod +x "$city/bin/gc"
+t0="$(date +%s)"
+out="$(run_sweep "$city" env BALANCER_READ_TIMEOUT=3 BALANCE_SWEEP_BUDGET_SECONDS=30)"
+elapsed=$(($(date +%s) - t0))
+if [ "$elapsed" -lt 12 ]; then
+	report ok "a hanging controller roster read is cut off well inside the cycle (${elapsed}s)"
+else
+	report FAIL "a hanging controller roster read is cut off well inside the cycle" "took ${elapsed}s; out: $out"
+fi
+# Capacity is the cap a target may never exceed, so an unreadable roster must
+# publish no target at all rather than an unbounded one.
+if [ -z "$(target_for "$city" brakeman)" ] && [ -z "$(target_for "$city" reviewer)" ]; then
+	report ok "a bounded-out roster read publishes no target for either lane"
+else
+	report FAIL "a bounded-out roster read publishes no target for either lane" "$(cat "$city/$TARGETS" 2>&1)"
+fi
+rm -rf "$city"
+
+# ---------------------------------------------------------------------------
+# 10. AN OVER-BUDGET CYCLE WRITES NO TARGETS AND SAYS WHAT IT SKIPPED.
+#
+#     Bounding each read individually is not enough: several bounded reads can
+#     still sum past the runner's deadline. The pass therefore carries its own
+#     budget, deliberately inside that deadline, and checks it can AFFORD a
+#     read before starting one — the same shape as pool-spawn's
+#     POOL_SPAWN_BUDGET_SECONDS and lane-ensure's LANE_SWEEP_BUDGET_SECONDS.
+#
+#     THE PUBLISH IS ABANDONED WHOLESALE, not truncated. Targets accumulate in
+#     the temp file as each lane is measured, so a cycle that stopped early and
+#     published anyway would ship a PARTIAL generation — and a missing lane
+#     line means "fall back to city.toml", so a partial file silently un-scales
+#     every lane it did not reach. Leaving the previous generation in place is
+#     the strictly better answer, and it is what "writes no targets" means.
+#
+#     Pinned in BOTH directions: a script that simply never published would
+#     pass the over-budget case on its own.
+# ---------------------------------------------------------------------------
+
+# THE CLOCK THESE CASES MEASURE IS THE FIXTURE'S, NOT THE BOX'S.
+#
+# sy_affords N reduces to `elapsed <= BUDGET - N`, so a budget tight enough to
+# be exhausted mid-rig leaves only a second or two of margin — and every read
+# the script makes BEFORE the rig loop (`gc agent list`, the token and projects
+# fetches, three mktemps) is charged against that margin without being gated by
+# it. On a loaded box those cross a `date +%s` boundary on their own, the RIG
+# gate at the top of the loop fires before the LANE gate inside it, and the run
+# reports `rigA(budget)` where the assertion below wants `rigA/reviewer(budget)`.
+# The case then measures how busy the box is rather than what the script does.
+#
+# So the clock is frozen and handed to the stubs. Every affordability decision
+# in the sweep funnels through ONE reader, sy_now, which is `date +%s` — so a
+# `date` stub on PATH is enough to make elapsed advance only where a fixture
+# says it does. That is also why slow_pool_read below no longer sleeps: the
+# subject of these cases is the budget arithmetic, and a real sleep only puts
+# the scheduler back inside the assertion it was removed from.
+
+# fake_clock <city> — freeze `date +%s` at a fixed epoch plus whatever the
+# stubs have charged to $GC_CITY/clock. Non-+%s calls fall through to the real
+# date, so nothing else in the harness changes shape.
+fake_clock() {
+	printf '0\n' >"$1/clock"
+	cat >"$1/bin/date" <<'STUB'
+#!/bin/sh
+case "$1" in
++%s)
+	_e=0
+	[ -r "$GC_CITY/clock" ] && _e="$(cat "$GC_CITY/clock")"
+	printf '%s\n' "$(( 1787000000 + _e ))"
+	;;
+*) exec /bin/date "$@" ;;
+esac
+STUB
+	chmod +x "$1/bin/date"
+}
+
+# slow_pool_read <city> <seconds> — make the brakeman demand read cost SECONDS
+# of the cycle's budget, so a tight budget is exhausted partway through the rig
+# rather than at its edge. Charges the frozen clock rather than sleeping, so the
+# read costs exactly what it claims to. Requires fake_clock on the same city.
+slow_pool_read() {
+	printf '%s\n' "$2" >"$1/slow_cost"
+	cat >"$1/bin/curl" <<'STUB'
+#!/bin/sh
+cat >/dev/null 2>&1
+for a in "$@"; do url="$a"; done
+case "$url" in
+*/pool*)
+	_e=0
+	[ -r "$GC_CITY/clock" ] && _e="$(cat "$GC_CITY/clock")"
+	_c=0
+	[ -r "$GC_CITY/slow_cost" ] && _c="$(cat "$GC_CITY/slow_cost")"
+	printf '%s\n' "$(( _e + _c ))" >"$GC_CITY/clock"
+	cat "$GC_CITY/pool.json"
+	;;
+*/api/v1/projects) cat "$GC_CITY/projects.json" ;;
+*) exit 1 ;;
+esac
+STUB
+	chmod +x "$1/bin/curl"
+}
+
+city="$(new_city 3 4)"
+printf 'BALANCER_RIGS="rigA"\n' >"$city/state/roster.conf"
+fake_clock "$city"
+slow_pool_read "$city" 2
+# A previous generation the consumers are already reading. It must survive an
+# over-budget cycle byte-for-byte.
+printf 'version 1\ngenerated_at 1\ntarget rigA brakeman 42\n' >"$city/$TARGETS"
+before="$(cat "$city/$TARGETS")"
+out="$(run_sweep "$city" env BALANCER_READ_TIMEOUT=3 BALANCE_SWEEP_BUDGET_SECONDS=4)"
+if [ "$(cat "$city/$TARGETS")" = "$before" ]; then
+	report ok "an over-budget cycle leaves the previous targets generation untouched"
+else
+	report FAIL "an over-budget cycle leaves the previous targets generation untouched" "$(cat "$city/$TARGETS" 2>&1)"
+fi
+# "self-reports which stages it skipped" — the stage must be NAMED, because the
+# whole point is to replace a deadline kill that named nothing.
+case "$out" in
+*rigA/reviewer*) report ok "an over-budget cycle names the stage it skipped" ;;
+*) report FAIL "an over-budget cycle names the stage it skipped" "out: $out" ;;
+esac
+case "$out" in
+*budget*) report ok "an over-budget cycle says the budget is why it stopped" ;;
+*) report FAIL "an over-budget cycle says the budget is why it stopped" "out: $out" ;;
+esac
+strays="$(stray_temps "$city")"
+if [ -z "$strays" ]; then
+	report ok "an abandoned publish leaves no temp file behind"
+else
+	report FAIL "an abandoned publish leaves no temp file behind" "stray: $strays"
+fi
+rm -rf "$city"
+
+# THE CONVERSE. The same slow read inside a budget that affords it publishes
+# normally — otherwise a balancer that had simply stopped working would satisfy
+# every assertion above.
+city="$(new_city 3 4)"
+printf 'BALANCER_RIGS="rigA"\n' >"$city/state/roster.conf"
+fake_clock "$city"
+slow_pool_read "$city" 2
+printf 'version 1\ngenerated_at 1\ntarget rigA brakeman 42\n' >"$city/$TARGETS"
+out="$(run_sweep "$city" env BALANCER_READ_TIMEOUT=3 BALANCE_SWEEP_BUDGET_SECONDS=30)"
+if [ "$(target_for "$city" brakeman)" = 3 ] && [ "$(target_for "$city" reviewer)" = 4 ]; then
+	report ok "a cycle that fits its budget publishes both lanes as usual"
+else
+	report FAIL "a cycle that fits its budget publishes both lanes as usual" "$(cat "$city/$TARGETS" 2>&1); out: $out"
+fi
+rm -rf "$city"
+
+# 0 DISABLES THE CAP for hand-run debugging, matching POOL_SPAWN_BUDGET_SECONDS.
+# Were 0 treated as a budget rather than as "off", affording any read at all
+# would be impossible and the sweep would publish nothing for ever.
+city="$(new_city 3 4)"
+printf 'BALANCER_RIGS="rigA"\n' >"$city/state/roster.conf"
+fake_clock "$city"
+slow_pool_read "$city" 2
+out="$(run_sweep "$city" env BALANCER_READ_TIMEOUT=3 BALANCE_SWEEP_BUDGET_SECONDS=0)"
+if [ "$(target_for "$city" brakeman)" = 3 ] && [ "$(target_for "$city" reviewer)" = 4 ]; then
+	report ok "a budget of 0 disables the cap and publishes normally"
+else
+	report FAIL "a budget of 0 disables the cap and publishes normally" "$(cat "$city/$TARGETS" 2>&1); out: $out"
+fi
+rm -rf "$city"
+
+# ---------------------------------------------------------------------------
+# 11. A BUDGET THAT CANNOT AFFORD ONE READ IS A CONFIG FAULT, AND FAULTS FAIL.
+#
+#     A read timeout above the whole cycle budget means no read is ever
+#     affordable, so the sweep would skip every stage and publish nothing on
+#     every cycle — a balancer that is silently off while reading as healthy.
+#     This runs under the order runner, where exit 0 with no publish is
+#     indistinguishable from a quiet cycle, so the fault is made loud rather
+#     than left to look like load. Same rule as pool-spawn's config faults.
+# ---------------------------------------------------------------------------
+city="$(new_city 3 4)"
+printf 'BALANCER_RIGS="rigA"\n' >"$city/state/roster.conf"
+printf 'version 1\ngenerated_at 1\ntarget rigA brakeman 42\n' >"$city/$TARGETS"
+before="$(cat "$city/$TARGETS")"
+out="$(run_sweep "$city" env BALANCER_READ_TIMEOUT=9 BALANCE_SWEEP_BUDGET_SECONDS=4)"
+rc=$?
+if [ "$rc" -ne 0 ]; then
+	report ok "a read timeout above the cycle budget fails the cycle instead of idling"
+else
+	report FAIL "a read timeout above the cycle budget fails the cycle instead of idling" "rc=$rc; out: $out"
+fi
+case "$out" in
+*"config fault"*) report ok "the config fault says what is wrong" ;;
+*) report FAIL "the config fault says what is wrong" "out: $out" ;;
+esac
+if [ "$(cat "$city/$TARGETS")" = "$before" ]; then
+	report ok "a refused cycle leaves the previous targets generation untouched"
+else
+	report FAIL "a refused cycle leaves the previous targets generation untouched" "$(cat "$city/$TARGETS" 2>&1)"
+fi
+rm -rf "$city"
+
+# ---------------------------------------------------------------------------
+# 12. A MALFORMED CLOCK KNOB FALLS BACK; IT DOES NOT ABORT THE CYCLE.
+#
+#     The same rule the backpressure threshold already follows — a typo in a
+#     tuning knob must not take a lane down — but it bites harder here, because
+#     these two values are used in ARITHMETIC. A leading zero is the sharp case:
+#     `test -gt` reads 08 as decimal 8 and happily passes it along, while
+#     $(( )) reads it as octal and 08 is not valid octal. So a knob that looks
+#     merely odd does not degrade the cycle, it aborts it mid-loop — the exact
+#     silent death the budget exists to replace.
+# ---------------------------------------------------------------------------
+city="$(new_city 3 4)"
+printf 'BALANCER_RIGS="rigA"\n' >"$city/state/roster.conf"
+out="$(run_sweep "$city" env BALANCER_READ_TIMEOUT=08 BALANCE_SWEEP_BUDGET_SECONDS=045)"
+if [ "$(target_for "$city" brakeman)" = 3 ] && [ "$(target_for "$city" reviewer)" = 4 ]; then
+	report ok "leading-zero clock knobs fall back to defaults and still publish"
+else
+	report FAIL "leading-zero clock knobs fall back to defaults and still publish" "$(cat "$city/$TARGETS" 2>&1); out: $out"
+fi
+case "$out" in
+*arithmetic* | *"not valid"* | *"value too great"*)
+	report FAIL "a malformed clock knob raises no arithmetic error" "out: $out" ;;
+*) report ok "a malformed clock knob raises no arithmetic error" ;;
+esac
+# And the fallback is reported, not silent — the operator must learn the knob
+# they set is not the one in force.
+case "$out" in
+*read-timeout*malformed*) report ok "a malformed read timeout is named in the report" ;;
+*) report FAIL "a malformed read timeout is named in the report" "out: $out" ;;
+esac
+rm -rf "$city"
+
+# An out-of-range read timeout is the same class: sy_timeout refuses anything
+# past 3600 and would fail EVERY read, so the knob falls back rather than
+# silently blinding the pass.
+city="$(new_city 3 4)"
+printf 'BALANCER_RIGS="rigA"\n' >"$city/state/roster.conf"
+out="$(run_sweep "$city" env BALANCER_READ_TIMEOUT=99999)"
+if [ "$(target_for "$city" brakeman)" = 3 ] && [ "$(target_for "$city" reviewer)" = 4 ]; then
+	report ok "an out-of-range read timeout falls back rather than failing every read"
+else
+	report FAIL "an out-of-range read timeout falls back rather than failing every read" "$(cat "$city/$TARGETS" 2>&1); out: $out"
+fi
+rm -rf "$city"
+
+# --- the validated read timeout reaches a caller reading the roster knob's name
+#
+# THE MEASUREMENT PASS IS NOT ONE FUNCTION. The sibling six-stage snapshot pass
+# (crit:29c92346d300, unmerged as this lands) bounds its own forge reads as
+# `sy_timeout "$BALANCER_READ_TIMEOUT"` — the roster knob's own name — while
+# this pass resolves that knob through sy_read_timeout into READ_TIMEOUT.
+# sy_timeout treats an empty or non-numeric bound as unusable and returns 124
+# WITHOUT running the command, so a knob left unset or mistyped would silently
+# refuse every read in the other pass rather than bounding it. "Every external
+# read carries a bounded timeout" is a property of the whole pass, so the
+# validated value is published back under the name those callers already use.
+#
+# WHAT THIS CASE CAN SEE, AND WHAT IT CANNOT. Those sibling call sites are in
+# the same SHELL as the assignment, so the plain assignment is what binds them
+# and the export is belt-and-braces. But nothing in the tree reads the knob
+# in-shell until that criterion merges, so the in-shell binding has no observer
+# yet: a stub can only report the value it was handed as a CHILD, which is the
+# export half. What that still proves is the half this case is named for — that
+# the value published under the roster name is the NORMALIZED one (abc -> 15)
+# and not the raw knob — because both halves publish the same value from the
+# same line. When the sibling lands it brings the in-shell observer with it, and
+# this case should be pointed at that instead of at the stub.
+city="$(new_city 3 2)"
+printf 'BALANCER_RIGS="rigA"\n' >"$city/state/roster.conf"
+cat >"$city/bin/gh" <<'STUB'
+#!/bin/sh
+# Records the bound a co-resident caller would see, then answers as usual.
+printf '%s\n' "${BALANCER_READ_TIMEOUT-<unset>}" >>"$GC_CITY/seen_bound"
+for a in "$@"; do
+	case "$a" in
+	*reviewDecision*) cat "$GC_CITY/merge_queue.json"; exit 0 ;;
+	esac
+done
+cat "$GC_CITY/queue.json"
+STUB
+chmod +x "$city/bin/gh"
+out="$(run_sweep "$city" env BALANCER_READ_TIMEOUT=abc BALANCE_SWEEP_BUDGET_SECONDS=30)"
+seen="$(head -n1 "$city/seen_bound" 2>/dev/null)"
+if [ "$seen" = 15 ]; then
+	report ok "a mistyped read timeout is normalized for co-resident callers (abc -> 15)"
+else
+	report FAIL "a mistyped read timeout is normalized for co-resident callers" "saw '${seen:-<none>}', wanted 15; out: $out"
 fi
 rm -rf "$city"
 

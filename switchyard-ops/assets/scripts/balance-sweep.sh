@@ -12,9 +12,14 @@
 #
 # WHAT THIS PASS OWNS, and what it deliberately does not. It computes and
 # publishes. It does not spawn: the spawn sites honour the file beneath their
-# own city.toml ceiling, and the hysteresis and cycle-budget rules are sibling
-# criteria layered on top. Keeping the publish step ignorant of them is what
-# lets a consumer treat this file as advisory data rather than as a command.
+# own city.toml ceiling, and the hysteresis rule is a sibling criterion layered
+# on top. Keeping the publish step ignorant of it is what lets a consumer treat
+# this file as advisory data rather than as a command.
+#
+# IT ALSO OWNS ITS OWN CLOCK. gc gives an order 60 seconds, and this pass makes
+# several forge and controller reads per rig, so it bounds each read AND keeps a
+# whole-cycle budget inside that deadline. A cycle that cannot finish abandons
+# its publish and names the stages it never measured — see THE CYCLE BUDGET.
 #
 # BACKPRESSURE IS THE ONE PLACE A DOWNSTREAM STAGE REACHES BACK. merge-lane and
 # staging-promote are serial BY DESIGN — each merge moves the base under every
@@ -62,11 +67,29 @@ DEFAULT_FLOOR=0
 # stage can absorb it. 0 switches backpressure off entirely.
 DEFAULT_BACKPRESSURE=6
 
-# The `gh` reads have no bound of their own — the switchyard reads carry curl's
-# inside sy_api_get. Same name and default as the sibling measurement pass, so
-# an operator retuning read patience moves both rather than discovering a
-# second knob.
-BALANCER_READ_TIMEOUT="${BALANCER_READ_TIMEOUT:-15}"
+# How long any ONE external read may take. The `gh` and `gc` reads are wrapped
+# in sy_timeout with it; the switchyard reads carry curl's own equivalent inside
+# sy_api_get. Same name and default as the sibling measurement pass, so an
+# operator retuning read patience moves both rather than discovering a second
+# knob.
+DEFAULT_READ_TIMEOUT=15
+
+# THE CYCLE BUDGET. gc kills an order at 60 seconds, and bounding each read
+# individually does not bound their SUM: one rig costs a backpressure probe plus
+# a demand read per lane, and several rigs multiply that. Without a whole-cycle
+# bound the pass dies mid-loop and the operator sees only
+# `order exec balance-sweep failed: context deadline exceeded` — naming neither
+# the rig nor the read, which is the condition this budget exists to replace.
+#
+# 45 sits deliberately inside the 60s deadline. Affordability is checked as
+# elapsed + DEFAULT_READ_TIMEOUT <= budget, NOT as elapsed <= budget, so the
+# budget bounds where a read may END rather than where it may begin: the last
+# affordable start is 45 - 15 = 30s, and a read taken there runs its bound to
+# 45s. The worst case is therefore the budget itself, leaving the remaining 15s
+# as headroom under the deadline — raising the budget toward 60 spends exactly
+# that headroom. 0 disables the cap for hand-run debugging, matching
+# POOL_SPAWN_BUDGET_SECONDS.
+DEFAULT_BUDGET=45
 
 # HYSTERESIS: how many CONSECUTIVE cycles a demand signal must persist before
 # the target it asks for is actually published. Raising is cheap and reversible;
@@ -165,6 +188,79 @@ sy_backpressure_malformed() {
   esac
 }
 
+# sy_read_timeout / sy_cycle_budget — the two clock knobs, validated.
+#
+# Split accessor + _malformed predicate, exactly as the backpressure knob is:
+# the fallback stays silent in the computation and loud in the report, because
+# a typo in a tuning knob must not take a lane down.
+#
+# VALIDATION IS LOAD-BEARING HERE, not hygiene. sy_affords does ARITHMETIC on
+# both values, and the failure is not a bad answer, it is an aborted cycle:
+# $(( )) on a non-numeric string is a fatal shell error, and a LEADING ZERO is
+# the case that actually reaches production. `test -gt` reads 08 as decimal 8
+# and passes it happily along; $(( )) reads it as octal, where 08 does not
+# exist. So a knob that merely looks odd kills the pass mid-loop — the exact
+# silent death this budget exists to replace. sy_timeout and pool-spawn's
+# sy_pool_bounded_uint reject 0[0-9]* for this same reason.
+#
+# The upper bound is sy_timeout's own: it refuses anything past 3600, so a
+# larger value would not stretch read patience, it would fail EVERY read and
+# blind the pass while looking like a forge outage.
+sy_bounded_secs() { # VALUE MIN — echoes VALUE when usable, else nothing
+  case "$1" in '' | *[!0-9]* | 0[0-9]*) return 1 ;; esac
+  [ "$1" -ge "$2" ] 2>/dev/null || return 1
+  [ "$1" -le 3600 ] 2>/dev/null || return 1
+  printf '%s' "$1"
+}
+
+# Minimum 1: sy_timeout treats 0 as unusable and returns 124, so a read timeout
+# of 0 would fail every read rather than disable the bound.
+sy_read_timeout() {
+  sy_bounded_secs "${BALANCER_READ_TIMEOUT:-}" 1 ||
+    printf '%s' "$DEFAULT_READ_TIMEOUT"
+}
+
+sy_read_timeout_malformed() {
+  [ -n "${BALANCER_READ_TIMEOUT:-}" ] || return 1
+  sy_bounded_secs "${BALANCER_READ_TIMEOUT:-}" 1 >/dev/null && return 1
+  return 0
+}
+
+# Minimum 0, because unlike the read timeout 0 is a legitimate setting here: it
+# disables the cap. (0 does not match 0[0-9]*, which needs a second digit.)
+sy_cycle_budget() {
+  sy_bounded_secs "${BALANCE_SWEEP_BUDGET_SECONDS:-}" 0 ||
+    printf '%s' "$DEFAULT_BUDGET"
+}
+
+sy_cycle_budget_malformed() {
+  [ -n "${BALANCE_SWEEP_BUDGET_SECONDS:-}" ] || return 1
+  sy_bounded_secs "${BALANCE_SWEEP_BUDGET_SECONDS:-}" 0 >/dev/null && return 1
+  return 0
+}
+
+# sy_now — current Unix time, or 0 when the clock is unreadable.
+sy_now() { date +%s 2>/dev/null || printf '0'; }
+
+# sy_affords SECONDS — can this cycle still start a stage that may cost SECONDS?
+#
+# Asks about STARTING work rather than about having overspent, which is the
+# distinction that makes the budget fit the deadline: a 15s read begun at second
+# 44 of a 45s budget is not over budget when it starts and is dead at the
+# runner's deadline when it ends. Checking affordability up front is what keeps
+# the cycle inside 60s rather than merely noticing afterwards that it was not.
+#
+# FAILS TOWARD "ALLOWED" on a disabled cap or an unreadable clock, matching
+# pool-spawn's sy_pool_budget_allows: a balancer that stopped measuring because
+# `date` hiccuped would be a worse outage than the one this guards.
+sy_affords() {
+  [ "$BUDGET" -gt 0 ] || return 0
+  [ "$CYCLE_STARTED" -gt 0 ] || return 0
+  _aff_now="$(sy_now)"
+  [ "$_aff_now" -gt 0 ] || return 0
+  [ "$(( _aff_now - CYCLE_STARTED + $1 ))" -le "$BUDGET" ]
+}
+
 # ---------------------------------------------------------------------------
 # Capacity
 # ---------------------------------------------------------------------------
@@ -243,7 +339,7 @@ sy_rig_slug() {
 # withdraw backpressure at exactly the moment the forge is struggling.
 sy_merge_backlog() {
   _mb_slug="$(sy_rig_slug "$1")" || return 1
-  _mb_body="$(sy_timeout "$BALANCER_READ_TIMEOUT" gh pr list --repo "$_mb_slug" \
+  _mb_body="$(sy_timeout "$READ_TIMEOUT" gh pr list --repo "$_mb_slug" \
     --base "$BALANCER_MERGE_BASE" --state open \
     --json number,isDraft,reviewDecision --limit 100 2>/dev/null)"
   printf '%s' "$_mb_body" | jq -e 'type=="array"' >/dev/null 2>&1 || return 1
@@ -266,7 +362,7 @@ sy_merge_backlog() {
 # lane to its floor.
 sy_demand_reviewer() {
   _dr_slug="$(sy_rig_slug "$1")" || return 1
-  _dr_body="$(gh pr list --repo "$_dr_slug" \
+  _dr_body="$(sy_timeout "$READ_TIMEOUT" gh pr list --repo "$_dr_slug" \
     --base "${REVIEW_LANE_BASE:-staging}" --state open \
     --json number --limit 100 2>/dev/null)"
   printf '%s' "$_dr_body" | jq -e 'type=="array"' >/dev/null 2>&1 || return 1
@@ -356,6 +452,71 @@ sy_load_conf
 # discussion when an operator retunes one.
 BALANCER_MERGE_BASE="${BALANCER_MERGE_BASE:-${MERGE_LANE_BASE:-staging}}"
 BACKPRESSURE="$(sy_backpressure)"
+READ_TIMEOUT="$(sy_read_timeout)"
+BUDGET="$(sy_cycle_budget)"
+
+# WHETHER THE OPERATOR MISTYPED IT IS CAPTURED HERE, BEFORE THE VALUE IS
+# NORMALIZED BELOW, because the two are different questions asked of the same
+# name: the diagnostic reports what was TYPED, the bound is what is in force.
+# Reading the raw knob later would answer the first question with the second
+# and silently delete the note telling an operator their value was rejected.
+if sy_read_timeout_malformed; then
+  READ_TIMEOUT_MALFORMED=1
+else
+  READ_TIMEOUT_MALFORMED=0
+fi
+
+# THE VALIDATED BOUND IS PUBLISHED BACK UNDER THE KNOB'S OWN NAME, and as early
+# as possible — before ANY stage runs, not merely before this pass's own loop.
+#
+# THE CALLER THIS SERVES IS NOT IN THE TREE YET. The sibling six-stage snapshot
+# (crit:29c92346d300, branch prd-397-29c92346d300-six-stage-snapshot) bounds its
+# forge reads as `sy_timeout "$BALANCER_READ_TIMEOUT"` — the roster knob's own
+# name — from its own call sites in THIS file, further down. That criterion is
+# unmerged as this lands, so grepping the tree for those call sites finds only
+# this comment and its twin in the test: the shim is live-but-unexercised until
+# that branch arrives, not dead. Said plainly because the alternative reading —
+# that the shim is already load-bearing — is the one a reader would reach for.
+#
+# sy_timeout treats an empty or non-numeric bound as unusable and returns 124
+# WITHOUT running the command, so an unset or mistyped knob would not loosen
+# those reads, it would REFUSE them: the stages they feed would report unknown
+# on every cycle while the sweep looked healthy. Normalizing at the point the
+# bound is decided keeps "every external read carries a bounded timeout" true of
+# the whole pass however the passes are later ordered.
+#
+# KEEPING BOTH NAMES IS THE CHOICE, not a merge artifact. After the sibling
+# lands this file holds READ_TIMEOUT (this pass's internal name) and
+# BALANCER_READ_TIMEOUT (the roster knob callers name), both live and kept equal
+# here. The alternative — have the sibling adopt READ_TIMEOUT when it rebases
+# and drop this line — couples a co-resident pass to an internal name it has no
+# reason to know, and would silently unbind its reads the day that name changes.
+# One line of aliasing is the cheaper half of that trade.
+#
+# THE ASSIGNMENT IS THE LOAD-BEARING HALF: those call sites are in this same
+# shell, so the plain assignment is what binds them. The export adds only
+# descendants that shell out — no current child reads this knob, so it is
+# belt-and-braces rather than the mechanism.
+BALANCER_READ_TIMEOUT="$READ_TIMEOUT"
+export BALANCER_READ_TIMEOUT
+
+# A READ TIMEOUT ABOVE THE WHOLE BUDGET IS A CONFIG FAULT, and a fault must FAIL
+# rather than slip out as a quiet success. No read would ever be affordable, so
+# every stage would be skipped and no target published — on every cycle, for
+# ever. Under the order runner an exit 0 with no publish is indistinguishable
+# from a healthy quiet cycle, so a silent exit here would park the balancer with
+# nothing to escalate. Same rule, and the same reasoning, as pool-spawn's config
+# faults. Checked BEFORE the temp file exists, so a refused cycle cannot disturb
+# the generation the consumers are already reading.
+if [ "$BUDGET" -gt 0 ] && [ "$READ_TIMEOUT" -gt "$BUDGET" ]; then
+  printf 'balance-sweep: config fault: BALANCER_READ_TIMEOUT (%ss) exceeds BALANCE_SWEEP_BUDGET_SECONDS (%ss) — no read could ever fit the cycle budget, so no target could ever be published; refusing to run\n' \
+    "$READ_TIMEOUT" "$BUDGET" >&2
+  exit 1
+fi
+
+# Started before the first read, so every external read this cycle makes is
+# inside the budget it is measured against.
+CYCLE_STARTED="$(sy_now)"
 
 STATE="$(sy_state_dir)"
 mkdir -p "$STATE" 2>/dev/null || :
@@ -366,7 +527,7 @@ LOG="$STATE/balancer.log"
 # Fetched ONCE per cycle, not per rig: it is a gc invocation, and re-reading it
 # per rig would also let a mid-cycle roster change answer differently for two
 # rigs in the same sweep.
-AGENTS="$(gc agent list --json 2>/dev/null)"
+AGENTS="$(sy_timeout "$READ_TIMEOUT" gc agent list --json 2>/dev/null)"
 TOKEN="$(sy_api_token 2>/dev/null)"
 PROJECTS="$(sy_api_projects "$TOKEN" 2>/dev/null)"
 
@@ -388,6 +549,13 @@ decided=""
 # Re-reading the clock for the log would let an entry name a generation that was
 # never published, which is precisely the correlation the citation exists for.
 CYCLE="$(date +%s)"
+
+# Stages the budget stopped this cycle from measuring. Kept apart from `notes`
+# because they mean something categorically different: a note reports a stage
+# that WAS measured and could not be read, while this reports one that was never
+# attempted — and only the latter abandons the publish.
+skipped=""
+over_budget=0
 {
   printf 'version 1\n'
   printf 'generated_at %s\n' "$CYCLE"
@@ -397,7 +565,25 @@ if sy_backpressure_malformed; then
   notes="$notes backpressure(malformed,using-$BACKPRESSURE)"
 fi
 
+if [ "$READ_TIMEOUT_MALFORMED" = 1 ]; then
+  notes="$notes read-timeout(malformed,using-$READ_TIMEOUT)"
+fi
+
+if sy_cycle_budget_malformed; then
+  notes="$notes cycle-budget(malformed,using-$BUDGET)"
+fi
+
 for rig in $BALANCER_RIGS; do
+  # THE RIG'S FIRST READ IS THE BACKPRESSURE PROBE, so the whole rig is gated
+  # here rather than at that probe. `continue` and not `break`: every remaining
+  # rig fails this same check, and naming each one is the difference between a
+  # report an operator can act on and a truncated list they have to guess past.
+  if ! sy_affords "$READ_TIMEOUT"; then
+    over_budget=1
+    skipped="$skipped $rig(budget)"
+    continue
+  fi
+
   project="$(sy_project_for_rig "$rig" "$PROJECTS" 2>/dev/null)" || project=""
 
   # THE BACKPRESSURE DECISION, made once per rig. It is a property of the stage
@@ -447,6 +633,15 @@ for rig in $BALANCER_RIGS; do
       case "$lane" in brakeman | reviewer) : ;; *) continue ;; esac
       demand="$floor"
     else
+      # Gated only on THIS branch. A throttled lane takes its floor without
+      # reading anything, so charging it against a read budget would skip work
+      # that costs nothing — and would do it precisely when the factory is
+      # already under strain.
+      if ! sy_affords "$READ_TIMEOUT"; then
+        over_budget=1
+        skipped="$skipped $rig/$lane(budget)"
+        continue
+      fi
       case "$lane" in
         brakeman)
           [ -n "$project" ] || { notes="$notes $rig(unbound)"; continue; }
@@ -540,6 +735,38 @@ for rig in $BALANCER_RIGS; do
     fi
   done
 done
+
+# AN OVER-BUDGET CYCLE PUBLISHES NOTHING. Targets accumulate in the temp file
+# lane by lane, so a cycle that stopped early and published anyway would ship a
+# PARTIAL generation — and to a consumer a missing lane line does not read as
+# "unknown", it reads as "fall back to your city.toml ceiling". A truncated file
+# would therefore silently un-scale every lane the cycle never reached, which is
+# a louder change than publishing nothing at all. The previous generation stands
+# instead, and goes stale on its own timestamp if this repeats.
+#
+# Over budget means at least one stage was SKIPPED: the flag is set only where a
+# stage was passed over, never merely because the clock ran on. A cycle that
+# measured every stage publishes, however long it took — there is nothing left
+# it could have skipped, and the publish itself is a rename.
+#
+# THE STREAK HISTORY IS LEFT EXACTLY AS IT WAS, for the same reason. $HIST is
+# only ever replaced by the rename below, so abandoning here leaves the previous
+# generation's streaks standing whole — which is what the hysteresis gate wants:
+# a cycle that measured nothing is not evidence that demand moved, and letting it
+# reset the streaks would reopen the gate on a reading that never happened.
+#
+# CHECKED BEFORE THE CARRY-FORWARD BELOW, so an abandoned cycle does not spend
+# the pass rebuilding a history it is about to delete. $HTMP and $LTMP are
+# removed here with $TMP: the trap is cleared on the next line, so anything left
+# behind would be left for good, beside $HIST and $LOG in the state dir rather
+# than in /tmp. An over-budget cycle is by definition the repeating condition.
+if [ "$over_budget" = 1 ]; then
+  rm -f "$TMP" "$HTMP" "$LTMP" 2>/dev/null
+  trap - EXIT INT TERM
+  printf 'balance-sweep: hit its %ss cycle budget and published no targets — the previous generation stands. Not measured:%s. This bound belongs to the order itself and sits deliberately inside the 60s gc order-exec deadline, so this notice replaces the silent "order exec balance-sweep failed: context deadline exceeded" that would otherwise name neither rig nor read. Raise BALANCE_SWEEP_BUDGET_SECONDS, lower BALANCER_READ_TIMEOUT, or investigate which read is slow.%s\n' \
+    "$BUDGET" "$skipped" "${notes:+ — also unreadable:$notes}" >&2
+  exit 0
+fi
 
 # A PAIR THIS CYCLE DID NOT DECIDE KEEPS ITS STREAK. A lane skipped for an
 # unreadable probe, a rig dropped from BALANCER_RIGS for one cycle, a lane whose

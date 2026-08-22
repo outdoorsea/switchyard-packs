@@ -562,6 +562,47 @@
 # BALANCER_MERGE_BASE="staging"
 
 # ---------------------------------------------------------------------------
+# Balancer cycle clock — how long the measuring pass may take.
+#
+# gc kills an order at 60 seconds. The sweep makes a backpressure probe plus a
+# demand read per lane for every rig it balances, so these two knobs are the
+# difference between a pass that reports what it could not measure and one that
+# is killed mid-loop leaving only `order exec balance-sweep failed: context
+# deadline exceeded` — a message naming neither the rig nor the read.
+#
+# BALANCER_READ_TIMEOUT — how long any ONE external read may take. Bounds the
+#   forge (`gh`) and controller (`gc`) reads; the switchyard reads carry curl's
+#   own equivalent. Shared with the sibling measurement pass, so retuning read
+#   patience moves both rather than leaving you a second knob to find.
+#
+# BALANCE_SWEEP_BUDGET_SECONDS — how long the WHOLE cycle may take. Bounding
+#   each read individually does not bound their sum, which is what actually
+#   overruns the deadline once you balance several rigs.
+#
+#   Before starting any read the pass asks whether it can afford one — elapsed
+#   plus BALANCER_READ_TIMEOUT must still fit the budget. So the two are read
+#   together: with the default pair (15 and 45) the last affordable read starts
+#   at 30s and, running its bound to the wire, ends at 45s — the budget exactly,
+#   and a full 15s inside gc's 60s deadline. That headroom is deliberate rather
+#   than slack: raising the budget toward 60 spends it, and a budget at or above
+#   60 cannot be honoured at all, since the deadline kills the order first.
+#
+#   A cycle that cannot afford its remaining stages PUBLISHES NOTHING and names
+#   the stages it never measured. It does not publish what it managed to get:
+#   a consumer reads a missing lane line as "fall back to city.toml", so a
+#   truncated file would silently un-scale every lane the cycle never reached.
+#   The previous generation stands instead and ages out on its own timestamp
+#   (see BALANCER_TARGET_MAX_AGE below).
+#
+#   Set 0 to disable the cap for hand-run debugging. Setting a read timeout
+#   LARGER than the budget is refused outright rather than run: no read could
+#   ever be affordable, so the pass would skip every stage and publish nothing
+#   for ever while looking like a healthy idle cycle.
+#
+# BALANCER_READ_TIMEOUT="15"
+# BALANCE_SWEEP_BUDGET_SECONDS="45"
+
+# ---------------------------------------------------------------------------
 # Rework lane (agents/rework, routed by orders/repair-sweep.toml) — a
 # dedicated repair specialist for judge-rejected criteria. By default
 # repair-sweep routes repairs to the shared brakeman pool; a rig listed here

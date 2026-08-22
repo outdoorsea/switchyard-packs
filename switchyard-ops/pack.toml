@@ -65,7 +65,7 @@
 #                    intake-sweep (which nudges the coordinator) rather than
 #                    replacing it. Started by intake-triage-sweep.
 #   security-scout — the SECURITY-REVIEW lane, run on an INDEPENDENT PROVIDER
-#                    (kimi) so it does not share the blind spots of the model it
+#                    (deepseek) so it does not share the blind spots of the model it
 #                    reviews. Scans the diff since its last pass, files findings
 #                    into switchyard, and is the ONLY lane allowed to change code
 #                    on its own initiative — high severity only, on a branch, as a

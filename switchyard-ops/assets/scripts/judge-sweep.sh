@@ -2,7 +2,7 @@
 # judge-sweep: keep one judging-validator alive per rig, but first verify the
 # lane's provider can actually spawn the CLI it will be passed.
 #
-# The judge pins a non-default provider (kimi) for runtime-diversity (switchyard
+# The judge pins a non-default provider (deepseek) for runtime-diversity (switchyard
 # PRD #271). If that provider's CLI rejects the flags gc's builtin provider
 # passes, lane-ensure.sh sees only "spawn returned no identity" and classifies it
 # as a load-induced handshake failure — which mails the mayor a false remedy and
@@ -18,13 +18,28 @@ set -u
 . "$(dirname "$0")/../lib/roster.sh"
 sy_load_conf
 
-PROVIDER="${JUDGE_PROVIDER:-kimi}"
+PROVIDER="${JUDGE_PROVIDER:-deepseek}"
 # The provider's NAME is not its BINARY: a wrapped provider (deepseek ->
 # builtin:opencode) spawns a CLI named differently from itself, and probing the
 # name false-fails the gate on a host where the lane spawns fine. Every check
 # below that touches the filesystem or execs uses $BIN; $PROVIDER remains the
 # config identity being validated.
 BIN="$(sy_provider_bin "$PROVIDER")"
+# ...but sy_provider_bin can only follow a base chain the RESOLVED CONFIG
+# actually contains, and the very first thing this gate checks is whether the
+# provider is registered at all. For an UNREGISTERED provider the chain resolves
+# to nothing and it falls back to the provider's own NAME — so every message
+# built from $BIN then named a binary that cannot exist: the remediation mail
+# said "install the 'deepseek' CLI" and "$DEEPSEEK_API_KEY is not set" two lines
+# above stating that the binary is `opencode` and that no such variable is
+# involved. An operator following the bullets installs nothing and exports a
+# dead variable. The pack's OWN default wrap is therefore spelled here, so the
+# unregistered case reads exactly like the registered one. It applies only when
+# the chain resolved to nothing, so a city that wraps deepseek some other way
+# still wins on its own resolved config.
+if [ "$PROVIDER" = "deepseek" ] && [ "$BIN" = "$PROVIDER" ]; then
+  BIN="opencode"
+fi
 UNCONFIGURED_MARKER="$(sy_state_dir)/judge-sweep.unconfigured"
 SKEW_MARKER="$(sy_state_dir)/judge-sweep.provider-skew"
 
@@ -92,9 +107,9 @@ if [ "$PROVIDER" != "claude" ]; then
   #    provider ($BIN != $PROVIDER, e.g. deepseek via opencode) authenticates
   #    through the wrapper CLI's own credential store, which no env-var
   #    convention can see; demanding $DEEPSEEK_API_KEY there false-idles a lane
-  #    whose credential is installed and working. The spawn probe below still
-  #    exercises the real CLI, so a genuinely unauthenticated wrapper surfaces
-  #    at lane-ensure as a spawn failure rather than being silently passed.
+  #    whose credential is installed and working. What DOES catch an
+  #    unauthenticated wrapper is the auth-refusal test folded into the spawn
+  #    probe below — this check is skipped for it, never waived.
   #    Name is conventional: KIMI_API_KEY, CURSOR_API_KEY, etc. For kimi we
   #    also accept OAuth credentials: either a populated ~/.kimi-code/oauth
   #    directory or a successful `kimi -p` probe.
@@ -135,6 +150,22 @@ if [ "$PROVIDER" != "claude" ]; then
     )"
     _probe_rc=$?
     rm -f "$_provider_args"
+
+    # AN EXPLICIT AUTH REFUSAL IS A CONFIGURATION GAP — not skew, and not
+    # something to spawn on. It matters most for a WRAPPED provider, whose
+    # credential lives in the wrapper CLI's own store: check 3 above is SKIPPED
+    # there ($BIN != $PROVIDER), so without this the only evidence that opencode
+    # was never logged in is the session dying at startup — which lane-ensure
+    # reports as "did not come up ... this is normally load", sending the
+    # operator to check host load for a missing login. That is the exact
+    # spawn-fail loop with a false remedy this wrapper exists to replace, and
+    # making a wrapped provider the lane default put every city on that path.
+    # Matched on the CLI's OWN WORDS, like the skew test beside it, so a usage
+    # banner or an unrelated nonzero exit still falls through untouched.
+    if printf '%s' "$_probe_err" | grep -Eqi 'not logged ?in|not authenticated|unauthenticated|no credentials|credentials not found|auth(enticate)? (first|login|required)|login required|unauthorized|invalid api key|authentication failed'; then
+      missing="$missing
+  - the '$BIN' CLI is installed but reports that it is not authenticated"
+    fi
 
     if [ "$PROVIDER" = "kimi" ]; then
       if printf '%s' "$_probe_err" | grep -qi "unknown option"; then
@@ -197,10 +228,14 @@ No judging sessions are being spawned, and this notice repeats at most weekly.
 
 To enable the lane, in city.toml:
   [providers.$PROVIDER]
-  base = \"builtin:$PROVIDER\"
-  args = [\"--model\", \"kimi-k2.6\"]
+  base = \"builtin:$BIN\"
 
-...install the CLI, export \$$keyvar in the session environment or configure OAuth, then 'gc reload'.
+(a WRAPPED provider like deepseek spawns another CLI — its base is
+builtin:opencode, so the binary that must be on PATH and authenticated is
+'opencode', through opencode's own credential store. An un-wrapped provider
+uses builtin:$PROVIDER and \$$keyvar or its own OAuth login.)
+
+...install the '$BIN' CLI, authenticate it, then 'gc reload'.
 
 To run the judge on the default provider instead (accepting that builder and validator share a runtime brain, which is the whole point of pinning it), see agents/judge/agent.toml for the [[patches.agent]] provider override." >/dev/null 2>&1
     touch "$UNCONFIGURED_MARKER" 2>/dev/null

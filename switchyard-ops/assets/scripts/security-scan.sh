@@ -3,11 +3,11 @@
 # provider is actually usable.
 #
 # WHY THIS ISN'T JUST lane-ensure.sh. The security-scout runs on a non-default
-# provider (kimi). If the provider is unregistered or its CLI is missing, a bare
+# provider (deepseek). If the provider is unregistered or its CLI is missing, a bare
 # lane-ensure would spawn a session every cycle that dies on startup: a spawn-fail
 # loop that either burns the pool's name slots silently or mails the mayor a
 # false "spawn returned no identity" every 12 hours. Neither is a true report of
-# what is wrong, which is simply "kimi is not set up yet".
+# what is wrong, which is simply "deepseek is not set up yet".
 #
 # So: check the three prerequisites, and when they are unmet, say so ONCE (a
 # 7-day marker) and stay quiet. An unconfigured lane is a known posture, not an
@@ -20,6 +20,15 @@
 #   3. an API key is present in the environment (skipped for wrapped
 #      providers, whose wrapper CLI holds its own credential store)
 #
+# KNOWN GAP, stated rather than implied: this lane has NO spawn-readiness probe
+# (that lives in judge-sweep.sh, which also tests the CLI's answer for an auth
+# refusal). So for a WRAPPED provider — the shipped default, deepseek via
+# opencode — check 3 is skipped and nothing here notices an installed-but-
+# unauthenticated wrapper: it passes the gate, lane-ensure spawns, the session
+# dies at startup and the mayor gets the generic "did not come up" load notice.
+# The lane is opt-in (SECURITY_SCAN_RIGS), so this is bounded to cities that
+# switch it on; closing it means giving this script the same probe.
+#
 # Override the provider expectation via roster.conf when running the lane on the
 # default provider (see agents/security-scout/agent.toml):
 #   SECURITY_SCOUT_PROVIDER="claude"
@@ -31,7 +40,7 @@ sy_load_conf
 # OPT-IN PER RIG, the *_RIGS roster idiom every sibling lane switch uses
 # (MERGE_LANE_RIGS, CONDUCTOR_RIGS, REVIEW_LANE_RIGS, ...): unset means off
 # for the whole city, silently — no spawn, no marker, no mail. The lane used
-# to be on-by-default, which meant a city that never configured kimi received
+# to be on-by-default, which meant a city that never configured the provider received
 # a "lane idle" notice every week forever: an error posture for what is
 # really an operator choice. The list is honored per rig for real, not as a
 # boolean: it reaches lane-ensure's rig walk as LANE_RIGS_FILTER, so a rig
@@ -41,8 +50,16 @@ SECURITY_SCAN_RIGS="${SECURITY_SCAN_RIGS:-}"
 LANE_RIGS_FILTER="$SECURITY_SCAN_RIGS"
 export LANE_RIGS_FILTER
 
-PROVIDER="${SECURITY_SCOUT_PROVIDER:-kimi}"
+PROVIDER="${SECURITY_SCOUT_PROVIDER:-deepseek}"
 BIN="$(sy_provider_bin "$PROVIDER")"
+# An UNREGISTERED provider has no base chain to follow, so sy_provider_bin falls
+# back to the provider's own NAME and every message built from $BIN then names a
+# binary that cannot exist (see the same guard in judge-sweep.sh). The pack's own
+# default wrap is spelled here so the unregistered case reads like the registered
+# one; a city that wraps deepseek differently still wins on its resolved config.
+if [ "$PROVIDER" = "deepseek" ] && [ "$BIN" = "$PROVIDER" ]; then
+  BIN="opencode"
+fi
 MARKER="$(sy_state_dir)/security-scan.unconfigured"
 
 # The default provider is always usable — skip the readiness gate entirely.
@@ -65,9 +82,10 @@ if [ "$PROVIDER" != "claude" ]; then
 
   # 3. an API key — only for a provider that IS its own binary. A wrapped
   #    provider authenticates through the wrapper CLI's credential store,
-  #    which no env-var convention can see; a genuinely unauthenticated
-  #    wrapper still surfaces at spawn time. Name is conventional:
-  #    KIMI_API_KEY, CURSOR_API_KEY, etc.
+  #    which no env-var convention can see. Unlike judge-sweep.sh there is no
+  #    probe here to test that store, so an unauthenticated wrapper reaches
+  #    lane-ensure and surfaces only as a spawn failure — the KNOWN GAP in the
+  #    header. Name is conventional: KIMI_API_KEY, CURSOR_API_KEY, etc.
   keyvar="$(printf '%s' "$PROVIDER" | tr '[:lower:]' '[:upper:]')_API_KEY"
   eval "keyval=\${$keyvar:-}"
   if [ "$BIN" = "$PROVIDER" ] && [ -z "${keyval:-}" ]; then
@@ -90,10 +108,14 @@ No sessions are being spawned, and this notice repeats at most weekly.
 
 To enable the lane, in city.toml:
   [providers.$PROVIDER]
-  base = \"builtin:$PROVIDER\"
-  args = [\"--model\", \"kimi-k2.6\"]
+  base = \"builtin:$BIN\"
 
-...install the CLI, export \$$keyvar in the session environment, then 'gc reload'.
+(a WRAPPED provider like deepseek spawns another CLI — its base is
+builtin:opencode, so the binary that must be on PATH and authenticated is
+'opencode', through opencode's own credential store. An un-wrapped provider
+uses builtin:$PROVIDER and \$$keyvar.)
+
+...install the '$BIN' CLI, authenticate it, then 'gc reload'.
 
 To run the lane on the default provider instead (losing the independent-model
 property that is the point of it), see agents/security-scout/agent.toml for the

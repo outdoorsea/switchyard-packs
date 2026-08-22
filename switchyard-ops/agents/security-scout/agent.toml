@@ -16,21 +16,27 @@
 # reviewer lane its own provider and model.
 #
 # ⚠ PROVIDER PREREQUISITES — this agent CANNOT RUN until all three hold:
-#   1. the `kimi` CLI is on PATH,
-#   2. `KIMI_API_KEY` is set in the session environment, and
-#   3. city.toml registers the provider:
-#        [providers.kimi]
-#        base = "builtin:kimi"
-#        args = ["--model", "kimi-k2.6"]
+#   1. city.toml registers the provider, as a WRAPPED one:
+#        [providers.deepseek]
+#        base = "builtin:opencode"
+#   2. the `opencode` CLI is on PATH — that is the binary deepseek actually
+#      spawns, so `command -v deepseek` proves nothing, and
+#   3. opencode is authenticated. The wrapper CLI holds its own credential
+#      store, so no DEEPSEEK_API_KEY env var is read.
 #
-# `builtin:kimi` resolves at config load and the `core` pack ships a kimi
-# SessionStart overlay, so the wiring is real — but CONFIG ACCEPTANCE IS NOT
-# RUNTIME PROOF, and no kimi-backed session has yet run in this city. The
-# `security-scan` order checks all three and stays silent when they are unmet, so
-# an unconfigured city gets no spawn loop and no nagging mail.
+# `builtin:opencode` resolves at config load and the `core` pack ships an
+# opencode SessionStart overlay, so the wiring is real — but CONFIG ACCEPTANCE
+# IS NOT RUNTIME PROOF: verify with a real deepseek-backed session before
+# depending on the lane. The `security-scan` order checks all three and stays
+# silent when they are unmet, so an unconfigured city gets no spawn loop and no
+# nagging mail — with ONE gap it does not paper over: check 3 is skipped for a
+# wrapped provider, and unlike judge-sweep.sh this order has no spawn probe to
+# test the wrapper's credential store instead. An installed-but-unauthenticated
+# `opencode` therefore passes this gate and fails at spawn. The lane is opt-in
+# (SECURITY_SCAN_RIGS), so nothing is affected until you switch it on.
 #
 # To run this lane on the default provider instead (useful to exercise the
-# prompt before kimi is wired), patch the provider off in city.toml:
+# prompt before deepseek is wired), patch the provider off in city.toml:
 #   [[patches.agent]]
 #     dir = "<rig>"
 #     name = "switchyard-ops.security-scout"
@@ -42,7 +48,7 @@
 # city.toml, NOT here. `model` is not a valid agent.toml key — gc silently drops
 # it (verified by round-trip against gc 1.4.0), so a `model = "..."` line here
 # would look correct and do nothing. See packs/docs/GAS-CITY-MECHANICS.md.
-provider = "kimi"
+provider = "deepseek"
 
 # scope = "rig": security review is per-repository. The lane materializes in each
 # rig that imports the pack and reviews THAT rig's code against THAT rig's

@@ -28,7 +28,7 @@
 # That is also why its cadence is slow (see orders/dupe-sweep.toml): re-listing
 # the same open issues every few minutes would buy nothing and cost a session.
 #
-# WHY NO PROVIDER PIN, UNLIKE THE JUDGE AND security-scout. Those two pin `kimi`
+# WHY NO PROVIDER PIN, UNLIKE THE JUDGE AND security-scout. Those two pin `deepseek`
 # to buy RUNTIME independence from the model that wrote the code, because the
 # server's separation-of-duties rules cannot see a shared blind spot. No such
 # rule applies here — this lane validates nothing and signs nothing off; a human

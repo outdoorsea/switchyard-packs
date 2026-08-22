@@ -80,13 +80,13 @@ merges it. There is no refinery in a gascity city.
 
 **The judge does not share a brain with the workers.** The brakeman pool declares
 no provider and so runs the city default; `agents/judge/agent.toml` pins
-`provider = "kimi"`, the same provider `security-scout` already requires, so
+`provider = "deepseek"`, the same provider `security-scout` already requires, so
 builder and validator reason on different models and a model's blind spot cannot
 pass its own work. Identity independence — the judge's own agent ref, which the
 server's separation-of-duties rules key on — is a separate and weaker property:
 two refs can be one runtime. The server-side complement refuses a judgment whose
 recorded runtime matches the builder's. Both halves, and the `[[patches.agent]]`
-opt-out for a city that has not wired kimi, are documented in that agent.toml.
+opt-out for a city that has not wired deepseek, are documented in that agent.toml.
 The pin itself is held by the **`judge runtime-diversity self-test`** CI job
 (`bash scripts/judge-runtime-diversity.test.sh`). A different runtime is only
 half of independence, though — what the judge *does* with it is

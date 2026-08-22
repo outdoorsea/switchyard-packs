@@ -17,22 +17,40 @@ provider = "claude"
   [providers.claude]
     base = "builtin:claude"
 
-  # REQUIRED, even if you never authenticate kimi.
+  # REQUIRED, even if you never authenticate deepseek's wrapper CLI.
   #
-  # switchyard-ops' security-scout names this provider deliberately — it reviews
-  # code on a model that does not share the blind spots of the one that wrote it.
-  # A referenced-but-absent provider does NOT degrade gracefully: it rejects the
-  # WHOLE city config, so `gc agent list`, `gc order list` and `gc config show`
-  # all fail with "provider catalog is missing referenced providers", not just
-  # that one agent.
+  # switchyard-ops' judge and security-scout name this provider deliberately —
+  # they validate and review code on a model that does not share the blind spots
+  # of the one that wrote it. A referenced-but-absent provider does NOT degrade
+  # gracefully: it rejects the WHOLE city config, so `gc agent list`,
+  # `gc order list` and `gc config show` all fail with "provider catalog is
+  # missing referenced providers", not just those agents.
   #
-  # Declaring it is not the same as configuring it. The security-scan order
-  # refuses to spawn until the provider is genuinely usable, so an
-  # unauthenticated kimi leaves that lane dormant rather than in a silent
-  # spawn-fail loop. `gc doctor --fix` adds this stanza for you (but rewrites
-  # this file and drops comments).
-  [providers.kimi]
-    base = "builtin:kimi"
+  # deepseek is a WRAPPED provider: it spawns the `opencode` CLI, which holds
+  # its own credential store — so the binary to install and authenticate is
+  # `opencode`, and no DEEPSEEK_API_KEY env var is involved.
+  #
+  # Declaring it is not the same as configuring it. judge-sweep tests the
+  # wrapper's own answer, so an unauthenticated opencode leaves the judge lane
+  # dormant with a named reason rather than in a silent spawn-fail loop;
+  # security-scan has no such probe yet, so there an unauthenticated wrapper
+  # still reaches the spawn and reads as a generic startup failure.
+  # (`gc doctor --fix` would add a `builtin:deepseek` alias, which is NOT what
+  # this pack's lanes run — write this stanza as shown.)
+  #
+  # ⚠ WHICH MODEL OPENCODE RUNS IS NOT SET HERE, and that is the one thing to
+  # get right about this stanza. `model` is a REJECTED provider key (see
+  # packs/docs/GAS-CITY-MECHANICS.md), so a model can only be pinned through
+  # `args`/`env` — and with neither, gc spawns bare `opencode`, which picks a
+  # model from opencode's OWN config. opencode is vendor-agnostic, so an
+  # operator who authenticates it against the same vendor as `[workspace]
+  # provider` above gets a judge and a security reviewer reasoning on the very
+  # model that wrote the code. Nothing detects that: the runtime-diversity CI
+  # job compares provider NAMES, and both halves still read "deepseek". Point
+  # opencode at a genuinely different vendor, or pin one here, e.g.:
+  #   args = ["--model", "deepseek/deepseek-v4-flash-free"]
+  [providers.deepseek]
+    base = "builtin:opencode"
 
 # --- One rig per product. Each imports gascity's roles (the build-lane role ---
 # --- targets its formulas dispatch to) and the switchyard-mcp overlay (so ----

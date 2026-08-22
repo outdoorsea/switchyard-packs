@@ -49,29 +49,36 @@
 # runtime matches the builder's. The two are complements, not duplicates: this
 # line makes the refusal never need to fire.
 #
-# WHY `kimi` SPECIFICALLY, AND NOT A THIRD PROVIDER. security-scout already pins
-# `kimi`, so every city importing this pack is ALREADY required to declare
-# `[providers.kimi]` — a referenced-but-absent provider does not degrade
-# gracefully, it rejects the WHOLE city config (`gc agent list`, `gc order list`
-# and `gc config show` all fail). Reusing the provider the pack already names
-# therefore adds ZERO new city.toml requirement; naming a third one would break
-# every city until its config caught up. Sharing a runtime with security-scout is
-# acceptable and self-correcting: the scout is the only other lane that opens
-# PRs, and PRD #249's server-side gate refuses a judgment on work whose builder
-# shared this runtime rather than banking it wrongly.
+# WHY `deepseek` SPECIFICALLY, AND NOT A THIRD PROVIDER. security-scout already
+# pins `deepseek`, so every city importing this pack is ALREADY required to
+# declare `[providers.deepseek]` — a referenced-but-absent provider does not
+# degrade gracefully, it rejects the WHOLE city config (`gc agent list`,
+# `gc order list` and `gc config show` all fail). Reusing the provider the pack
+# already names therefore adds ZERO new city.toml requirement; naming a third
+# one would break every city until its config caught up. Sharing a runtime with
+# security-scout is acceptable and self-correcting: the scout is the only other
+# lane that opens PRs, and PRD #249's server-side gate refuses a judgment on
+# work whose builder shared this runtime rather than banking it wrongly.
 #
-# ⚠ PROVIDER PREREQUISITES — same three as security-scout: the `kimi` CLI on
-# PATH, `KIMI_API_KEY` in the session environment, and `[providers.kimi]`
-# registered in city.toml.
+# ⚠ PROVIDER PREREQUISITES — same three as security-scout: `[providers.deepseek]`
+# registered in city.toml as a WRAPPED provider (`base = "builtin:opencode"`),
+# the `opencode` CLI on PATH (that is the binary deepseek actually spawns —
+# `command -v deepseek` proves nothing), and opencode authenticated. The wrapper
+# CLI holds its own credential store, so no DEEPSEEK_API_KEY env var is read —
+# the readiness gate skips the env-key check for a wrapped provider and tests
+# the wrapper's own answer instead (see the probe below).
 #
 # ⚠ PROVIDER READINESS. `judge-sweep` runs `judge-sweep.sh`, which checks the
 # same three prerequisites as `security-scan.sh` (provider registered, CLI on
-# PATH, API key present) AND performs a provider-spawn readiness probe. If the
-# provider's CLI rejects the flags gc's builtin provider passes — e.g. kimi
-# 0.35.0 rejecting --no-thinking — the sweep mails the mayor a specific
+# PATH, API key present — the last skipped for a wrapped provider) AND performs
+# a provider-spawn readiness probe that `security-scan.sh` does not have. That
+# probe is what covers the skipped check: a CLI answering that it is not
+# authenticated idles the lane with a named reason instead of spawning. If the
+# provider's CLI rejects the flags gc's builtin provider passes — the way kimi
+# 0.35.0 once rejected --no-thinking — the sweep mails the mayor a specific
 # provider/cli skew notice instead of the generic "spawn did not come up" load
-# handshake alarm. A city without a usable kimi provider therefore stays quiet
-# (one notice per week) rather than burning a session every 30 minutes.
+# handshake alarm. A city without a usable deepseek provider therefore stays
+# quiet (one notice per week) rather than burning a session every 30 minutes.
 #
 # To run the judge on the default provider instead — accepting that builder and
 # validator share a runtime brain, which is the whole point of this line — patch
@@ -86,7 +93,7 @@
 # it (verified by round-trip against gc 1.4.0), so a `model = "..."` line here
 # would look correct and do nothing. This criterion reads "pins a model or
 # provider"; only the provider half is real. See packs/docs/GAS-CITY-MECHANICS.md.
-provider = "kimi"
+provider = "deepseek"
 
 scope = "rig"
 

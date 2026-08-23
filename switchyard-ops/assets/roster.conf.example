@@ -513,6 +513,36 @@
 #   them here does nothing, deliberately, because "more concurrency" on an
 #   ordered stage means two sessions merging into one branch.
 #
+# BALANCER_GLOBAL_MAX — the total number of sessions the balancer may publish
+#   across every rig and lane in one cycle. Unset (the default) means no total
+#   budget: each lane is bounded only by BALANCER_BOUNDS and its own
+#   max_active_sessions, which between them can still add up to more concurrency
+#   than one account's usage cap affords. Set this when the sum is what you are
+#   actually rationing.
+#
+#   IT IS ONE GLOBAL NUMBER, NOT A PER-RIG ONE. The shared usage cap it exists
+#   to protect belongs to the account, so two rigs each asking for 4 against a
+#   budget of 6 get 4 and 2, not 4 and 4.
+#
+#   WHEN DEMAND EXCEEDS IT, THE MOST DOWNSTREAM LANE IS PAID FIRST: validation,
+#   then rework, then review, then build. Work already built and waiting to be
+#   validated is nearly finished, so the last session buys a drained queue there
+#   and merely a deeper one on a builder — the direction backpressure already
+#   pushes. The lane that straddles the budget takes the remainder rather than
+#   being paid in full (which would bust the total) or dropped to zero (which
+#   would leave sessions unspent while a queue asks for them).
+#
+#   0, unset, and anything non-numeric all mean NO BUDGET, the same direction
+#   every other knob here takes: read as a literal ceiling, a mistyped key would
+#   publish nothing but zeros and stall every lane in the factory. A malformed
+#   value is named in the order's output so you learn it was rejected.
+#
+#   IT DOES NOT FEED THE HYSTERESIS GATE. The gate smooths demand; this is a
+#   ceiling on top of it. So a lane the budget cut keeps the demand history it
+#   earned, every cut is logged `reason=global-max` beside the demand entry it
+#   cut, and raising or clearing the budget restores the lane on the next cycle
+#   rather than making it climb back through a two-cycle raise.
+#
 # BALANCER_MERGE_BACKPRESSURE — the reviewed-but-unmerged depth at which the
 #   two upstream lanes stop following their own demand and clamp to their
 #   floors. Default 6; 0 switches backpressure off entirely.

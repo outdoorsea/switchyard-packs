@@ -49,6 +49,19 @@ set -u
 # for correctness, and "scaling" them means two sessions merging into one branch.
 BALANCE_LANES="brakeman reviewer"
 
+# THE ORDER THE GLOBAL BUDGET IS PAID OUT IN, most downstream first. It ranks
+# lanes and is deliberately NOT the same list as BALANCE_LANES: it names the
+# judge and rework lanes too, so the order is already right on the cycle those
+# gain demand reads, rather than depending on whoever adds them noticing this
+# constant. A lane absent from here sorts last and cannot jump the queue.
+#
+# WHY DOWNSTREAM WINS. The budget binds exactly when the factory is busiest, and
+# that is when the choice of whom to starve matters most. Work already built and
+# waiting on validation is nearly finished, so the last session buys a drained
+# queue there and merely a deeper one on a builder. It is the direction
+# backpressure already pushes, for the same reason.
+BALANCE_LANE_RANK="judge rework reviewer brakeman"
+
 # Default bounds for a lane BALANCER_BOUNDS does not name: no floor, and a
 # ceiling of the lane agent's own resolved capacity. That makes BALANCER_BOUNDS
 # purely a NARROWING knob — an operator who sets nothing gets a balancer that
@@ -196,6 +209,39 @@ sy_backpressure_malformed() {
     '')       return 1 ;;
     *[!0-9]*) return 0 ;;
     *)        return 1 ;;
+  esac
+}
+
+# sy_global_max — the total session budget across every target this cycle
+# writes, summed over all rigs and lanes. The shared usage cap it protects
+# belongs to an account, not a rig, so this is deliberately one global number.
+#
+# UNSET, ZERO AND MALFORMED ALL MEAN NO BUDGET, and that direction is the whole
+# safety story: read as a literal ceiling, a mistyped key would publish nothing
+# but zeros and stall every lane in the factory — the first risk the PRD names.
+# Zero-disables also matches BALANCER_MERGE_BACKPRESSURE's rule for its own
+# threshold, so the two knobs cannot be remembered as behaving differently.
+#
+# A LEADING ZERO IS REJECTED for the reason sy_bounded_secs gives below: `test`
+# reads 08 as decimal and passes it along, $(( )) reads it as octal and dies. No
+# arithmetic expansion touches this value today, and rejecting it here is what
+# keeps that true of the next edit as well.
+sy_global_max() {
+  case "${BALANCER_GLOBAL_MAX:-}" in
+    '' | *[!0-9]* | 0[0-9]*) printf '0' ;;
+    *)                       printf '%s' "$BALANCER_GLOBAL_MAX" ;;
+  esac
+}
+
+# sy_global_max_malformed — true when the knob was set to something this pass
+# could not read. Split from sy_global_max for the reason its siblings are: the
+# fallback stays silent in the computation and loud in the report, so an
+# operator learns their value was rejected instead of watching it do nothing.
+sy_global_max_malformed() {
+  case "${BALANCER_GLOBAL_MAX:-}" in
+    '')                 return 1 ;;
+    *[!0-9]* | 0[0-9]*) return 0 ;;
+    *)                  return 1 ;;
   esac
 }
 
@@ -681,6 +727,81 @@ sy_clamp() {
 }
 
 # ---------------------------------------------------------------------------
+# The global budget
+# ---------------------------------------------------------------------------
+
+# sy_allocate FILE BUDGET CUTS — hold the sum of FILE's target lines at BUDGET,
+# paying lanes out in BALANCE_LANE_RANK order. Every lane it lowered is recorded
+# in CUTS as `rig lane wanted got`, one per line, for the caller to report and
+# log. A BUDGET of 0, or a total already inside it, rewrites nothing.
+#
+# IT RUNS ON THE FINISHED GENERATION, not lane by lane inside the measure loop.
+# The sum is the invariant, and it cannot be known until every lane has been
+# measured — clamping as we went would let the lanes read first spend the budget
+# before the downstream ones the rank exists to protect had been read at all.
+#
+# THE LANE THAT STRADDLES THE BUDGET TAKES THE REMAINDER rather than being paid
+# in full or dropped to zero. Paying it in full would bust the sum, which is the
+# one thing this function is for; dropping it would leave sessions unspent while
+# a queue that asked for them backs up.
+#
+# THE WHOLE FILE IS REWRITTEN, header and all. The consumers reject a file whose
+# `version 1` line is missing, so an allocator that emitted only target lines
+# would turn every capped cycle into a silent no-op at every spawn site — the
+# balancer appearing to work while capping nothing.
+#
+# A TARGET LINE IT CANNOT PARSE IS PASSED THROUGH UNTOUCHED and left out of the
+# sum. It is not this function's job to decide what a malformed line means: the
+# consumers already reject the file as a whole, and rewriting one here would
+# only make a corrupt generation look well-formed.
+sy_allocate() {
+  _ao_tmp="$(mktemp "$1.XXXXXX" 2>/dev/null)" || return 1
+  : >"$3" 2>/dev/null || { rm -f "$_ao_tmp" 2>/dev/null; return 1; }
+  awk -v budget="$2" -v rank="$BALANCE_LANE_RANK" -v cuts="$3" '
+    BEGIN {
+      n = split(rank, r, " ")
+      for (i = 1; i <= n; i++) prio[r[i]] = i
+      # One tier past the named lanes, so an unranked lane sorts after all of
+      # them instead of ahead by accident of being measured first.
+      unranked = n + 1
+    }
+    {
+      line[NR] = $0
+      if ($1 == "target" && NF >= 4 && $4 ~ /^[0-9]+$/) {
+        is[NR] = 1; rig[NR] = $2; lane[NR] = $3; want[NR] = $4 + 0
+        total += want[NR]
+        ord[NR] = ($3 in prio) ? prio[$3] : unranked
+      }
+    }
+    END {
+      if (budget <= 0 || total <= budget) {
+        for (i = 1; i <= NR; i++) print line[i]
+        exit
+      }
+      left = budget
+      for (p = 1; p <= unranked; p++)
+        for (i = 1; i <= NR; i++) {
+          if (!is[i] || ord[i] != p) continue
+          got[i] = (want[i] <= left) ? want[i] : left
+          left -= got[i]
+        }
+      for (i = 1; i <= NR; i++) {
+        if (!is[i]) { print line[i]; continue }
+        print "target", rig[i], lane[i], got[i]
+        if (got[i] != want[i]) print rig[i], lane[i], want[i], got[i] > cuts
+      }
+    }
+  ' "$1" >"$_ao_tmp" 2>/dev/null || { rm -f "$_ao_tmp" 2>/dev/null; return 1; }
+
+  # Renamed onto the buffer rather than copied back, so a failed awk leaves the
+  # generation the measure loop built exactly as it was. The temp is created
+  # beside it for the reason the publish below gives: a rename is atomic only
+  # within one filesystem.
+  mv "$_ao_tmp" "$1" 2>/dev/null || { rm -f "$_ao_tmp" 2>/dev/null; return 1; }
+  return 0
+}
+
+# ---------------------------------------------------------------------------
 # Hysteresis
 # ---------------------------------------------------------------------------
 
@@ -727,6 +848,30 @@ sy_hist_load() {
 # Main
 # ---------------------------------------------------------------------------
 
+# LIBRARY MODE, for the self-test and nothing else. Sourced with
+# BALANCE_SWEEP_LIB=1 this file defines its helpers and stops here, before any
+# read or write, so the budget allocator can be exercised directly against all
+# four ranked lanes.
+#
+# No fixture city can reach that order: BALANCE_LANES names only the two lanes
+# that have demand reads, and widening it to make a test reachable would also
+# let an operator name a serial lane — which crit:13bf64f0d5e2 forbids, and
+# whose judge cited that literal one-line list as the proof. A four-line guard
+# here is the cheaper of the two.
+#
+# IT EXITS 0 EITHER WAY, and deliberately carries no diagnostic for the case
+# where the variable is set but the file was EXECUTED. A notice after the
+# `return` is reachable under bash, which carries on past a failed top-level
+# return, and DEAD under dash, which ends the script there — measured, both.
+# This order is POSIX sh and ships to cities that are not Ubuntu, so a warning
+# that only fires under bash is a false assurance in the one shell it would
+# have to work in, and a test for it would pin a property production does not
+# have. The failure it would announce is "publish nothing", which is this
+# feature's documented safe direction anyway.
+if [ "${BALANCE_SWEEP_LIB:-}" = 1 ]; then
+  return 0 2>/dev/null || exit 0
+fi
+
 sy_load_conf
 
 # THE OPT-IN GATE. Unset BALANCER_RIGS exits before any read and before any
@@ -750,6 +895,7 @@ BALANCER_MERGE_BASE="${BALANCER_MERGE_BASE:-${MERGE_LANE_BASE:-staging}}"
 BALANCER_REVIEW_BASE="${BALANCER_REVIEW_BASE:-${REVIEW_LANE_BASE:-staging}}"
 BALANCER_PROMOTE_FROM="${BALANCER_PROMOTE_FROM:-${STAGING_PROMOTE_FROM:-staging}}"
 BACKPRESSURE="$(sy_backpressure)"
+GLOBAL_MAX="$(sy_global_max)"
 READ_TIMEOUT="$(sy_read_timeout)"
 BUDGET="$(sy_cycle_budget)"
 
@@ -832,15 +978,22 @@ PROJECTS="$(sy_api_projects "$TOKEN" 2>/dev/null)"
 TMP="$(mktemp "$OUT.XXXXXX" 2>/dev/null)" || exit 0
 HTMP="$(mktemp "$HIST.XXXXXX" 2>/dev/null)" || { rm -f "$TMP" 2>/dev/null; exit 0; }
 LTMP="$(mktemp "$LOG.XXXXXX" 2>/dev/null)" || { rm -f "$TMP" "$HTMP" 2>/dev/null; exit 0; }
+# The budget allocator's record of what it lowered. It is scratch for one cycle
+# — the report and the log are its durable outputs — but it is created beside
+# the others and trapped with them so an interrupted cycle leaves nothing in the
+# state dir, which is the directory an operator reads.
+CTMP="$(mktemp "$OUT.cuts.XXXXXX" 2>/dev/null)" ||
+  { rm -f "$TMP" "$HTMP" "$LTMP" 2>/dev/null; exit 0; }
 # The temp file is created BESIDE the target, not in /tmp, because the publish
 # below is a rename and a rename is only atomic within one filesystem. A temp in
 # /tmp would silently degrade to a copy — the half-written read this whole
 # mechanism exists to prevent.
-trap 'rm -f "$TMP" "$HTMP" "$LTMP" 2>/dev/null' EXIT INT TERM
+trap 'rm -f "$TMP" "$HTMP" "$LTMP" "$CTMP" 2>/dev/null' EXIT INT TERM
 
 notes=""
 throttled=""
 decided=""
+capped=""
 
 # The cycle stamp is captured ONCE and used twice: it stamps the published file
 # and it is what each log entry cites as the snapshot that justified the change.
@@ -869,6 +1022,10 @@ fi
 
 if sy_cycle_budget_malformed; then
   notes="$notes cycle-budget(malformed,using-$BUDGET)"
+fi
+
+if sy_global_max_malformed; then
+  notes="$notes global-max(malformed,ignored)"
 fi
 
 for rig in $BALANCER_RIGS; do
@@ -1073,7 +1230,7 @@ sy_write_snapshot
 # behind would be left for good, beside $HIST and $LOG in the state dir rather
 # than in /tmp. An over-budget cycle is by definition the repeating condition.
 if [ "$over_budget" = 1 ]; then
-  rm -f "$TMP" "$HTMP" "$LTMP" 2>/dev/null
+  rm -f "$TMP" "$HTMP" "$LTMP" "$CTMP" 2>/dev/null
   trap - EXIT INT TERM
   printf 'balance-sweep: hit its %ss cycle budget and published no targets — the previous generation stands. Not measured:%s. This bound belongs to the order itself and sits deliberately inside the 60s gc order-exec deadline, so this notice replaces the silent "order exec balance-sweep failed: context deadline exceeded" that would otherwise name neither rig nor read. Raise BALANCE_SWEEP_BUDGET_SECONDS, lower BALANCER_READ_TIMEOUT, or investigate which read is slow.%s\n' \
     "$BUDGET" "$skipped" "${notes:+ — also unreadable:$notes}" >&2
@@ -1095,6 +1252,68 @@ if [ -f "$HIST" ]; then
   done <"$HIST"
 fi
 
+# THE GLOBAL BUDGET, applied to the finished generation. Placed AFTER the
+# over-budget return above, so an abandoned cycle does not spend a pass
+# allocating a file it is about to delete.
+#
+# IT SITS BELOW THE HYSTERESIS GATE ON PURPOSE, and the history above is left
+# recording what DEMAND justified rather than what the budget allowed. The gate
+# smooths a demand signal; the budget is an operator ceiling on top of it, and
+# is not a signal at all. Feeding the cut back into the history would make the
+# next cycle read its own ceiling as a fresh demand reading: with demand
+# unchanged the lane would open a raise streak against the number the budget
+# just imposed, apply it two cycles later, be cut again, and log a raise that
+# never reached the file — the gate oscillating against a knob that never moved.
+# Keeping the two apart also means lifting the budget restores the lane on the
+# very next cycle, which is right: its demand never changed, only what the
+# factory could afford.
+if [ "$GLOBAL_MAX" -gt 0 ]; then
+  if sy_allocate "$TMP" "$GLOBAL_MAX" "$CTMP"; then
+    while read -r _gc_rig _gc_lane _gc_want _gc_got; do
+      [ -n "${_gc_got:-}" ] || continue
+      capped="$capped $_gc_rig/$_gc_lane($_gc_want->$_gc_got)"
+
+      # LOGGED ONLY WHEN THE PUBLISHED NUMBER MOVED. The cut recurs every cycle
+      # the budget binds, and an entry per cycle would bury the demand history
+      # under one line per five minutes — the same rule the hysteresis gate
+      # follows in logging only an applied change. $OUT still holds the previous
+      # generation at this point, the publish below being what replaces it, so
+      # it is the record of what a consumer last actually read.
+      _gc_prev="$(awk -v r="$_gc_rig" -v l="$_gc_lane" \
+        '$1 == "target" && $2 == r && $3 == l { print $4 }' "$OUT" 2>/dev/null)"
+      [ "$_gc_prev" = "$_gc_got" ] || printf \
+        '%s %s %s %s -> %s reason=global-max budget=%s prev=%s\n' \
+        "$CYCLE" "$_gc_rig" "$_gc_lane" "$_gc_want" "$_gc_got" \
+        "$GLOBAL_MAX" "${_gc_prev:-none}" >>"$LTMP"
+    done <"$CTMP"
+  fi
+
+  # THE INVARIANT, RE-READ FROM THE GENERATION ABOUT TO BE PUBLISHED rather than
+  # inferred from the allocator having returned 0. The criterion says the sum
+  # NEVER exceeds the budget, and the cheapest way to mean "never" is to check
+  # the artifact instead of trusting the pass that built it: this catches an
+  # allocator that could not run (no mktemp, no awk) and an allocator that ran
+  # and was wrong, which are indistinguishable from here in any case.
+  #
+  # ABANDONING IS THE SAFE DIRECTION, and it is the one the over-budget cycle
+  # above already takes. The previous generation stands — itself inside whatever
+  # budget was in force when it was written — and goes stale on its own
+  # timestamp if this repeats, at which point every consumer falls back to its
+  # city.toml ceiling. Publishing an unbounded generation instead would spend
+  # the usage cap this knob exists to protect, silently, at the one moment it is
+  # scarcest.
+  _gm_sum="$(awk '$1 == "target" && $4 ~ /^[0-9]+$/ { t += $4 } END { print t + 0 }' \
+    "$TMP" 2>/dev/null)"
+  case "${_gm_sum:-}" in '' | *[!0-9]*) _gm_sum="" ;; esac
+  if [ -z "$_gm_sum" ] || [ "$_gm_sum" -gt "$GLOBAL_MAX" ]; then
+    rm -f "$TMP" "$HTMP" "$LTMP" "$CTMP" 2>/dev/null
+    trap - EXIT INT TERM
+    printf 'balance-sweep: could not hold the published sum (%s) inside BALANCER_GLOBAL_MAX (%s) — published nothing; the previous generation stands.\n' \
+      "${_gm_sum:-unreadable}" "$GLOBAL_MAX" >&2
+    exit 0
+  fi
+fi
+
 # THE PUBLISH. One rename, so a consumer reading concurrently sees either the
 # whole previous generation or the whole new one. It also replaces rather than
 # appends: two targets for one (rig, lane) would be a file whose meaning depends
@@ -1111,12 +1330,14 @@ if mv "$TMP" "$OUT" 2>/dev/null; then
   if [ -s "$LTMP" ]; then
     cat "$LTMP" >>"$LOG" 2>/dev/null || :
   fi
-  rm -f "$LTMP" 2>/dev/null
+  rm -f "$LTMP" "$CTMP" 2>/dev/null
 else
-  rm -f "$TMP" "$HTMP" "$LTMP" 2>/dev/null
+  rm -f "$TMP" "$HTMP" "$LTMP" "$CTMP" 2>/dev/null
   printf 'balance-sweep: could not publish %s\n' "$OUT" >&2
   exit 0
 fi
 
-printf 'balance-sweep: published %s%s%s\n' "$OUT" \
-  "${throttled:+ — backpressure:$throttled}" "${notes:+ — skipped:$notes}"
+printf 'balance-sweep: published %s%s%s%s\n' "$OUT" \
+  "${throttled:+ — backpressure:$throttled}" \
+  "${capped:+ — global-max($GLOBAL_MAX):$capped}" \
+  "${notes:+ — skipped:$notes}"

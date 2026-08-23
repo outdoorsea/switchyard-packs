@@ -1358,6 +1358,300 @@ fi
 rm -rf "$city"
 
 # ---------------------------------------------------------------------------
+# THE GLOBAL BUDGET — crit:2b5cba702475
+#
+#   "The sum of written lane targets never exceeds BALANCER_GLOBAL_MAX from
+#    roster.conf, allocated downstream-first (validation, then rework, then
+#    review, then build) when total demand exceeds the budget"
+#
+# Two clauses, and each has a cheap wrong version that passes a happy-path read:
+#
+#   THE SUM IS THE INVARIANT, NOT THE PER-LANE TARGET. A budget applied per
+#   lane — "no lane above BALANCER_GLOBAL_MAX" — passes every single-lane
+#   assertion while letting four lanes at the budget spend four times it. The
+#   cases below assert the SUM of every written line.
+#
+#   THE ORDER IS DOWNSTREAM-FIRST, AND IT IS THE HALF THAT ROTS. Any allocator
+#   that fits the sum satisfies clause one; only the order says WHICH lane
+#   loses. Allocating in file order, or alphabetically, passes every sum
+#   assertion — and starves the validation lane the order exists to protect,
+#   because build demand is measured first and is usually the deepest queue.
+#   So the tiers are asserted against each other, not just against the budget.
+#
+#   FAIL-OPEN IS THE DEFAULT. Unset, zero and malformed all mean "no budget",
+#   the same direction every other knob in this order takes: a typo in a
+#   tuning key must not be what silently caps the whole factory at nothing.
+#
+# The four-lane order cannot be driven through a fixture city: BALANCE_LANES
+# names only the two lanes that have demand reads, and widening it to make a
+# test reachable would also let an operator name a serial lane — which
+# crit:13bf64f0d5e2 forbids and its judge cited that literal line as proof.
+# So the ranked order is exercised against the allocator directly, in library
+# mode, and the two live lanes pin the same rule end-to-end through the script.
+
+# alloc <budget> <target-lines> — run the allocator over a buffer directly and
+# print the result as `rig/lane=n` pairs, in file order.
+#
+# Invoked through $BALANCE_TEST_SH rather than sourced into this bash process,
+# so the CI dash pass exercises the allocator under dash too. $0 is set to the
+# sweep itself: the script resolves its libs relative to $0, and `sh -c` would
+# otherwise leave that a bare `_`.
+alloc() {
+	local budget="$1" text="$2" d out
+	d="$(mktemp -d)"
+	printf '%s' "$text" >"$d/buf"
+	BALANCE_SWEEP_LIB=1 "${BALANCE_TEST_SH:-sh}" -c \
+		'. "$0"; sy_allocate "$1" "$2" "$3"' \
+		"$SWEEP" "$d/buf" "$budget" "$d/cuts" >/dev/null 2>&1
+	out="$(awk '$1=="target"{printf "%s/%s=%s ", $2, $3, $4}' "$d/buf")"
+	rm -rf "$d"
+	printf '%s' "$out"
+}
+
+# A four-lane buffer, written in the order the sweep would emit it — build
+# first, because BALANCE_LANES measures brakeman before reviewer. That is the
+# point: file order is the WRONG order, so an allocator that ignores the rank
+# and pays out as it reads produces a visibly different answer.
+FOUR='version 1
+generated_at 1000
+target rigA brakeman 4
+target rigA reviewer 3
+target rigA rework 2
+target rigA judge 2
+'
+
+# 1. Under budget, nothing moves. The no-op path is the one that runs on every
+#    healthy cycle, so a clamp that fired unconditionally would be caught here
+#    rather than in production.
+got="$(alloc 20 "$FOUR")"
+if [ "$got" = "rigA/brakeman=4 rigA/reviewer=3 rigA/rework=2 rigA/judge=2 " ]; then
+	report ok "a total under the budget is published unchanged"
+else
+	report FAIL "a total under the budget is published unchanged" "got: $got"
+fi
+
+# 2. THE ORDER CASE. Demand totals 11 against a budget of 7. Downstream-first
+#    pays validation (judge 2) and rework (2) in full, then review (3) in full
+#    — 7 spent — and build, measured first and asked for most, gets nothing.
+#    An allocator paying out in file order would give brakeman 4 and starve the
+#    judge lane, which is the exact inversion this criterion exists to prevent.
+got="$(alloc 7 "$FOUR")"
+if [ "$got" = "rigA/brakeman=0 rigA/reviewer=3 rigA/rework=2 rigA/judge=2 " ]; then
+	report ok "the budget is allocated downstream-first across all four lanes"
+else
+	report FAIL "the budget is allocated downstream-first across all four lanes" "got: $got"
+fi
+
+# 3. THE BOUNDARY LANE TAKES THE REMAINDER, rather than being paid in full and
+#    busting the sum, or dropped to zero and wasting it. Budget 5: judge 2 and
+#    rework 2 in full, and review — which asked for 3 — gets the 1 that is left.
+got="$(alloc 5 "$FOUR")"
+if [ "$got" = "rigA/brakeman=0 rigA/reviewer=1 rigA/rework=2 rigA/judge=2 " ]; then
+	report ok "the lane straddling the budget takes exactly the remainder"
+else
+	report FAIL "the lane straddling the budget takes exactly the remainder" "got: $got"
+fi
+
+# 4. A budget under even the most downstream lane's own ask still holds the
+#    sum. Nothing about "downstream-first" entitles validation to more than
+#    the budget itself.
+got="$(alloc 1 "$FOUR")"
+if [ "$got" = "rigA/brakeman=0 rigA/reviewer=0 rigA/rework=0 rigA/judge=1 " ]; then
+	report ok "a budget below the most downstream ask still bounds the sum"
+else
+	report FAIL "a budget below the most downstream ask still bounds the sum" "got: $got"
+fi
+
+# 5. AN UNRANKED LANE SORTS LAST and cannot jump the queue. A lane added to the
+#    sweep later without a rank entry must not outrank validation by accident of
+#    being measured first — it takes what is left, like build.
+got="$(alloc 7 'version 1
+generated_at 1000
+target rigA mystery 5
+target rigA judge 3
+target rigA brakeman 3
+')"
+if [ "$got" = "rigA/mystery=1 rigA/judge=3 rigA/brakeman=3 " ]; then
+	report ok "a lane missing from the rank sorts last"
+else
+	report FAIL "a lane missing from the rank sorts last" "got: $got"
+fi
+
+# 6. THE BUDGET IS GLOBAL, NOT PER-RIG. Two rigs each asking 4 for the same
+#    lane share one budget of 6 — the shared usage cap this knob protects is an
+#    account's, not a rig's. A per-rig budget would publish 8 here.
+got="$(alloc 6 'version 1
+generated_at 1000
+target rigA brakeman 4
+target rigB brakeman 4
+')"
+if [ "$got" = "rigA/brakeman=4 rigB/brakeman=2 " ]; then
+	report ok "the budget is shared across rigs, not applied per rig"
+else
+	report FAIL "the budget is shared across rigs, not applied per rig" "got: $got"
+fi
+
+# 7. Zero means OFF, matching BALANCER_MERGE_BACKPRESSURE's own 0-disables rule.
+#    Read as a literal budget it would publish nothing but zeros and stall every
+#    lane in the factory — the risk the PRD names first.
+got="$(alloc 0 "$FOUR")"
+if [ "$got" = "rigA/brakeman=4 rigA/reviewer=3 rigA/rework=2 rigA/judge=2 " ]; then
+	report ok "a budget of zero disables the clamp rather than zeroing every lane"
+else
+	report FAIL "a budget of zero disables the clamp rather than zeroing every lane" "got: $got"
+fi
+
+# 8. THE HEADER SURVIVES. The consumers reject a file whose `version 1` line is
+#    missing, so an allocator that rewrote only the target lines and dropped the
+#    header would turn every capped cycle into a silent no-op at every spawn
+#    site — the balancer appearing to work while capping nothing.
+d="$(mktemp -d)"
+printf '%s' "$FOUR" >"$d/buf"
+BALANCE_SWEEP_LIB=1 "${BALANCE_TEST_SH:-sh}" -c \
+	'. "$0"; sy_allocate "$1" "$2" "$3"' "$SWEEP" "$d/buf" 7 "$d/cuts" >/dev/null 2>&1
+if [ "$(head -1 "$d/buf")" = "version 1" ] &&
+	[ "$(sed -n 2p "$d/buf")" = "generated_at 1000" ] &&
+	[ "$(ls "$d" | grep -c '^buf\.')" = 0 ]; then
+	report ok "the allocator preserves the file header and leaves no temp behind"
+else
+	report FAIL "the allocator preserves the file header and leaves no temp behind" \
+		"file: $(cat "$d/buf" | tr '\n' '|'); dir: $(ls "$d" | tr '\n' ' ')"
+fi
+rm -rf "$d"
+
+# 15. THE ALLOCATOR FAILS CLOSED, and this is the case that makes the "never"
+#     in the criterion true rather than merely usual. If it cannot do its job it
+#     must leave the buffer untouched AND say so, because the caller's only
+#     correct answer is to publish nothing: an over-budget generation is the one
+#     outcome this criterion forbids outright, and shipping one silently would
+#     be worse than the stale file consumers already know how to ignore.
+#
+#     The failure is injected where it can be reached honestly — a cuts path in
+#     a directory that does not exist. Stubbing awk instead would break three
+#     unrelated reads and prove nothing about this branch.
+d="$(mktemp -d)"
+printf '%s' "$FOUR" >"$d/buf"
+if BALANCE_SWEEP_LIB=1 "${BALANCE_TEST_SH:-sh}" -c \
+	'. "$0"; sy_allocate "$1" "$2" "$3"' \
+	"$SWEEP" "$d/buf" 7 "$d/no-such-dir/cuts" >/dev/null 2>&1; then
+	report FAIL "the allocator fails closed when it cannot record its cuts" \
+		"reported success"
+elif [ "$(awk '$1=="target"{printf "%s/%s=%s ", $2, $3, $4}' "$d/buf")" = \
+	"rigA/brakeman=4 rigA/reviewer=3 rigA/rework=2 rigA/judge=2 " ]; then
+	report ok "the allocator fails closed when it cannot record its cuts"
+else
+	report FAIL "the allocator fails closed when it cannot record its cuts" \
+		"buffer was rewritten: $(tr '\n' '|' <"$d/buf")"
+fi
+rm -rf "$d"
+
+# ---------------------------------------------------------------------------
+# END-TO-END, through the real script and its two live lanes. The unit cases
+# above prove the ranked order; these prove the knob is actually WIRED — read
+# from roster.conf, applied before the publish, and reported.
+
+# 9. THE WIRING CASE. Pool 5 and PR queue 4 would publish 5 and 4; a budget of
+#    6 must hold the sum at 6, and review outranks build, so reviewer keeps its
+#    full 4 and brakeman takes the remaining 2.
+city="$(new_city 5 4)"
+printf 'BALANCER_RIGS="rigA"\nBALANCER_GLOBAL_MAX="6"\n' >"$city/state/roster.conf"
+out="$(run_sweep "$city")"
+b="$(target_for "$city" brakeman)"
+r="$(target_for "$city" reviewer)"
+if [ "$b" = 2 ] && [ "$r" = 4 ]; then
+	report ok "the global budget is read from roster.conf and holds the published sum"
+else
+	report FAIL "the global budget is read from roster.conf and holds the published sum" \
+		"brakeman=$b reviewer=$r; out: $out"
+fi
+rm -rf "$city"
+
+# 10. POSITIVE CONTROL for case 9: the very same demand with NO budget publishes
+#     5 and 4. Without this the clamp assertion would pass against a sweep that
+#     simply measured low, and every fall-back case below would be vacuous.
+city="$(new_city 5 4)"
+printf 'BALANCER_RIGS="rigA"\n' >"$city/state/roster.conf"
+out="$(run_sweep "$city")"
+b="$(target_for "$city" brakeman)"
+r="$(target_for "$city" reviewer)"
+if [ "$b" = 5 ] && [ "$r" = 4 ]; then
+	report ok "an unset budget leaves the published targets untouched"
+else
+	report FAIL "an unset budget leaves the published targets untouched" \
+		"brakeman=$b reviewer=$r; out: $out"
+fi
+rm -rf "$city"
+
+# 11. A MALFORMED BUDGET IS NOT A BUDGET OF ZERO. It falls back to no clamp and
+#     is NAMED in the report, the same split every other knob here makes
+#     between the value in force and the value that was typed.
+city="$(new_city 5 4)"
+printf 'BALANCER_RIGS="rigA"\nBALANCER_GLOBAL_MAX="six"\n' >"$city/state/roster.conf"
+out="$(run_sweep "$city")"
+b="$(target_for "$city" brakeman)"
+r="$(target_for "$city" reviewer)"
+if [ "$b" = 5 ] && [ "$r" = 4 ] && printf '%s' "$out" | grep -q 'global-max'; then
+	report ok "a malformed budget clamps nothing and is named in the report"
+else
+	report FAIL "a malformed budget clamps nothing and is named in the report" \
+		"brakeman=$b reviewer=$r; out: $out"
+fi
+rm -rf "$city"
+
+# 12. A BUDGET CUT IS LOGGED old-to-new, beside the demand entry that justified
+#     the target it cut. An operator reading balancer.log to explain "why is
+#     brakeman at 2" must not find only "-> 5": the log would then describe a
+#     target the file never carried.
+city="$(new_city 5 4)"
+printf 'BALANCER_RIGS="rigA"\nBALANCER_GLOBAL_MAX="6"\n' >"$city/state/roster.conf"
+out="$(run_sweep "$city")"
+if grep -q 'reason=global-max' "$city/state/balancer.log" 2>/dev/null &&
+	grep -q 'brakeman 5 -> 2' "$city/state/balancer.log" 2>/dev/null; then
+	report ok "a budget cut appends an old-to-new log entry"
+else
+	report FAIL "a budget cut appends an old-to-new log entry" \
+		"log: $(cat "$city/state/balancer.log" 2>/dev/null | tr '\n' '|'); out: $out"
+fi
+rm -rf "$city"
+
+# 13. THE CUT DOES NOT RE-LOG EVERY CYCLE. The demand behind it has not moved,
+#     so a second identical cycle adds no entry — the same "only an applied
+#     change is logged" rule the hysteresis gate follows. Logging it every
+#     cycle would bury the demand history under one line per five minutes.
+city="$(new_city 5 4)"
+printf 'BALANCER_RIGS="rigA"\nBALANCER_GLOBAL_MAX="6"\n' >"$city/state/roster.conf"
+run_sweep "$city" >/dev/null 2>&1
+n1="$(grep -c 'reason=global-max' "$city/state/balancer.log" 2>/dev/null)" || n1=0
+run_sweep "$city" >/dev/null 2>&1
+n2="$(grep -c 'reason=global-max' "$city/state/balancer.log" 2>/dev/null)" || n2=0
+if [ "$n1" = 1 ] && [ "$n2" = 1 ]; then
+	report ok "an unchanged budget cut is not re-logged on the next cycle"
+else
+	report FAIL "an unchanged budget cut is not re-logged on the next cycle" "first=$n1 second=$n2"
+fi
+rm -rf "$city"
+
+# 14. THE BUDGET DOES NOT POISON THE DEMAND MEMORY. The history records what
+#     DEMAND justified, not what the budget allowed, so lifting the budget
+#     restores the lane at once instead of crawling back through the raise gate
+#     — the budget is an override on top of the gate, not a demand signal into
+#     it. Cycle one is capped; cycle two, uncapped, must publish 5 immediately.
+city="$(new_city 5 4)"
+printf 'BALANCER_RIGS="rigA"\nBALANCER_GLOBAL_MAX="6"\n' >"$city/state/roster.conf"
+run_sweep "$city" >/dev/null 2>&1
+capped="$(target_for "$city" brakeman)"
+printf 'BALANCER_RIGS="rigA"\n' >"$city/state/roster.conf"
+run_sweep "$city" >/dev/null 2>&1
+freed="$(target_for "$city" brakeman)"
+if [ "$capped" = 2 ] && [ "$freed" = 5 ]; then
+	report ok "lifting the budget restores the lane without a raise-gate climb"
+else
+	report FAIL "lifting the budget restores the lane without a raise-gate climb" \
+		"capped=$capped freed=$freed"
+fi
+rm -rf "$city"
+
+# ---------------------------------------------------------------------------
 echo
 echo "balance-sweep self-test: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

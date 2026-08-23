@@ -174,7 +174,7 @@ then `gc reload`. Verify with
    switchyard-gt link <CODE>
    ```
 2. In a coordinator session, run the [`AGENTS.md`](AGENTS.md) loop: `whoami` →
-   `set_scope` → `get_project_briefing` → triage `list_intake_queue`.
+   `set_scope` → `get_project_briefing` → triage `list_intake`.
 3. Dispatch a bead to the pool: `gc sling <rig>/switchyard-ops.brakeman <bead-id>`
    (or bare `gc sling <bead-id>` — `default_sling_targets` routes it).
 4. Wait one minute, then `gc session list`. The `pool-spawn` order should have

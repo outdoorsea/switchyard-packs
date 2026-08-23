@@ -18,7 +18,7 @@ the dashboard.
    project**. Registering means "I handle this project" — it makes you the agent
    its page lists and claims any open "assign an agent" request — so it is a
    claim about ownership, not a greeting. Propose under this ref.
-3. `list_issues` with `filter: "open"` — the duplicate-detection candidate set.
+3. `list_intake` with `kind: "issue", filter: "open"` — the duplicate-detection candidate set.
    It returns **bodies by default** precisely because judging a semantic
    duplicate needs them, so do not pass `include: "none"`.
 4. File what you can evidence, up to **10 proposals** this pass (the sweep will
@@ -79,7 +79,7 @@ is a manual repair. **When two issues merely share a subsystem, that is not a
 duplicate — leave them alone.** An issue you cannot confidently pair and cannot
 confidently map to a PRD is a fine outcome; say nothing about it.
 
-Never invent an id. If `list_issues` or `list_prds` did not return it this pass,
+Never invent an id. If `list_intake(kind='issue')` or `list_prds` did not return it this pass,
 it is not a candidate this pass.
 
 ## You run UNATTENDED — never ask an interactive question

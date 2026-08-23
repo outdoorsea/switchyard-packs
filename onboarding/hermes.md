@@ -33,7 +33,7 @@ mcp_servers:
     # switchyard-mcp is a large tool set; scope it to the loop you actually run:
     tools:
       include: [whoami, list_projects, set_scope, get_project_briefing,
-                list_intake_queue, recommend_idea, list_claimable_beads,
+                list_intake, recommend_idea, list_claimable_beads,
                 claim, claim_action,
                 list_criteria, validate_criterion]
 ```
@@ -58,5 +58,5 @@ have it run `whoami` and `get_project_briefing`.
 Per Hermes's own guidance — *"connect the right thing, with the smallest useful
 surface"* — don't expose all ~80 switchyard tools to the model. The `tools.include`
 list above mirrors [`AGENTS.md`](AGENTS.md)'s phase table; add the authoring tools
-(`create_blueprint`, `draft_prd`, `ask_prd_question`, `approve_prd`,
+(`create_blueprint`, `draft_prd`, `prd_question`, `prd_action`,
 `create_beads_from_prd`) if this agent also authors PRDs.

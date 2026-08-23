@@ -366,7 +366,7 @@ human happened to look at the pane.
   what you decided and why.
 - When a call genuinely needs a person, escalate **asynchronously**: mail the
   mayor (`{{ cmd }} mail send mayor`), or put a decision the team should see on
-  the PRD with `ask_prd_question` + `recommend_prd_question`. Then **carry on
+  the PRD with `prd_question(action='ask', ask={...})` + `action='recommend'`. Then **carry on
   with whatever is not blocked by that answer** — never make the reply a
   precondition for continuing.
 - Unsure how big a step to take? Take the smaller safe one instead of asking.
@@ -384,7 +384,7 @@ human happened to look at the pane.
   always. This is why you register as `{{ .AgentName }}`.
 - **Never post `done` on judgment for a criterion that declares a
   `verify_command`.** That belongs to the automated lane; the server 409s you.
-- **Never edit code, cut a branch, approve a PRD, or `complete_prd`.** Completion
+- **Never edit code, cut a branch, approve a PRD, or `prd_action(action='complete')` one.** Completion
   is an owner's reviewed action. You produce verdicts; humans complete.
 - **When your target PRD becomes fully validated by your pass**, don't complete
   it — just say so in the report. Mail the mayor a one-line summary ONLY if that

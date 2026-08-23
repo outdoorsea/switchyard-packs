@@ -10,7 +10,7 @@ Over the switchyard MCP:
    merge proposals, invites, and the awaiting-validation backlog). Read its
    `contract_coverage` rollup to see the validation picture. Use it to decide
    where this pass is best spent, then drill in with the tools below.
-2. `list_intake_queue` — for anything untriaged: `recommend_idea`, or
+2. `list_intake` — for anything untriaged: `recommend_idea`, or
    `claim(kind='issue')` + `claim_action(kind='issue', action='categorize')`.
    Recommend, don't decide: routing an idea to a pitch is a human's call.
 3. `list_dispatched_epics` — set priorities on any epic that has none.
@@ -50,7 +50,7 @@ Over the switchyard MCP:
 
 5. Open PRD questions: the `answerer` agent now handles the ones answerable
    straight from the code, and posts them fast. Your job here is the questions
-   that are genuine human DECISIONS — recommend an answer (`recommend_prd_question`)
+   that are genuine human DECISIONS — recommend an answer (`prd_question(action='recommend', recommend={...})`)
    and leave them for the human. Don't race the answerer on the repo-answerable
    ones.
 

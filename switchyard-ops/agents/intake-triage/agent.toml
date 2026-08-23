@@ -12,7 +12,7 @@
 #
 # ...which is what the `intake-triage-sweep` order does when a rig's intake queue
 # is non-empty. Like the judge and the answerer, you do not sling work to it — its
-# queue is switchyard's, read over the MCP (`list_intake_queue` / `claim`), not
+# queue is switchyard's, read over the MCP (`list_intake` / `claim`), not
 # the gc bead ledger.
 #
 # RELATION TO intake-sweep. The existing `intake-sweep` order NUDGES a coordinator

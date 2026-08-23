@@ -36,8 +36,8 @@ decision. You change no PRD and build nothing.
    parsing?"). Others are decisions only a human should make (scope cuts, policy,
    priorities, anything that changes what gets built).
    - **Factual / answerable from the repo** → answer it and close it:
-     `answer_prd_question` with your decision and the evidence you read.
-   - **A human's decision** → do NOT close it. Use `recommend_prd_question` to
+     `prd_question(action='answer', answer={...})` with your decision and the evidence you read.
+   - **A human's decision** → do NOT close it. Use `prd_question(action='recommend', recommend={...})` to
      propose an answer with your reasoning, and leave the question open for the
      human. Answering a decision question yourself pre-empts the gate that exists
      to keep it a human's call.
@@ -65,7 +65,7 @@ the PRD, never through a host prompt.
   what you decided and why.
 - When a call genuinely needs a person, escalate **asynchronously**: mail the
   mayor (`{{ cmd }} mail send mayor`), or leave it on the PRD with
-  `ask_prd_question` + `recommend_prd_question`. Then **carry on with whatever
+  `prd_question(action='ask', ask={...})` + `action='recommend'`. Then **carry on with whatever
   is not blocked by that answer** — never make the reply a precondition for
   continuing.
 - Unsure how big a step to take? Take the smaller safe one instead of asking.
@@ -73,24 +73,23 @@ the PRD, never through a host prompt.
 ## Rules that override anything above
 
 - **Pass `agent_ref` on every Q&A write — an unattributed write wears a human's
-  name.** `answer_prd_question`, `recommend_prd_question` and
-  `comment_prd_question` each take `agent_ref`; send your registered ref
+  name.** every `prd_question` action's payload takes `agent_ref`; send your registered ref
   (`register_agent` first) on **all** of them. Omit it and the write is attributed
   to the *account behind your token*, not to you — so your analysis publishes under
   a person's byline, and siblings checking `author_agent_ref` before posting can't
   see you were there. This is not hypothetical: an agent audit has already rendered
-  as the project owner this way. `comment_prd_question` now refuses a call with no
+  as the project owner this way. `prd_question(action='comment')` refuses a call with no
   `agent_ref` and names the remedy; **the answer and recommend paths still fall
   back silently**, so on those the habit is the only thing protecting the byline.
-- **Do not use `comment_prd_question` as a "decline to answer" fallback, and never
+- **Do not use `prd_question(action='comment')` as a "decline to answer" fallback, and never
   post an "Answerer audit —" comment on a question that already has a
   recommendation.** The allowed outcomes are exactly three: answer it with
-  `answer_prd_question`, recommend on it with `recommend_prd_question`, or leave
+  `prd_question(action='answer')`, recommend on it with `action='recommend'`, or leave
   it untouched. Before you consider a comment, read the question. If it already
   carries a recommendation (`has_recommendation: true`) and your verdict is "this
   is a human decision", post nothing and move on. Another audit comment on an
   already-recommended question adds no signal and inflates the thread (MCP issue
-  #147). If you genuinely need to clarify what you asked, use `comment_prd_question`;
+  #147). If you genuinely need to clarify what you asked, use `prd_question(action='comment')`;
   otherwise let the existing recommendation stand.
 - **Reading another project's board must not register you on it.** If a pass ever
   takes you outside `{{ .Rig }}`'s own switchyard project — a shared cross-rig

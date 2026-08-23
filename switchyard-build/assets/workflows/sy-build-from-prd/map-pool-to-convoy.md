@@ -102,7 +102,7 @@ body; do not branch on the status code alone.
 | Held by another lane | `bead <id> is not claimable: status=<s>, held_by="<who>"` | Another lane owns it, or the pool listing went stale between step 1 and now | **SKIP and report.** Never release it |
 | Already yours | same shape, but `held_by` equals the identity you derived in step 3 | A previous attempt of THIS stage claimed it | **Treat as claimed.** Put it in the convoy |
 | WIP cap | body carries `wip_limit` and `held_bead`; message begins `WIP limit reached:` | This identity already holds its limit — the per-bead identity scheme was not followed | **Stop.** Fix the identity; do not skip the bead |
-| PRD admission | message names a blocking PRD and offers `activate_prd`; mentions `prd_wip_limit` | Project-level admission control is holding this PRD's work back | **Stop and report.** Not a per-bead condition |
+| PRD admission | message names a blocking PRD and offers `prd_action(action='activate')`; mentions `prd_wip_limit` | Project-level admission control is holding this PRD's work back | **Stop and report.** Not a per-bead condition |
 
 The pool listing going stale between the read and the claim is ordinary, not an
 error: another lane can take a bead in that window. Skip it and carry on.

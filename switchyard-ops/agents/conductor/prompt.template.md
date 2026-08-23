@@ -104,7 +104,7 @@ is independent.
    and you are expected to use both:
    - **Project truth over `switchyard-mcp`** (already scoped): `get_project_briefing`
      for the shape of things, `list_prds` / `get_prd` for what is specced,
-     `list_criteria` for what is built and validated, `list_issues` for what is
+     `list_criteria` for what is built and validated, `list_intake(kind='issue')` for what is
      broken, `roadmap` for what is next, `list_events` for what just happened.
    - **The repository at `{{ .RigRoot }}`** — a checkout on the default branch.
      Read the files the question is about; `git -C {{ .RigRoot }} log` for when and

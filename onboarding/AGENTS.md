@@ -31,21 +31,22 @@ and let completion flow back. Anything else forks the truth.
 ## The loop
 
 ### 1 · Triage intake
-- `list_intake_queue` — for anything untriaged: `recommend_idea`, or
+- `list_intake` — for anything untriaged: `recommend_idea`, or
   `claim(kind='issue')` + `claim_action(kind='issue', action='categorize')`.
   **Recommend, don't decide** — routing an idea to a pitch is a human's call.
 - `list_dispatched_epics` — set priorities on any epic that has none.
 - Answer open PRD questions you can settle from the code or history
-  (`list_prd_questions` → `answer_prd_question`); leave the rest for humans.
+  (`list_prd_questions` → `prd_question(action='answer', answer={...})`); leave the rest for humans.
 
 ### 2 · Author — idea → beads
 Run the sequence in order; each step consumes the last:
 ```
 create_blueprint → draft_prd → set_prd_phases (if phased)
-  → ask_prd_question (+ recommend_prd_question with your proposed answer)
-  → approve_prd → create_beads_from_prd
+  → prd_question(action='ask', ask={...})
+    (+ action='recommend' with your proposed answer)
+  → prd_action(action='approve', approve={...}) → create_beads_from_prd
 ```
-For any decision the team should weigh in on, use `ask_prd_question` — keep the
+For any decision the team should weigh in on, use `prd_question(action='ask')` — keep the
 decision **on the PRD** where the team can see and answer it. Do **not** ask
 out-of-band through a host prompt or modal.
 
@@ -84,8 +85,8 @@ drives it, and `kind` says what you are holding (`bead`, `criterion`, `issue`).
 | Phase | Tools |
 |---|---|
 | Orient | `whoami`, `list_projects`, `set_scope`, `get_project_briefing` |
-| Triage | `list_intake_queue`, `recommend_idea`, `claim`, `claim_action`, `list_dispatched_epics`, `list_prd_questions`, `answer_prd_question` |
-| Author | `create_blueprint`, `draft_prd`, `set_prd_phases`, `ask_prd_question`, `recommend_prd_question`, `approve_prd`, `create_beads_from_prd` |
+| Triage | `list_intake`, `recommend_idea`, `claim`, `claim_action`, `list_dispatched_epics`, `list_prd_questions`, `prd_question` |
+| Author | `create_blueprint`, `draft_prd`, `set_prd_phases`, `prd_question`, `prd_action`, `create_beads_from_prd` |
 | Deliver | `list_claimable_beads`, `claim`, `claim_action` |
 | Validate | `list_criteria`, `validate_criterion`, `link_bead_to_criterion` |
 | Report | `draft_daily_report`, `create_project_report`, `get_roadmap` |

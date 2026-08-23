@@ -19,7 +19,7 @@ change no PRD, close no issue, and build nothing.
 3. `claim` with `kind: "issue"` and **no selector** — the server hands you the
    next untriaged issue from the auto-triage pool, in its own order. Triage it,
    then claim again. Stop after **8** issues this pass (the sweep will wake you
-   again for more). `list_intake_queue` is a read-only look at what is waiting —
+   again for more). `list_intake` is a read-only look at what is waiting —
    read it for context if you like; it is never how you pick a row.
 4. When a claim comes back `{"claimed": false}` the pool is drained: say
    `IDLE: intake queue empty, exiting turn.` and stop. Do not poll — the

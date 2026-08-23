@@ -559,6 +559,216 @@ else
 fi
 rm -rf "$c"
 
+# ---------------------------------------------------------------------------
+# THE BALANCER'S REWORK TARGET IS A CEILING ON THE REVIVAL ABOVE
+# (switchyard PRD #397, crit:147c7538a3f6).
+#
+# WHAT IS CAPPED IS THE REVIVAL, NOT THE ROUTING, and the two are asserted
+# apart below. A target of zero means the balancer has allocated this lane no
+# sessions, so the sweep must not ADD one — but a rig that already has a live
+# rework worker still gets its rejection routed, because withholding a nudge
+# from an idle worker converts a throttle into the silent stall this whole
+# order exists to remove. Capping the spawn starves a lane; capping the nudge
+# drops judged work on the floor.
+#
+# BOTH REVIVAL PATHS ARE CAPPED, and the wake case is the load-bearing one. The
+# rework agent's 30m idle_timeout makes ASLEEP the common state (see the
+# revival block's own note), so a cap that gated only `gc session new` would
+# be satisfied by every test here and still never fire in production.
+#
+# EVERY CASE ASSERTS THE MAIL TOO. A capped rig that merely skips the revival
+# falls through to the no-live-worker accounting and mails the mayor "fix that
+# registration" every cycle, for a rig where nothing is broken at all — a
+# throttle reported as a fault. The no-spawn half alone is satisfied by that
+# implementation, so the pair is what pins it.
+# ---------------------------------------------------------------------------
+
+# balancer_targets CITY STAMP BODY — plant a balancer.targets file whose
+# generated_at is STAMP and whose target lines are BODY. The stamp is a
+# parameter rather than always `now` because the freshness window is SYMMETRIC:
+# a far-future file must be rejected exactly like a stale one, or a clock
+# skewed forward pins a dead file as permanently current.
+balancer_targets() {
+	printf 'version 1\ngenerated_at %s\n%s\n' "$2" "$3" >"$1/state/balancer.targets"
+}
+
+# rework_city — a fresh city with one rejection, opted into the rework lane and
+# with NO live rework session, so the sweep's very next act is the revival the
+# balancer target gates.
+rework_city() {
+	local c
+	c="$(new_city)"
+	reject "$c" 330 "crit:aaa"
+	criterion "$c" 330 "crit:aaa"
+	printf 'REWORK_RIGS="rigA"\n' >"$c/state/roster.conf"
+	printf '%s' "$c"
+}
+
+# asleep_rework CITY — the same rig with an ASLEEP rework session, the state the
+# agent spends most of its life in and the one `gc session wake` revives.
+asleep_rework() {
+	cat >"$1/sessions.json" <<'JSON'
+{"sessions":[{"template":"rigA/switchyard-ops.brakeman","alias":"rigA-brakeman-adhoc-stub","state":"active"},
+{"template":"rigA/switchyard-ops.rework","alias":"rigA-rework-adhoc-stub","state":"asleep"}]}
+JSON
+}
+
+# revived CITY — spawns + wakes in this cycle, the revival the cap gates.
+revived() {
+	local s w
+	s="$(grep -c '^SPAWN ' "$1/spawned.log" 2>/dev/null)" || s=0
+	w="$(grep -c '^WAKE ' "$1/woken.log" 2>/dev/null)" || w=0
+	echo $((${s:-0} + ${w:-0}))
+}
+
+# misrouted_mail CITY — did a capped cycle wake the mayor with a false alarm?
+misrouted_mail() {
+	grep -q 'could not route' "$1/mailed.log" 2>/dev/null && echo 1 || echo 0
+}
+
+# fallback_case CITY NAME — assert the revival happened exactly as it does with
+# no balancer at all. Every fall-back below reduces to this one claim, and the
+# shared helper keeps them from drifting into six slightly different readings
+# of "behaves as it does today".
+fallback_case() {
+	if [ "$(revived "$1")" = 1 ] && [ "$(misrouted_mail "$1")" = 0 ]; then
+		report ok "$2"
+	else
+		report FAIL "$2" "revived $(revived "$1"), mail: $(cat "$1/mailed.log" 2>/dev/null)"
+	fi
+}
+
+# A zero target stops the SPAWN path, and reports nothing.
+c="$(rework_city)"
+balancer_targets "$c" "$(date +%s)" "target rigA rework 0"
+run_sweep "$c"
+if [ "$(revived "$c")" = 0 ] && [ "$(misrouted_mail "$c")" = 0 ]; then
+	report ok "a zero rework target stops the spawn and mails no false alarm"
+else
+	report FAIL "a zero rework target stops the spawn and mails no false alarm" \
+		"revived $(revived "$c"), mail: $(cat "$c/mailed.log" 2>/dev/null)"
+fi
+rm -rf "$c"
+
+# A zero target stops the WAKE path too — the revival that actually happens in
+# production, since the rework agent is asleep far more often than absent.
+c="$(rework_city)"
+asleep_rework "$c"
+balancer_targets "$c" "$(date +%s)" "target rigA rework 0"
+run_sweep "$c"
+if [ "$(revived "$c")" = 0 ] && [ "$(misrouted_mail "$c")" = 0 ]; then
+	report ok "a zero rework target stops the wake and mails no false alarm"
+else
+	report FAIL "a zero rework target stops the wake and mails no false alarm" \
+		"revived $(revived "$c"), mail: $(cat "$c/mailed.log" 2>/dev/null)"
+fi
+rm -rf "$c"
+
+# EVERY rejection of a capped rig is suppressed, not just the first. The
+# revival runs at most once per rig per cycle (rework_attempted), so the second
+# rejection never reaches the cap check at all — it is the persistent per-rig
+# flag that has to hold, and an implementation that simply `continue`d inside
+# the revival block would pass both cases above and mail a false alarm here.
+c="$(rework_city)"
+reject "$c" 330 "crit:bbb"
+criterion "$c" 330 "crit:bbb"
+balancer_targets "$c" "$(date +%s)" "target rigA rework 0"
+run_sweep "$c"
+if [ "$(revived "$c")" = 0 ] && [ "$(nudges "$c")" = 0 ] && [ "$(misrouted_mail "$c")" = 0 ]; then
+	report ok "a capped rig suppresses every rejection it has, not only the first"
+else
+	report FAIL "a capped rig suppresses every rejection it has, not only the first" \
+		"revived $(revived "$c"), routed $(nudges "$c"), mail: $(cat "$c/mailed.log" 2>/dev/null)"
+fi
+rm -rf "$c"
+
+# ROUTING IS NEVER CAPPED. Same zero target, but the lane already has a live
+# worker: the rejection must still reach it. A cap that gated the nudge would
+# leave a criterion a judge refused with nobody on it and no alarm — which is
+# strictly worse than the unbalanced lane it was trying to fix.
+c="$(rework_city)"
+cat >"$c/sessions.json" <<'JSON'
+{"sessions":[{"template":"rigA/switchyard-ops.brakeman","alias":"rigA-brakeman-adhoc-stub","state":"active"},
+{"template":"rigA/switchyard-ops.rework","alias":"rigA-rework-adhoc-stub","state":"active"}]}
+JSON
+balancer_targets "$c" "$(date +%s)" "target rigA rework 0"
+run_sweep "$c"
+routed_to="$(grep '^NUDGE ' "$c/nudged.log" 2>/dev/null | awk '{print $2}' | sort -u)"
+if [ "$(nudges "$c")" = 1 ] && [ "$routed_to" = "rigA-rework-adhoc-stub" ]; then
+	report ok "a zero target still routes to a rework session that is already live"
+else
+	report FAIL "a zero target still routes to a rework session that is already live" \
+		"routed $(nudges "$c") to: $routed_to"
+fi
+rm -rf "$c"
+
+# A non-zero target leaves the revival exactly as it is today. min(1, target)
+# can only land on 1 or 0 at this site — the whole fan-out is one session per
+# rig — so a target ABOVE 1 is not authority to stack a second.
+c="$(rework_city)"
+balancer_targets "$c" "$(date +%s)" "target rigA rework 3"
+run_sweep "$c"
+if [ "$(revived "$c")" = 1 ]; then
+	report ok "a non-zero rework target leaves the revival untouched"
+else
+	report FAIL "a non-zero rework target leaves the revival untouched" \
+		"revived $(revived "$c")"
+fi
+rm -rf "$c"
+
+# ---------------------------------------------------------------------------
+# THE FALL-BACK, one case per way the file can be unusable. Every one of these
+# passes VACUOUSLY before the cap exists — a sweep that ignores the file
+# satisfies them all — so each was proved load-bearing with a mutation probe
+# against the implementation rather than trusted because it is green.
+# ---------------------------------------------------------------------------
+
+# Absent: the file the balancer has never written.
+c="$(rework_city)"
+run_sweep "$c"
+fallback_case "$c" "an absent targets file revives as it does today"
+rm -rf "$c"
+
+# Stale: a balancer that died. Three missed cycles is the default tolerance.
+c="$(rework_city)"
+balancer_targets "$c" "$(($(date +%s) - 1800))" "target rigA rework 0"
+run_sweep "$c"
+fallback_case "$c" "a stale targets file revives as it does today"
+rm -rf "$c"
+
+# Far-future: the other half of the SYMMETRIC window. Keyed only on an upper
+# bound, a clock skewed forward would pin a long-dead file as current forever.
+c="$(rework_city)"
+balancer_targets "$c" "$(($(date +%s) + 1800))" "target rigA rework 0"
+run_sweep "$c"
+fallback_case "$c" "a far-future targets file revives as it does today"
+rm -rf "$c"
+
+# Malformed: ALL-OR-NOTHING. The zero-target line here is perfectly good; the
+# junk line beside it rejects the whole file. Honouring the lines a reader
+# happens to recognise is acting on a contract it has already failed to verify.
+c="$(rework_city)"
+balancer_targets "$c" "$(date +%s)" "target rigA rework 0
+this is not a target line"
+run_sweep "$c"
+fallback_case "$c" "one malformed line rejects the whole targets file"
+rm -rf "$c"
+
+# Another lane's target is not this one's: brakeman going to zero must never
+# stop the rework lane reviving.
+c="$(rework_city)"
+balancer_targets "$c" "$(date +%s)" "target rigA brakeman 0"
+run_sweep "$c"
+fallback_case "$c" "another lane's zero target does not cap rework"
+rm -rf "$c"
+
+# Another rig's target is not this rig's.
+c="$(rework_city)"
+balancer_targets "$c" "$(date +%s)" "target rigB rework 0"
+run_sweep "$c"
+fallback_case "$c" "another rig's zero target does not cap this rig"
+rm -rf "$c"
+
 # SY_NS override: a city that imported the pack under a different key sets
 # SY_NS in roster.conf, and every qualified-name construction follows it —
 # resolution, routing, and the nudge target alike.

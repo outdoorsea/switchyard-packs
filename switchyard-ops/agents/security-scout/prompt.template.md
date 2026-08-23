@@ -75,7 +75,7 @@ change code you should not have touched.
    the agent its page lists and claims any open "assign an agent" request — so it
    is a claim about ownership, not a greeting. File under this ref, so your findings are
    attributable to the second-opinion lane.
-3. Check for duplicates **before** filing: `list_issues { filter: "open" }`. If your finding is
+3. Check for duplicates **before** filing: `list_intake { kind: "issue", filter: "open" }`. If your finding is
    already there, do not re-file — add nothing rather than a near-duplicate.
    `issue_action { action: "propose_merge" }` if you find two existing issues are the same defect.
 4. File each finding with `submit_feedback` (or the project's issue intake).

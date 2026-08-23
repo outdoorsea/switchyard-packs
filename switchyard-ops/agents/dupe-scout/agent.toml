@@ -15,7 +15,7 @@
 # WHY THIS LANE EXISTS (switchyard PRD #327 P1). Duplicate detection and
 # covered-by detection ran only inside `switchyard-companion` — a second runtime
 # an operator had to install, credential and supervise before the factory worked.
-# Both sweeps need NO MCP tool that is missing: `list_issues`, `list_prds`,
+# Both sweeps need NO MCP tool that is missing: `list_intake`, `list_prds`,
 # `issue_action`'s `propose_merge` and `propose_coverage` all ship today. That makes this
 # the lowest-risk proof that a companion verb becomes a pack agent, which is why
 # the PRD lands it before the builder-lane cutover.

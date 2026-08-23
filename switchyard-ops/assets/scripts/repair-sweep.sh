@@ -391,8 +391,19 @@ $prev"
   #                     missing or suspended mails the mayor within one cycle
   #                     (the silent-failure invariant) instead of spinning a
   #                     doomed spawn forever.
+  #   rework_capped:    the balancer published a rework target of 0 for this
+  #                     rig, so the revival was DECLINED rather than attempted.
+  #                     Tracked separately from rework_warming because the two
+  #                     mean opposite things to the mail below: warming says a
+  #                     worker is on its way, capped says one deliberately is
+  #                     not. It must suppress the no-live-worker accumulation
+  #                     all the same — a throttled lane is a decision, not a
+  #                     broken registration, and reporting it as one would mail
+  #                     the mayor "fix that registration" every cycle about a
+  #                     rig where nothing is wrong.
   rework_attempted=0
   rework_warming=0
+  rework_capped=0
 
   # A HERE-DOC, NOT A PIPE. `printf ... | while read` runs the loop body in a
   # SUBSHELL, so every `routed`/`failed` this loop records would be discarded at
@@ -522,24 +533,73 @@ $prev"
     # Either revival routes NEXT cycle — a nudge into a booting or waking pane
     # is lost, and the assignment marker would then suppress the retry for a
     # full TTL.
+    #
+    # THE BALANCER'S REWORK TARGET IS A CEILING ON THIS REVIVAL (switchyard PRD
+    # #397). sy_balancer_capped applies the one rule every spawn site in this
+    # pack shares — present, fresh and well-formed, min() never max(), and an
+    # absent/stale/malformed/unreadable file answering "no target" so the lane
+    # behaves byte-for-byte as it does today. It lives in roster.sh rather than
+    # being re-derived here for the reason its own header gives: a rule
+    # re-implemented per caller is the same rule only by coincidence.
+    #
+    # THE CEILING PASSED IS 1 BECAUSE THAT IS THIS REVIVAL'S WHOLE FAN-OUT.
+    # rework_attempted holds it to one wake-or-spawn per rig per cycle, and the
+    # agent runs max_active_sessions = 1, so min(1, target) can land only on 1
+    # or 0. A target ABOVE 1 is therefore not authority to stack a second
+    # session; zero is the only value that moves this lane. min() vs max() is
+    # consequently unprovable from here — targets 1 and 9 are indistinguishable
+    # at this call site — and is asserted where it is decidable, on
+    # sy_balancer_capped itself.
+    #
+    # IT GATES THE REVIVAL, NEVER THE ROUTING. The nudge below is deliberately
+    # left uncapped: a rig that already has a live rework worker still gets its
+    # rejection routed, because a target of zero is an instruction not to ADD
+    # capacity, not licence to leave a criterion a judge refused sitting unowned
+    # in front of an idle worker. Capping the spawn starves a lane for a cycle;
+    # capping the nudge is the silent drop this whole order exists to remove.
+    #
+    # BOTH REVIVAL PATHS ARE GATED, and wake is the one that matters. The
+    # agent's 30m idle_timeout makes ASLEEP its common state, so a cap that
+    # gated only `gc session new` would read as correct in every test and
+    # essentially never fire in production.
     if [ "$worker_suffix" = ".rework" ] && [ -z "$target" ] && [ "$rework_attempted" -eq 0 ]; then
       rework_attempted=1
-      _rw_agent="$rig/$SY_NS.rework"
-      _rw_any="$(sy_session_alias_for "$_rw_agent" "" 2>/dev/null)" || _rw_any=""
-      if [ -n "$_rw_any" ]; then
-        if gc session wake "$_rw_any" >/dev/null 2>&1; then
+      if [ "$(sy_balancer_capped "$rig" rework 1)" = 0 ]; then
+        rework_capped=1
+        echo "repair-sweep: $rig rework lane is at the balancer's target of 0; not reviving it this cycle"
+      else
+        _rw_agent="$rig/$SY_NS.rework"
+        _rw_any="$(sy_session_alias_for "$_rw_agent" "" 2>/dev/null)" || _rw_any=""
+        if [ -n "$_rw_any" ]; then
+          if gc session wake "$_rw_any" >/dev/null 2>&1; then
+            rework_warming=1
+            echo "repair-sweep: $rig rework session $_rw_any is asleep; woke it, routing next cycle"
+          fi
+        elif gc session new "$_rw_agent" --no-attach >/dev/null 2>&1; then
           rework_warming=1
-          echo "repair-sweep: $rig rework session $_rw_any is asleep; woke it, routing next cycle"
+          echo "repair-sweep: $rig has repair demand and no rework session; spawned one, routing next cycle"
         fi
-      elif gc session new "$_rw_agent" --no-attach >/dev/null 2>&1; then
-        rework_warming=1
-        echo "repair-sweep: $rig has repair demand and no rework session; spawned one, routing next cycle"
       fi
     fi
     if [ -z "$target" ] && [ "$rework_warming" -eq 1 ]; then
       # The lane is warming — a wake/spawn just succeeded. Not a failure, not
       # routed: the next cycle (1h) finds it live and routes with the marker
       # ledger intact.
+      continue
+    fi
+    if [ -z "$target" ] && [ "$rework_capped" -eq 1 ]; then
+      # The lane is THROTTLED, not broken. Falling through to no-live-worker
+      # would mail the mayor "check pool-spawn is running and the rig is not
+      # suspended ... fix that registration" for a rig the balancer switched
+      # off on purpose, every cycle for as long as the target holds — turning
+      # the throttle into a standing false alarm and burying the real
+      # no-live-worker reports underneath it.
+      #
+      # SEPARATE FROM THE WARMING CHECK ABOVE, not folded into it, because the
+      # two are opposite claims about the next cycle: warming says a worker is
+      # arriving, capped says none was asked for. Nothing is dropped either way
+      # — the rejection keeps its place in the rollup and routes on whichever
+      # cycle the lane is allowed capacity again.
       continue
     fi
     if [ -z "$target" ]; then

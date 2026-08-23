@@ -21,7 +21,7 @@ $PACK_DIR/assets/scripts/refactor-scan-gate.sh check {{ .Rig }} {{ .RigRoot }}
 
 - **`SKIP`** (exit 10) — say `IDLE: refactor scan gated, HEAD unchanged, exiting
   turn.` and **stop immediately**. Do not run the git evidence commands, do not
-  read source, do not call `list_prds` or `list_issues`. The whole point is
+  read source, do not call `list_prds` or `list_intake`. The whole point is
   the reads you do not do.
 - **`PROCEED`** (exit 0) — run the pass below.
 
@@ -82,7 +82,7 @@ feature flags is doing its job. Pair churn with defects, coupling, or drift.
 ## Two things you do NOT file
 
 - **Anything already covered by an open PRD or issue.** Check first:
-  `list_prds`, `list_issues { filter: "open" }`, and `get_prd` on anything that
+  `list_prds`, `list_intake { kind: "issue", filter: "open" }`, and `get_prd` on anything that
   looks close.
   Refiling work in flight wastes a reviewer's attention and competes with it.
 - **Token/context efficiency of the switchyard API surface.** That is PRD #281,

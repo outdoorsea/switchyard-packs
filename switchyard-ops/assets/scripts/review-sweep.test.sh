@@ -676,6 +676,101 @@ else
 fi
 rm -rf "$c"
 
+# ---------------------------------------------------------------------------
+# 11. LIVE CAPACITY IS PANE-PROBED (switchyard PRD #397, crit:e982acfda325).
+#
+#     "Live capacity for target comparison counts only sessions passing the
+#      pane-state liveness probe, so a session frozen at an idle prompt does
+#      not occupy a balancer slot."
+#
+#     Same scenario as section 10 — three open PRs, one live reviewer, ceiling
+#     4 — with a published target of 2. The reviewer takes a PR either way, so
+#     the only thing that moves the spawn count is whether that reviewer is
+#     counted as capacity: today it is, leaving room for ONE more; frozen at an
+#     idle prompt it is not, leaving room for TWO.
+#
+#     Every fixture in section 10 carries no session_name and no tmux, so its
+#     capture cannot be taken and its reviewer still counts — which is why
+#     those cases are unchanged by this probe.
+# ---------------------------------------------------------------------------
+
+# pane_stub CITY — give the city's sessions a session_name and a tmux that
+# serves $CITY/panes/<session_name>. A session with no pane file is a capture
+# FAILURE, which is the fail-open direction and must still count.
+pane_stub() {
+	local t
+	mkdir -p "$1/panes"
+	cat >"$1/bin/tmux" <<'STUB'
+#!/bin/sh
+sess=""; prev=""
+for a in "$@"; do [ "$prev" = "-t" ] && sess="$a"; prev="$a"; done
+f="$GC_CITY/panes/$sess"
+[ -n "$sess" ] && [ -r "$f" ] || exit 1
+cat "$f"
+exit 0
+STUB
+	chmod +x "$1/bin/tmux"
+	t="$(mktemp)"
+	jq '.sessions |= map(. + {session_name: ("s-" + .alias)})' "$1/sessions.json" >"$t" && mv "$t" "$1/sessions.json"
+}
+
+# 11a. CONTROL — a reviewer whose pane is LIVE still occupies its slot, so the
+#      target of 2 leaves room for exactly one spawn, as in 10a.
+c="$(new_city)"
+balancer_scenario "$c"
+pane_stub "$c"
+printf '✻ Thinking… (12s · esc to interrupt)\n' >"$c/panes/s-rigA-reviewer-1"
+balancer_targets "$c" "version 1
+generated_at $(date +%s)
+target rigA reviewer 2"
+run_sweep "$c"
+s="$(spawns "$c")"
+if [ "$s" = 1 ]; then
+	report ok "CONTROL: a live reviewer still occupies a balancer slot"
+else
+	report FAIL "CONTROL: a live reviewer still occupies a balancer slot" \
+		"spawns=$s (want 1) — the probe freed a slot held by a working reviewer"
+fi
+rm -rf "$c"
+
+# 11b. THE CRITERION — the same reviewer frozen at an idle prompt holds no
+#      slot, so the lane is one below its target and spawns two.
+c="$(new_city)"
+balancer_scenario "$c"
+pane_stub "$c"
+printf 'Claude usage limit reached.\nRun /usage-credits to continue.\n' >"$c/panes/s-rigA-reviewer-1"
+balancer_targets "$c" "version 1
+generated_at $(date +%s)
+target rigA reviewer 2"
+run_sweep "$c"
+s="$(spawns "$c")"
+if [ "$s" = 2 ]; then
+	report ok "a frozen reviewer does not occupy a balancer slot"
+else
+	report FAIL "a frozen reviewer does not occupy a balancer slot" \
+		"spawns=$s (want 2) — the frozen reviewer was still counted as capacity"
+fi
+rm -rf "$c"
+
+# 11c. FAIL OPEN — an unreadable pane still occupies. If it did not, one tmux
+#      hiccup would free every slot in the lane at once.
+c="$(new_city)"
+balancer_scenario "$c"
+pane_stub "$c"
+rm -f "$c/panes/s-rigA-reviewer-1"
+balancer_targets "$c" "version 1
+generated_at $(date +%s)
+target rigA reviewer 2"
+run_sweep "$c"
+s="$(spawns "$c")"
+if [ "$s" = 1 ]; then
+	report ok "an unreadable reviewer pane still occupies a balancer slot"
+else
+	report FAIL "an unreadable reviewer pane still occupies a balancer slot" \
+		"spawns=$s (want 1) — a failed capture freed the slot"
+fi
+rm -rf "$c"
+
 echo
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]

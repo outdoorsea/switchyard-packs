@@ -26,7 +26,7 @@
 #          sy_derived_roster, sy_suspended_rigs, sy_drop_suspended_rigs,
 #          sy_roster, sy_coordinators, sy_prefix_of, sy_agent_of,
 #          sy_session_alias_for, sy_live_session_for, sy_session_names_for,
-#          sy_session_snapshot
+#          sy_session_panes_for, sy_session_snapshot, sy_tmux_socket
 
 set -u
 
@@ -162,6 +162,26 @@ sy_timeout() {
 
 sy_city() { printf '%s' "${GC_CITY:?switchyard-ops: GC_CITY is not set — orders must run under gc}"; }
 sy_city_name() { basename "$(sy_city)"; }
+
+# sy_tmux_socket — the tmux socket this city's sessions run on.
+#
+# Hoisted from lane-ensure, which needed it to reach a session's pane and is
+# no longer the only caller: the balancer's live-capacity probe reaches the
+# same panes and must resolve the same server, or it would capture nothing on
+# the default socket and quietly count every session as live forever.
+#
+# GC_TMUX_SOCKET wins because an operator setting it means it; an inherited
+# $TMUX names the server this process is already inside, which is the right
+# answer when an order runs in a city pane; the city name is gc's own default.
+sy_tmux_socket() {
+	if [ -n "${GC_TMUX_SOCKET:-}" ]; then printf '%s' "$GC_TMUX_SOCKET"; return 0; fi
+	if [ -n "${TMUX:-}" ]; then
+		_sts="${TMUX%%,*}"
+		_sts="${_sts##*/}"
+		if [ -n "$_sts" ]; then printf '%s' "$_sts"; return 0; fi
+	fi
+	printf '%s' "$(sy_city_name)"
+}
 
 # IMPORT THIS PACK AT CITY SCOPE ONLY.
 #
@@ -655,6 +675,37 @@ sy_session_aliases_for() {
             + map(select((.state // "") != "active")) )
         | .[] | (.alias // .name // .id // "") | select(. != "")' 2>/dev/null)" || return 2
   printf '%s\n' "$_ssm_out" | awk 'NF'
+  return 0
+}
+
+# sy_session_panes_for AGENT [STATE] — echo the TMUX SESSION NAME of every
+# session sy_session_aliases_for would return for the same arguments, one per
+# line. Same tri-state contract (rc=2 = UNKNOWN).
+#
+# The SELECTION must stay identical to sy_session_aliases_for's, because the
+# balancer's live-capacity probe subtracts from a count taken there: a name
+# from a wider set (a suspended session, say) would deduct a session that was
+# never counted, and the lane would over-spawn by exactly that many. That is
+# why this filters on the same state argument rather than reusing
+# sy_session_names_for, which returns every non-closed session.
+sy_session_panes_for() {
+  if [ -n "${SY_SESSION_SNAPSHOT:-}" ]; then
+    _ssp_raw="$SY_SESSION_SNAPSHOT"
+  else
+    _ssp_raw="$(gc session list --json --state all 2>/dev/null)" || return 2
+  fi
+  [ -n "$_ssp_raw" ] || return 2
+  _ssp_out="$(printf '%s\n' "$_ssp_raw" | jq -r --arg q "$1" --arg st "${2:-}" '
+        (.sessions // [])[]
+        | select(((.closed // false) | not))
+        | (.agent // .agent_name // .qualified_name // "") as $n
+        | select( (.template // "") == $q
+                  or $n == $q
+                  or ($n | startswith($q + "-adhoc-")) )
+        | select($st == "" or (.state // "") == $st)
+        | (.session_name // "")
+        | select(. != "")' 2>/dev/null)" || return 2
+  printf '%s\n' "$_ssp_out" | awk 'NF'
   return 0
 }
 

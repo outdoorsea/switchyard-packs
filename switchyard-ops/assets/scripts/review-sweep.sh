@@ -22,6 +22,7 @@
 set -u
 
 . "$(dirname "$0")/../lib/roster.sh"
+. "$(dirname "$0")/../lib/pane-state.sh"
 
 sy_load_conf
 
@@ -576,6 +577,34 @@ diff is the one that would merge." </dev/null >/dev/null 2>&1; then
     # fall-back: an unopted city, or one whose balancer stopped writing,
     # spawns exactly as it does today.
     pool_max="$(sy_balancer_capped "$rig" reviewer "$pool_max")"
+
+    # A COUNTED REVIEWER STILL HAS TO BE DOING SOMETHING (switchyard PRD #397,
+    # crit:e982acfda325). gc reports a session frozen at an idle prompt — a
+    # usage limit, a 529 — as `active`, so it sits in the roster read above and
+    # holds a slot against the target while reviewing nothing.
+    #
+    # Probed HERE, beside its only consumer and inside the demand guard, for
+    # the same reason the ceiling above is read here: it costs a capture per
+    # live reviewer, and a cycle that will not spawn should not pay for one.
+    #
+    # SUBTRACTION, on a POSITIVE reading only. An unreadable roster, a session
+    # with no pane name, a capture that fails and a missing library all deduct
+    # nothing, leaving n_live exactly today's number. The deduction can only
+    # lower it, and never below zero — so a tmux outage cannot free the whole
+    # lane at once and let this sweep spawn into it.
+    if command -v sy_pane_session_counts_live >/dev/null 2>&1 &&
+      sy_session_panes_for "$rig/$SY_NS.reviewer" active >"$TMP/live-panes" 2>/dev/null; then
+      _pane_sock="$(sy_tmux_socket)"
+      _pane_dead=0
+      while IFS= read -r _pane_name; do
+        [ -n "$_pane_name" ] || continue
+        sy_pane_session_counts_live "$_pane_name" "$_pane_sock" ||
+          _pane_dead=$((_pane_dead + 1))
+      done <"$TMP/live-panes"
+      n_live=$((n_live - _pane_dead))
+      [ "$n_live" -ge 0 ] || n_live=0
+    fi
+
     cap=$((pool_max - n_live))
     [ "$unassigned" -lt "$cap" ] && cap="$unassigned"
     i=0

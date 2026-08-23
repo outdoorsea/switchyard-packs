@@ -395,3 +395,73 @@ sy_pane_classify_session() {
 	rm -f "$_syp_tmp" 2>/dev/null
 	printf '%s' "$_syp_verdict"
 }
+
+# ---------------------------------------------------------------------------
+# sy_pane_session_counts_live SESSION [SOCKET] — rc 0 when SESSION counts
+# toward a lane's LIVE CAPACITY, rc 1 when it does not.
+#
+# The balancer's reading (switchyard PRD #397, crit:e982acfda325). It exists
+# because neither reading above answers this question on its own:
+#
+#   sy_pane_classify_session  says `live` for a FROZEN pane, deliberately — the
+#                             reaper must not kill one, since a nudge recovers
+#                             the in-turn context that a close would destroy.
+#   sy_pane_frozen_reason_*   says nothing about a session that simply FINISHED.
+#
+# A lane slot is a different thing from a life. A session frozen at an idle
+# prompt is alive in every sense the reaper cares about and doing no work at
+# all: it holds the slot, the reconciler counts it active, and a lane at max=1
+# never spawns its replacement. That is the stall this composes to end —
+# observed 2026-08-18, when the switchyard judge sat 18h at the usage-limit
+# message and the factory produced zero events for seven hours.
+#
+# So a session counts only when it PASSES the liveness probe (`live`, which
+# excludes a finished pane) AND is not frozen. Both, or it holds no slot.
+#
+# ONE CAPTURE, TWO READINGS. The pane is captured once and both classifiers
+# read that file. Capturing twice would double the tmux calls in a per-cycle
+# census and — worse — let the two readings disagree about different instants,
+# so a pane that froze between them would answer `live` and `not frozen` and
+# keep its slot forever.
+#
+# THE FAIL DIRECTION IS "COUNTS", AND IT IS NOT ARBITRARY. Every path that
+# learns nothing — mktemp failure, capture failure, an empty or unparseable
+# pane — returns 0. Counting an unreadable session is exactly what the census
+# did before this probe existed, so a tmux outage leaves each lane on today's
+# behaviour rather than freeing every slot at once. The opposite default is a
+# census that collapses toward zero the moment tmux hiccups, which is the
+# spawn storm pool-spawn.sh records as gff-9117.
+sy_pane_session_counts_live() {
+	_syp_cl_s="${1:?sy_pane_session_counts_live: SESSION is required}"
+	_syp_cl_sock="${2:-}"
+
+	_syp_cl_tmp="$(mktemp "${TMPDIR:-/tmp}/sy-pane-cap.XXXXXX" 2>/dev/null)" || return 0
+
+	# Initialised to the FAILED value, same discipline as the classifier
+	# wrapper: any path that does not observe a successful capture counts.
+	_syp_cl_rc=1
+	if [ -n "$_syp_cl_sock" ]; then
+		if tmux -L "$_syp_cl_sock" capture-pane -p -t "$_syp_cl_s" >"$_syp_cl_tmp" 2>/dev/null; then
+			_syp_cl_rc=0
+		fi
+	else
+		if tmux capture-pane -p -t "$_syp_cl_s" >"$_syp_cl_tmp" 2>/dev/null; then
+			_syp_cl_rc=0
+		fi
+	fi
+
+	if [ "$_syp_cl_rc" -ne 0 ]; then
+		rm -f "$_syp_cl_tmp" 2>/dev/null
+		return 0
+	fi
+
+	_syp_cl_frozen="$(sy_pane_frozen_reason_file "$_syp_cl_tmp")"
+	_syp_cl_verdict="$(sy_pane_classify_file "$_syp_cl_tmp")"
+	rm -f "$_syp_cl_tmp" 2>/dev/null
+
+	# Frozen first: a frozen pane classifies `live`, so testing the verdict
+	# alone would keep exactly the sessions this probe exists to release.
+	[ -z "$_syp_cl_frozen" ] || return 1
+	[ "$_syp_cl_verdict" = live ] || return 1
+	return 0
+}

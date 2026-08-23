@@ -432,15 +432,7 @@ lane_spawn() {
 #      actually applies to an order.
 # Each step is a fact gc publishes rather than a guess, and an empty answer at
 # any step falls through rather than pinning an empty -L.
-lane_tmux_socket() {
-  if [ -n "${GC_TMUX_SOCKET:-}" ]; then printf '%s' "$GC_TMUX_SOCKET"; return 0; fi
-  if [ -n "${TMUX:-}" ]; then
-    _lts="${TMUX%%,*}"
-    _lts="${_lts##*/}"
-    if [ -n "$_lts" ]; then printf '%s' "$_lts"; return 0; fi
-  fi
-  printf '%s' "$(sy_city_name)"
-}
+lane_tmux_socket() { sy_tmux_socket; }
 
 # lane_adhoc_sessions RIG — every non-closed session on RIG that THIS SWEEP
 # SPAWNED, one per line as `<ref>\t<tmux-session-name>`. Empty when there are

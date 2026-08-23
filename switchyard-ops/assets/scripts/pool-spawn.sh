@@ -163,6 +163,7 @@ set -u
 
 . "$(dirname "$0")/../lib/roster.sh"
 . "$(dirname "$0")/../lib/switchyard-api.sh"
+. "$(dirname "$0")/../lib/pane-state.sh"
 
 # CLOUD_POOL_RIGS — the rigs cut over to cloud-pool dispatch, space-separated, from
 # the city's roster.conf. Defaulted to empty HERE rather than in sy_load_conf: this
@@ -659,6 +660,46 @@ sy_pool_brakeman_live() {
       else empty end' 2>/dev/null)" || return 2
   case "$_count" in ''|*[!0-9]*) return 2 ;; esac
   [ "$_count" -le 10000 ] 2>/dev/null || return 2
+
+  # A COUNTED SESSION STILL HAS TO BE DOING SOMETHING (switchyard PRD #397,
+  # crit:e982acfda325). gc reports a session frozen at an idle prompt — a usage
+  # limit, a 529 — as `active`, so the census above counts it, the lane reads
+  # full, and at max=1 no replacement is ever spawned. That is the stall this
+  # order exists to prevent, arriving through the census rather than the queue.
+  #
+  # SUBTRACTION, NOT A SECOND CENSUS. The count above is left exactly as it
+  # was, including every rc-2 path, and this can only lower it. A session is
+  # deducted solely on a POSITIVE reading that it is frozen or finished; a row
+  # with no session_name, an unreadable pane, an absent library all deduct
+  # nothing and leave the number today's. The census may therefore never
+  # collapse toward zero on a bad read, which is the spawn storm gff-9117.
+  if command -v sy_pane_session_counts_live >/dev/null 2>&1; then
+    _pane_names="$(printf '%s' "$_raw" | jq -r --arg q "$1/$SY_NS.brakeman" --argjson live "$_states_json" '
+      (.sessions // [])[]
+      | (.agent // .agent_name // .qualified_name // "") as $n
+      | select( (.template // "") == $q
+                or $n == $q
+                or ($n | startswith($q + "-adhoc-")) )
+      | select(.state as $st | ($live|index($st))!=null)
+      | (.session_name // "")
+      | select(. != "")' 2>/dev/null)" || _pane_names=""
+    if [ -n "$_pane_names" ]; then
+      _pane_sock="$(sy_tmux_socket)"
+      # The loop runs in a subshell (a pipeline stage), so the tally comes back
+      # as its output rather than as a variable the parent could read.
+      _pane_dead="$(printf '%s\n' "$_pane_names" | {
+        _pd=0
+        while IFS= read -r _pn; do
+          [ -n "$_pn" ] || continue
+          sy_pane_session_counts_live "$_pn" "$_pane_sock" || _pd=$((_pd + 1))
+        done
+        printf '%s' "$_pd"
+      })"
+      case "$_pane_dead" in ''|*[!0-9]*) _pane_dead=0 ;; esac
+      _count=$((_count - _pane_dead))
+      [ "$_count" -ge 0 ] || _count=0
+    fi
+  fi
   printf '%s' "$_count"
 }
 

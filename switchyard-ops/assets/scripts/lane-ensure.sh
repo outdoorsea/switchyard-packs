@@ -1147,6 +1147,35 @@ for rig in $rigs; do
     *) lane_escalate_idle "$rig"; continue ;;
   esac
 
+  # THE BALANCER'S TARGET FOR THIS LANE IS A CEILING ON THE SPAWN BELOW
+  # (switchyard PRD #397). sy_balancer_capped applies the one rule every spawn
+  # site in this pack shares — present, fresh and well-formed, min() never
+  # max(), and an absent/stale/malformed/unreadable file answering "no target"
+  # so the lane behaves byte-for-byte as it does today. Keeping the rule in
+  # roster.sh rather than re-deriving it here is the point: a rule
+  # re-implemented per caller is the same rule only by coincidence.
+  #
+  # THE CEILING PASSED IS 1 BECAUSE THAT IS THIS SWEEP'S WHOLE FAN-OUT. The
+  # loop staffs at most one session per rig — the `case "$n"` above spawns only
+  # on a confirmed zero — so min(1, target) can land only on 1 or 0. A target
+  # ABOVE 1 is therefore not authority to stack a second session, which is
+  # exactly what min() is for; zero is the only value that moves this lane, and
+  # it is the one the global budget actually spends when it takes the lane's
+  # allocation to nothing.
+  #
+  # PLACED AFTER THE REAP AND BEFORE THE QUEUE READ, both deliberately. Reaping
+  # is cleanup, not capacity: gating it here would retain a finished session for
+  # as long as the cap lasts, a retention hole inside the guard meant to bound
+  # the lane. And this is a local file read while lane_queue_depth is the loop's
+  # only network call, so the cheaper gate answers first — the same ordering the
+  # queue check's own note argues for. Sitting above lane_reach_fault also keeps
+  # that classifier's precision: a capped rig is not one this sweep was about to
+  # staff, so it does not belong in the mails that name the rigs it could not
+  # read a queue for.
+  if [ "$(sy_balancer_capped "$rig" "$AGENT" 1)" = 0 ]; then
+    continue
+  fi
+
   # WHY THE QUEUE MIGHT NOT BE READABLE, recorded for the escalation at the foot.
   #
   # OBSERVATIONAL ONLY. It records a cause; it never withholds a spawn. The

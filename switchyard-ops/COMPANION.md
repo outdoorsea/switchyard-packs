@@ -12,12 +12,12 @@ looks exactly like a lane with nothing to do: no error, no mail, an idle rig and
 a backlog that quietly does not drain. An operator who assumes `dedup` is covered
 because the pack "handles issues" gets no signal that it is not. So this file
 never asserts a capability is covered before it is — an unlanded lane is recorded
-as **PENDING** against the switchyard PRD #327 acceptance criterion that will
-satisfy it, in the same spirit as `packs/switchyard-build/REQUIREMENTS.md`.
+as **PENDING** against the switchyard acceptance criterion that will satisfy
+it, in the same spirit as `packs/switchyard-build/REQUIREMENTS.md`.
 
 **The claim this ledger is built to state, and the one worth remembering:**
 
-> No companion capability still requires the companion: every verb is a pack lane, pending under PRD #327, or retires with the daemon.
+> No companion capability still requires the companion: every verb is a pack lane, pending under a switchyard PRD criterion, or retires with the daemon.
 
 `validate` and `watch` were the last two `COMPANION-REQUIRED` rows; both gained
 pack orders on 2026-08-12 (`orders/validate-sweep.toml` and
@@ -34,7 +34,7 @@ keep the companion installed.
 | Token | Meaning | What an operator should do |
 | --- | --- | --- |
 | `PACK-LANE` | A pack agent or order covers this on `main` today. | Nothing. Confirm it is live (see below). |
-| `PENDING` | A PRD #327 criterion covers it; **not landed**. Not running. | Run the companion verb, or accept the gap knowingly. |
+| `PENDING` | A PRD criterion covers it; **not landed**. Not running. | Run the companion verb, or accept the gap knowingly. |
 | `RETIRES-WITH-DAEMON` | Exists only *because* the companion is a long-lived daemon. Deleted, not replaced. | Nothing. It has no pack equivalent by design. |
 | `COMPANION-REQUIRED` | Structurally out of reach for a wake-based pack agent. | **Keep the companion installed for this verb.** |
 
@@ -46,12 +46,12 @@ keep the companion installed.
 | --- | --- | --- | --- |
 | PRD Q&A auto-answering | `answer` | `agents/answerer` + `orders/answer-sweep.toml` (20m) | `PACK-LANE` |
 | Judgment verdicts on command-less criteria | `judge` | `agents/judge` + `orders/judge-sweep.toml` (30m) | `PACK-LANE` |
-| Claim-pool worker | `work` | `agents/brakeman`, still claiming via `gc hook --claim` | `PENDING` |
-| Issue auto-triage | `triage` | intake-triage lane | `PENDING` |
-| Duplicate-merge proposals | `dedup` | duplicate-detection lane | `PENDING` |
-| Covered-by proposals | `covered-by` | duplicate-detection lane | `PENDING` |
+| Claim-pool worker | `work` | `agents/brakeman` + `orders/pool-spawn.toml` (1m, cloud pool opt-in via `CLOUD_POOL_RIGS`) | `PACK-LANE` |
+| Issue auto-triage | `triage` | `agents/intake-triage` + `orders/intake-triage-sweep.toml` (1h) | `PACK-LANE` |
+| Duplicate-merge proposals | `dedup` | `agents/dupe-scout` + `orders/dupe-sweep.toml` (6h) | `PACK-LANE` |
+| Covered-by proposals | `covered-by` | `agents/dupe-scout` + `orders/dupe-sweep.toml` (6h) | `PACK-LANE` |
 | Golden-journey ship verification | `journeys` | `agents/golden-journey` + `orders/golden-journey-sweep.toml` (30m) | `PACK-LANE` |
-| Config/token/reachability preflight | `doctor` | reachability check that escalates | `PENDING` |
+| Config/token/reachability preflight | `doctor` | `orders/sy-doctor.toml` — PRD #365 `crit:3969585c3b20`, not landed | `PENDING` |
 | Contract re-run against merged main | `validate` | `orders/validate-sweep.toml` (15m, opt-in via `VALIDATE_RIGS`) | `PACK-LANE` |
 | SSE event bridge → session wake | `watch` | `orders/event-pump.toml` (1m, opt-in via `EVENT_PUMP_RIGS`) | `PACK-LANE` |
 | Bridge daemon: control surface + reconcile loop | `serve` | none; cloud-pool dispatch removes the bridge | `RETIRES-WITH-DAEMON` |
@@ -71,6 +71,23 @@ keep the companion installed.
 Enforced by `scripts/check-companion-capability-ledger.sh`, which fails if any
 row at all is marked `COMPANION-REQUIRED` — so the headline claim above cannot
 quietly stop being true, and re-acquiring the token is a reviewed decision.
+
+It also holds each row's Status token to the names in its Pack coverage column,
+because those names are what an operator checks a lane against and nothing else
+in CI reads pack prose. A `PACK-LANE` row naming an order or agent that is not
+on the tree fails the build — a row must not assert coverage before it exists —
+and so does a `PENDING` row whose named **order** has since landed, which is the
+same drift pointing the other way: it keeps the companion installed for a verb
+the pack already covers. The signal is the order, not the agent; `agents/brakeman`
+shipped long before `orders/pool-spawn.toml` dispatched it, and `work` was
+honestly `PENDING` throughout.
+
+That is what moves the `doctor` row on its own. It names the order that will
+cover it, `orders/sy-doctor.toml`, and is `PENDING` precisely because that file
+is not here yet; the day PRD #365's `crit:3969585c3b20` lands it, this check
+fails until the row says `PACK-LANE`. An order landing under some *other* name
+still slips past — the check can only verify the claim a row actually makes —
+but that is today's behaviour, not a new gap.
 
 ## How `validate` became a pack lane
 

@@ -28,13 +28,16 @@
 # to their operator floors until it drains. That is the whole interaction, and
 # it only ever scales lanes DOWN.
 #
-# THE SAFETY DIRECTION IS "DO NOTHING". Three separate paths lead to writing no
-# targets at all — the balancer not being opted in, a rig resolving to nothing,
-# and a lane whose demand or capacity cannot be read. All three leave the
-# consumers on their existing behaviour, because a missing lane line means the
-# consumer falls back to its city.toml ceiling exactly as it does today. That
-# asymmetry is deliberate: publishing a target computed from a queue nobody
-# could actually read is how a balancer scales a lane on imaginary demand.
+# THE SAFETY DIRECTION IS "DO NOTHING", and doing nothing is not the same as
+# writing nothing. The balancer not being opted in writes no file at all, which
+# leaves an unopted city byte-for-byte as it is. But once a generation exists, a
+# lane whose demand or capacity cannot be read REPUBLISHES the number it is
+# already on rather than dropping its line — because to a consumer a missing
+# line means "no cap", so dropping it would run the lane up to its full
+# city.toml ceiling on a cycle that measured nothing. Publishing a target
+# computed from a queue nobody could read and promoting a lane because nobody
+# could read it are the same mistake; this pass makes neither. See
+# sy_carry_target, and THE ESCALATION for how an operator hears about it.
 
 set -u
 
@@ -118,6 +121,30 @@ DEFAULT_BUDGET=45
 # the one that opened the streak: it is the freshest measurement available.
 RAISE_CYCLES=2
 LOWER_CYCLES=6
+
+# ESCALATION: how many CONSECUTIVE cycles a lane must ask for more than its hard
+# ceiling before the balancer tells an operator. Six is thirty minutes at the 5m
+# cadence — the same patience the lower gate above spends, and for the same
+# reason: a queue that spikes for one cycle and drains is this order WORKING,
+# and an alert that fires on it is one an operator learns to ignore.
+#
+# NOT A KNOB, following RAISE_CYCLES and LOWER_CYCLES. The condition it reports
+# is "the balancer has published everything it is allowed to and the queue is
+# still growing", which only a human can act on; an operator irritated by the
+# mail could otherwise tune it to never arrive instead of raising the bound it
+# is pointing at.
+SATURATION_CYCLES=6
+
+# How many consecutive CLEAR cycles end an episode. Until it elapses the
+# condition is still the SAME episode, so a signal that fails, recovers and
+# fails again mails once rather than on every other cycle.
+#
+# THIS IS WHAT THE WORD "EPISODE" BUYS. An episode that ended the instant its
+# condition cleared would be indistinguishable from a run of cycles, and a
+# flapping forge read — the single most likely unreadable signal here — would
+# then mail every ten minutes while satisfying "once per episode" on a
+# technicality. Three cycles is fifteen minutes of quiet.
+EPISODE_CLEAR_CYCLES=3
 
 # How many open pull requests one stage read will look at. The same bound the
 # demand reads above use, named once so a repo whose queue outgrows it does so
@@ -809,13 +836,18 @@ sy_allocate() {
 # HIST_DIR and HIST_COUNT. HIST_PREV is empty when the pair has never been
 # published, which is the first-publish case.
 #
-# THE HISTORY FILE, NOT THE TARGETS FILE, REMEMBERS WHAT WAS PUBLISHED, and the
-# distinction is load-bearing. A lane whose probe fails writes NO target line at
-# all — deliberately, so consumers fall back to their city.toml ceiling — so
-# reading the previous target back out of balancer.targets would forget the lane
-# after a single unreadable cycle and let the next one apply a raise instantly,
-# with the gate silently skipped. Keeping the memory here leaves the published
-# file's meaning exactly as the measure-and-clamp pass defined it.
+# THE HISTORY FILE, NOT THE TARGETS FILE, REMEMBERS WHAT DEMAND JUSTIFIED, and
+# the distinction is load-bearing. The published number can differ from it: the
+# global budget cuts what is published after this gate has run and deliberately
+# never feeds the cut back, so a capped lane's history holds the larger number
+# its queue asked for. Reading HIST_PREV back out of balancer.targets would
+# therefore let a budget cut read as a fresh demand reading, and the lane would
+# open a raise streak against a ceiling that never moved.
+#
+# The unreadable-probe case is the mirror of that and is answered elsewhere:
+# sy_carry_target republishes what CONSUMERS last read, because that is the
+# thing an unreadable signal must not change. Same cycle, two different
+# previous values, each the right one for its own question.
 #
 # It sets globals rather than printing because a command substitution runs in a
 # subshell: three values would have to be re-split by the caller, and a
@@ -841,6 +873,192 @@ sy_hist_load() {
   # climb out of a number nobody ever published.
   case "${HIST_PREV:-}" in '' | *[!0-9]*) HIST_PREV=""; HIST_DIR=none; HIST_COUNT=0 ;; esac
   case "${HIST_COUNT:-}" in '' | *[!0-9]*) HIST_COUNT=0 ;; esac
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# Escalation
+# ---------------------------------------------------------------------------
+
+# WHAT THIS PASS ESCALATES, and why it is only these two things. The balancer
+# is a dial, and a dial has exactly two failures it cannot fix by turning: it
+# has run out of travel, or it cannot see the thing it is turning for. Both are
+# invisible from outside — a saturated lane publishes its ceiling every cycle
+# and looks perfectly healthy, and a blind cycle now republishes its previous
+# targets and looks healthier still. Everything else this order can encounter it
+# handles by publishing a different number, which needs no operator.
+#
+# AT MOST ONE MAIL PER CYCLE, naming every episode that opened in it. A cycle
+# where a forge outage blinds four lanes at once is ONE fault, and four mails
+# about it is the noise this bound exists to prevent — while each episode still
+# contributes to at most one mail, which is what the criterion asks.
+
+# sy_alert_window KEY — how many consecutive cycles KEY must hold before it
+# mails. Saturation waits out its window; an unreadable signal does not, and the
+# asymmetry is deliberate: a lane at its ceiling is still doing useful work at
+# full tilt, while a blind balancer is frozen on numbers nobody re-measured.
+sy_alert_window() {
+  case "$1" in
+  *:saturated) printf '%s' "$SATURATION_CYCLES" ;;
+  *) printf '1' ;;
+  esac
+}
+
+# sy_alert KEY DETAIL — record a condition OBSERVED this cycle. It neither mails
+# nor decides anything: the whole cycle is measured first, so one mail can name
+# every episode it opened. DETAIL is one line and must name the rig and lane,
+# because it is the only part of this an operator ever reads.
+sy_alert() {
+  case " $ALERTS_NOW " in *" $1 "*) return 0 ;; esac
+  ALERTS_NOW="$ALERTS_NOW $1"
+  printf '%s %s\n' "$1" "$2" >>"$AMSG" 2>/dev/null || :
+}
+
+# sy_alert_prev KEY — load KEY's episode counters into ALERT_STREAK (consecutive
+# cycles held), ALERT_CLEAR (consecutive cycles clear) and ALERT_MAILED. A key
+# with no record is a new episode, which is 0/0/0.
+#
+# Sets globals rather than printing for the same reason sy_hist_load does: a
+# command substitution runs in a subshell, and three values would have to be
+# re-split by every caller.
+sy_alert_prev() {
+  ALERT_STREAK=0
+  ALERT_CLEAR=0
+  ALERT_MAILED=0
+  [ -f "$ALERTS" ] || return 0
+  while read -r _ap_kind _ap_key _ap_streak _ap_clear _ap_mailed; do
+    [ "$_ap_kind" = alert ] || continue
+    [ "$_ap_key" = "$1" ] || continue
+    ALERT_STREAK="$_ap_streak"
+    ALERT_CLEAR="$_ap_clear"
+    ALERT_MAILED="$_ap_mailed"
+    break
+  done <"$ALERTS"
+
+  # A hand-edited or truncated record is read as NO episode rather than as a
+  # zero streak with its mailed flag intact — the one corruption that would
+  # silence a fault permanently.
+  case "${ALERT_STREAK:-}" in '' | *[!0-9]*) ALERT_STREAK=0 ;; esac
+  case "${ALERT_CLEAR:-}" in '' | *[!0-9]*) ALERT_CLEAR=0 ;; esac
+  case "${ALERT_MAILED:-}" in 1) ALERT_MAILED=1 ;; *) ALERT_MAILED=0 ;; esac
+  return 0
+}
+
+# sy_mail_escalation FIRED — one mail naming every episode that opened this
+# cycle. Returns non-zero when nothing was delivered, which is what keeps the
+# episodes unmarked and retried.
+sy_mail_escalation() {
+  _me_body="$(awk -v fired=" $1 " \
+    'index(fired, " " $1 " ") { sub(/^[^ ]+[ ]/, ""); print "  - " $0 }' \
+    "$AMSG" 2>/dev/null)"
+  [ -n "$_me_body" ] || return 1
+
+  # BOUNDED LIKE EVERY OTHER EXTERNAL CALL. It runs AFTER the rename, so an
+  # order killed here has already published its generation and loses only the
+  # mail — and losing it leaves the episode unmarked, so the next cycle sends
+  # it. That is the same retry the failed-send path below relies on.
+  sy_timeout "$READ_TIMEOUT" gc mail send mayor \
+    -s "balance-sweep: the balancer needs an operator" \
+    -m "The factory balancer cannot fix these by turning its dial.
+
+$_me_body
+
+A saturated lane means the balancer is publishing everything BALANCER_BOUNDS and
+city.toml allow and the queue is still growing: raise that lane's ceiling, or
+accept the queue. An unreadable signal means it is measuring nothing and is
+republishing its previous targets unchanged until the read recovers.
+
+You will not get this mail again for the same condition until it has been clear
+for $EPISODE_CLEAR_CYCLES cycles. Cycle $CYCLE; targets at $OUT." \
+    >/dev/null 2>&1
+}
+
+# sy_escalate — age every episode, mail the ones that opened this cycle, and
+# rewrite the ledger.
+#
+# THE LEDGER IS REWRITTEN ONCE, AFTER the send, so a send that failed is not
+# recorded as delivered. Getting that backwards turns one dropped mail into
+# permanent silence for that fault, which is strictly worse than the duplicate
+# a retry might produce.
+sy_escalate() {
+  [ -n "$ALERTS_NOW" ] || [ -f "$ALERTS" ] || return 0
+
+  # Pass one decides only WHICH episodes open, touching nothing. It has to run
+  # before the send, and the send has to run before the ledger is written.
+  _es_fire=""
+  for _es_key in $ALERTS_NOW; do
+    sy_alert_prev "$_es_key"
+    [ "$ALERT_MAILED" = 0 ] || continue
+    [ "$((ALERT_STREAK + 1))" -ge "$(sy_alert_window "$_es_key")" ] || continue
+    _es_fire="$_es_fire $_es_key"
+  done
+
+  _es_sent=0
+  if [ -n "$_es_fire" ]; then
+    if sy_mail_escalation "$_es_fire"; then
+      _es_sent=1
+    else
+      printf 'balance-sweep: could not mail the mayor about:%s\n' "$_es_fire" >&2
+    fi
+  fi
+
+  _es_tmp="$(mktemp "$ALERTS.XXXXXX" 2>/dev/null)" || return 0
+
+  # Conditions standing this cycle: streak advances, clear resets.
+  for _es_key in $ALERTS_NOW; do
+    sy_alert_prev "$_es_key"
+    _es_mailed="$ALERT_MAILED"
+    case " $_es_fire " in
+    *" $_es_key "*) [ "$_es_sent" = 0 ] || _es_mailed=1 ;;
+    esac
+    printf 'alert %s %s 0 %s\n' \
+      "$_es_key" "$((ALERT_STREAK + 1))" "$_es_mailed" >>"$_es_tmp"
+  done
+
+  # Conditions that did NOT recur: the clear counter ages, and a record that
+  # reaches the clear window is dropped entirely — which is what makes the next
+  # occurrence a new episode able to mail again. "At most once per episode" has
+  # to be a bound on noise, never a mute switch on the second outage.
+  if [ -f "$ALERTS" ]; then
+    while read -r _es_kind _es_okey _es_ostreak _es_oclear _es_omailed; do
+      [ "$_es_kind" = alert ] || continue
+      [ -n "${_es_omailed:-}" ] || continue
+      case " $ALERTS_NOW " in *" $_es_okey "*) continue ;; esac
+      case "${_es_oclear:-}" in '' | *[!0-9]*) _es_oclear=0 ;; esac
+      _es_oclear=$((_es_oclear + 1))
+      [ "$_es_oclear" -lt "$EPISODE_CLEAR_CYCLES" ] || continue
+      printf 'alert %s 0 %s %s\n' "$_es_okey" "$_es_oclear" "$_es_omailed" >>"$_es_tmp"
+    done <"$ALERTS"
+  fi
+
+  mv "$_es_tmp" "$ALERTS" 2>/dev/null || rm -f "$_es_tmp" 2>/dev/null
+}
+
+# sy_carry_target RIG LANE — republish the target this lane is ALREADY on, for a
+# cycle that could not measure it.
+#
+# AN UNREADABLE SIGNAL MUST NOT MOVE A LANE, and dropping its line moves it. To
+# a consumer a missing line does not read as "unknown": it reads as "no cap",
+# and the lane runs to its full city.toml ceiling. So an unreadable probe would
+# scale the lane UP, on no information, at exactly the moment the forge it could
+# not reach is already struggling — the outage this order exists to prevent,
+# caused by the order.
+#
+# READ BACK OUT OF THE PUBLISHED FILE, not out of the streak history, and the
+# two genuinely differ: the global budget cuts what is published AFTER the
+# hysteresis gate and deliberately never feeds the cut back into the history, so
+# a capped lane's history remembers the larger number demand justified. What
+# must not change is what CONSUMERS read, which is this file.
+#
+# Returns non-zero when there is nothing to carry — a lane unreadable before it
+# was ever published. That must stay a missing line rather than becoming a zero:
+# a zero is not a cautious default, it is the lane switched off.
+sy_carry_target() {
+  _ct_prev="$(awk -v r="$1" -v l="$2" \
+    '$1 == "target" && $2 == r && $3 == l && $4 ~ /^[0-9]+$/ { print $4; exit }' \
+    "$OUT" 2>/dev/null)"
+  case "${_ct_prev:-}" in '' | *[!0-9]*) return 1 ;; esac
+  printf 'target %s %s %s\n' "$1" "$2" "$_ct_prev" >>"$TMP"
   return 0
 }
 
@@ -967,6 +1185,10 @@ mkdir -p "$STATE" 2>/dev/null || :
 OUT="$STATE/balancer.targets"
 HIST="$STATE/balancer.history"
 LOG="$STATE/balancer.log"
+# The episode ledger the escalation bound is kept in. Beside the streak
+# history and for the same reason: both are memory this pass keeps ABOUT
+# cycles, not part of the generation consumers read.
+ALERTS="$STATE/balancer.alerts"
 
 # Fetched ONCE per cycle, not per rig: it is a gc invocation, and re-reading it
 # per rig would also let a mid-cycle roster change answer differently for two
@@ -984,11 +1206,20 @@ LTMP="$(mktemp "$LOG.XXXXXX" 2>/dev/null)" || { rm -f "$TMP" "$HTMP" 2>/dev/null
 # state dir, which is the directory an operator reads.
 CTMP="$(mktemp "$OUT.cuts.XXXXXX" 2>/dev/null)" ||
   { rm -f "$TMP" "$HTMP" "$LTMP" 2>/dev/null; exit 0; }
+# What each observed condition would SAY, if it turns out to open an episode.
+# Scratch for one cycle like the cuts file, created beside the others so the
+# trap below clears it from the directory an operator reads.
+AMSG="$(mktemp "$OUT.alerts.XXXXXX" 2>/dev/null)" ||
+  { rm -f "$TMP" "$HTMP" "$LTMP" "$CTMP" 2>/dev/null; exit 0; }
 # The temp file is created BESIDE the target, not in /tmp, because the publish
 # below is a rename and a rename is only atomic within one filesystem. A temp in
 # /tmp would silently degrade to a copy — the half-written read this whole
 # mechanism exists to prevent.
-trap 'rm -f "$TMP" "$HTMP" "$LTMP" "$CTMP" 2>/dev/null' EXIT INT TERM
+trap 'rm -f "$TMP" "$HTMP" "$LTMP" "$CTMP" "$AMSG" 2>/dev/null' EXIT INT TERM
+
+# Conditions observed this cycle that only an operator can act on. Held as
+# a space-separated key list so the mail can name them all at once.
+ALERTS_NOW=""
 
 notes=""
 throttled=""
@@ -1058,6 +1289,7 @@ for rig in $BALANCER_RIGS; do
       fi
     else
       notes="$notes $rig(backpressure-unreadable)"
+      sy_alert "$rig:backpressure" "$rig — the merge-stage backpressure probe could not be read, so no lane was throttled this cycle"
     fi
   fi
 
@@ -1068,6 +1300,8 @@ for rig in $BALANCER_RIGS; do
 
     max="$(sy_lane_max "$rig" "$lane" "$AGENTS")" || {
       notes="$notes $rig/$lane(capacity-unreadable)"
+      sy_alert "$rig/$lane:unreadable" "$rig/$lane — the lane agent's resolved capacity could not be read"
+      sy_carry_target "$rig" "$lane" || :
       continue
     }
 
@@ -1099,15 +1333,24 @@ for rig in $BALANCER_RIGS; do
       fi
       case "$lane" in
         brakeman)
-          [ -n "$project" ] || { notes="$notes $rig(unbound)"; continue; }
+          [ -n "$project" ] || {
+            notes="$notes $rig(unbound)"
+            sy_alert "$rig:unbound" "$rig — no switchyard project resolves to this rig, so its build queue cannot be measured"
+            sy_carry_target "$rig" "$lane" || :
+            continue
+          }
           demand="$(sy_demand_brakeman "$project" "$TOKEN")" || {
             notes="$notes $rig/$lane(demand-unreadable)"
+            sy_alert "$rig/$lane:unreadable" "$rig/$lane — the claimable-bead depth could not be read"
+            sy_carry_target "$rig" "$lane" || :
             continue
           }
           ;;
         reviewer)
           demand="$(sy_demand_reviewer "$rig")" || {
             notes="$notes $rig/$lane(demand-unreadable)"
+            sy_alert "$rig/$lane:unreadable" "$rig/$lane — the open-pull-request queue could not be read"
+            sy_carry_target "$rig" "$lane" || :
             continue
           }
           ;;
@@ -1121,6 +1364,28 @@ for rig in $BALANCER_RIGS; do
     # moment the factory is under strain, leaving the spawn site chasing it every
     # cycle until the queue drains.
     target="$(sy_clamp "$demand" "$floor" "$ceiling" "$max")"
+
+    # THE HARD CEILING IS min(ceiling, capacity), which is what the clamp above
+    # actually enforces — the operator's bound and the sessions the lane has are
+    # two separate limits and either can be the binding one. Comparing demand
+    # against BALANCER_BOUNDS alone would stay silent for a lane whose real wall
+    # is a city.toml the operator never revisited.
+    #
+    # STRICTLY GREATER. A lane asking for exactly what it is allowed is this
+    # order having got the answer right, and mailing about it would put an alert
+    # on every well-tuned factory.
+    #
+    # ONLY A MEASURED LANE. A throttled one took its floor without reading
+    # anything, so there is no demand to compare; counting it would escalate
+    # every rig whose merge stage backed up for half an hour, reporting the
+    # backpressure rule working as though it were a fault.
+    if [ "$throttle" = 0 ]; then
+      hard="$ceiling"
+      [ "$hard" -le "$max" ] || hard="$max"
+      if [ "$demand" -gt "$hard" ]; then
+        sy_alert "$rig/$lane:saturated" "$rig/$lane — demand $demand is above the hard ceiling $hard (bounds ceiling $ceiling, capacity $max); the balancer is publishing all it may and the queue is still growing"
+      fi
+    fi
 
     # THE HYSTERESIS GATE. The clamp above says where the lane SHOULD be; this
     # says whether it has been asking long enough to be moved there. A raise
@@ -1230,7 +1495,7 @@ sy_write_snapshot
 # behind would be left for good, beside $HIST and $LOG in the state dir rather
 # than in /tmp. An over-budget cycle is by definition the repeating condition.
 if [ "$over_budget" = 1 ]; then
-  rm -f "$TMP" "$HTMP" "$LTMP" "$CTMP" 2>/dev/null
+  rm -f "$TMP" "$HTMP" "$LTMP" "$CTMP" "$AMSG" 2>/dev/null
   trap - EXIT INT TERM
   printf 'balance-sweep: hit its %ss cycle budget and published no targets — the previous generation stands. Not measured:%s. This bound belongs to the order itself and sits deliberately inside the 60s gc order-exec deadline, so this notice replaces the silent "order exec balance-sweep failed: context deadline exceeded" that would otherwise name neither rig nor read. Raise BALANCE_SWEEP_BUDGET_SECONDS, lower BALANCER_READ_TIMEOUT, or investigate which read is slow.%s\n' \
     "$BUDGET" "$skipped" "${notes:+ — also unreadable:$notes}" >&2
@@ -1306,7 +1571,7 @@ if [ "$GLOBAL_MAX" -gt 0 ]; then
     "$TMP" 2>/dev/null)"
   case "${_gm_sum:-}" in '' | *[!0-9]*) _gm_sum="" ;; esac
   if [ -z "$_gm_sum" ] || [ "$_gm_sum" -gt "$GLOBAL_MAX" ]; then
-    rm -f "$TMP" "$HTMP" "$LTMP" "$CTMP" 2>/dev/null
+    rm -f "$TMP" "$HTMP" "$LTMP" "$CTMP" "$AMSG" 2>/dev/null
     trap - EXIT INT TERM
     printf 'balance-sweep: could not hold the published sum (%s) inside BALANCER_GLOBAL_MAX (%s) — published nothing; the previous generation stands.\n' \
       "${_gm_sum:-unreadable}" "$GLOBAL_MAX" >&2
@@ -1331,8 +1596,22 @@ if mv "$TMP" "$OUT" 2>/dev/null; then
     cat "$LTMP" >>"$LOG" 2>/dev/null || :
   fi
   rm -f "$LTMP" "$CTMP" 2>/dev/null
+
+  # THE ESCALATION FOLLOWS THE PUBLISH, for the reason the streak and the log
+  # do: a mail sent behind a failed rename would describe a generation no
+  # consumer ever read. It runs on EVERY published cycle, not only ones with a
+  # condition — a quiet cycle is what ages an episode toward being clear, and
+  # skipping it would leave a fault that recovered marked as alerted for ever.
+  #
+  # SO AN ABANDONED CYCLE ESCALATES NOTHING, and that is the right trade rather
+  # than a gap: the two paths that abandon — over budget, and a sum the global
+  # allocator could not hold — each print their own notice naming what went
+  # wrong, which is louder than this mail, and neither has a generation to
+  # describe. A cycle abandoned repeatedly is reported repeatedly by those.
+  sy_escalate
+  rm -f "$AMSG" 2>/dev/null
 else
-  rm -f "$TMP" "$HTMP" "$LTMP" "$CTMP" 2>/dev/null
+  rm -f "$TMP" "$HTMP" "$LTMP" "$CTMP" "$AMSG" 2>/dev/null
   printf 'balance-sweep: could not publish %s\n' "$OUT" >&2
   exit 0
 fi

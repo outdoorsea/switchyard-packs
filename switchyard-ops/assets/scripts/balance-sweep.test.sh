@@ -119,7 +119,14 @@ JSON
 case "$1 $2" in
 "agent list") cat "$GC_CITY/agents.json" ;;
 "rig list") cat "$GC_CITY/rigs.json" ;;
-"mail send") printf 'MAIL\n' >>"$GC_CITY/mailed.log" ;;
+"mail send")
+	# The WHOLE invocation is recorded, not just a counter: a pass that
+	# mailed the right number of times with an empty subject would satisfy
+	# every count assertion below. A fixture flag makes the send FAIL, so
+	# the retry rule can be pinned too.
+	[ -f "$GC_CITY/mail_fail" ] && exit 1
+	printf 'MAIL %s\n' "$*" >>"$GC_CITY/mailed.log"
+	;;
 esac
 exit 0
 STUB
@@ -227,6 +234,22 @@ target_for() {
 		"$1/state/balancer.targets" 2>/dev/null
 }
 
+# mail_count <city> — how many mails the sweep has sent to the mayor.
+#
+# COUNTED, not merely tested for presence. "At most once per episode" is a
+# bound, and a pass that mailed on every cycle would satisfy every
+# did-it-mail assertion while burying the operator it is meant to alert.
+mail_count() {
+	if [ -f "$1/mailed.log" ]; then
+		grep -c '^MAIL' "$1/mailed.log" 2>/dev/null || true
+	else
+		echo 0
+	fi
+}
+
+# mail_log <city> — everything the sweep has mailed, for content assertions.
+mail_log() { cat "$1/mailed.log" 2>/dev/null; }
+
 # merge_queue <city> <approved> [unreviewed] [approved_drafts] — the reviewed-
 # but-unmerged queue the backpressure probe reads.
 #
@@ -278,19 +301,24 @@ merge_queue() {
 
 # stray_temps <city> — every temp file the sweep could leave beside its state.
 #
-# ALL THREE are checked, not just the targets temp. Each is `mktemp "<file>.XXXXXX"`
+# ALL FOUR are checked, not just the targets temp. Each is `mktemp "<file>.XXXXXX"`
 # against a state path, so they land in the state dir beside balancer.targets,
 # balancer.history and balancer.log rather than in /tmp — nothing else collects
-# them, and the paths that abandon a publish must clear all three before they
+# them, and the paths that abandon a publish must clear all of them before they
 # drop the trap. An assertion written against the targets temp alone would keep
-# passing while the other two accumulated, one pair per abandoned cycle.
+# passing while the others accumulated, one set per abandoned cycle.
+#
+# The escalation's message scratch is `$OUT.alerts.XXXXXX`, so it is already
+# caught by the targets pattern; the episode ledger's own temp is not, and gets
+# its own line.
 #
 # The live files carry no suffix, so a single-dot name never matches.
 stray_temps() {
 	find "$1/state" \
 		\( -name 'balancer.targets.*' \
 		   -o -name 'balancer.history.*' \
-		   -o -name 'balancer.log.*' \) 2>/dev/null
+		   -o -name 'balancer.log.*' \
+		   -o -name 'balancer.alerts.*' \) 2>/dev/null
 }
 
 TARGETS="state/balancer.targets"
@@ -856,7 +884,14 @@ cat >"$city/bin/gc" <<'STUB'
 #!/bin/sh
 case "$1 $2" in
 "agent list") sleep 20 ;;
-"mail send") printf 'MAIL\n' >>"$GC_CITY/mailed.log" ;;
+"mail send")
+	# The WHOLE invocation is recorded, not just a counter: a pass that
+	# mailed the right number of times with an empty subject would satisfy
+	# every count assertion below. A fixture flag makes the send FAIL, so
+	# the retry rule can be pinned too.
+	[ -f "$GC_CITY/mail_fail" ] && exit 1
+	printf 'MAIL %s\n' "$*" >>"$GC_CITY/mailed.log"
+	;;
 esac
 exit 0
 STUB
@@ -1648,6 +1683,284 @@ if [ "$capped" = 2 ] && [ "$freed" = 5 ]; then
 else
 	report FAIL "lifting the budget restores the lane without a raise-gate climb" \
 		"capped=$capped freed=$freed"
+fi
+rm -rf "$city"
+
+# ---------------------------------------------------------------------------
+# 18. AN UNREADABLE SIGNAL NEVER CHANGES TARGETS.
+#
+#     The sharp half of this criterion, and it is a REVERSAL. Until now a lane
+#     whose probe failed had its target line DROPPED, and the pass documented
+#     that as deliberate — "consumers fall back to their city.toml ceiling
+#     exactly as it does today". The consumer rule that shipped afterwards
+#     (pool-spawn's sy_balancer_target, review-sweep's sy_balancer_capped)
+#     reads a missing line as NO CAP, so dropping the line does not leave the
+#     lane where it was: it promotes the lane to its full ceiling, on a cycle
+#     where nothing could be read, at the moment the forge is already sick.
+#
+#     Asserted as an EQUALITY against the previous number rather than as
+#     "a line exists", because the failure mode being fixed is a silent change
+#     of value, not a missing file.
+# ---------------------------------------------------------------------------
+city="$(new_city 2 0)"
+printf 'BALANCER_RIGS="rigA"\n' >"$city/state/roster.conf"
+run_sweep "$city" >/dev/null 2>&1          # publishes 2
+before="$(target_for "$city" brakeman)"
+mv "$city/pool.json" "$city/pool.hidden"   # the brakeman demand read now fails
+run_sweep "$city" >/dev/null 2>&1
+after="$(target_for "$city" brakeman)"
+if [ "$before" = 2 ] && [ "$after" = 2 ]; then
+	report ok "an unreadable demand read republishes the previous target unchanged"
+else
+	report FAIL "an unreadable demand read republishes the previous target unchanged" \
+		"before=${before:-<none>} after=${after:-<none>} (a dropped line reads as 'no cap' to every consumer)"
+fi
+rm -rf "$city"
+
+# --- 18b. The number carried forward is the PUBLISHED one, not the history's.
+#
+# They can differ: the global budget cuts the published target AFTER the
+# hysteresis gate and deliberately does not feed the cut back into the history,
+# so a capped lane has $OUT=2 and $HIST=5 at the same moment. "Never changes
+# targets" is a statement about what CONSUMERS read, so the published number is
+# the one that must survive. Reading it back out of the history instead — the
+# obvious shortcut, and the one the pass's own comment steers you toward — would
+# RAISE the lane on a cycle that measured nothing.
+city="$(new_city 5 4)"
+printf 'BALANCER_RIGS="rigA"\nBALANCER_GLOBAL_MAX="6"\n' >"$city/state/roster.conf"
+run_sweep "$city" >/dev/null 2>&1          # published 2 (cut from 5); history remembers 5
+capped="$(target_for "$city" brakeman)"
+printf 'BALANCER_RIGS="rigA"\n' >"$city/state/roster.conf"   # budget lifted
+mv "$city/pool.json" "$city/pool.hidden"                     # and the read fails
+run_sweep "$city" >/dev/null 2>&1
+carried="$(target_for "$city" brakeman)"
+if [ "$capped" = 2 ] && [ "$carried" = 2 ]; then
+	report ok "the carried-forward target is the published one, not the history's"
+else
+	report FAIL "the carried-forward target is the published one, not the history's" \
+		"capped=$capped carried=${carried:-<none>}, expected 2 (5 means the history was carried)"
+fi
+rm -rf "$city"
+
+# --- 18c. With nothing yet published there is nothing to carry. --------------
+#
+# The failure mode of a naive carry-forward is `${prev:-0}`: a lane unreadable
+# on the very first cycle would be pinned at a target of ZERO, which is not a
+# conservative default but a total outage for that lane. No line at all is
+# right here — it is what the consumers already treat as "not balanced".
+city="$(new_city 2 0)"
+printf 'BALANCER_RIGS="rigA"\n' >"$city/state/roster.conf"
+mv "$city/pool.json" "$city/pool.hidden"
+run_sweep "$city" >/dev/null 2>&1
+first="$(target_for "$city" brakeman)"
+if [ -z "$first" ]; then
+	report ok "a lane unreadable before it was ever published carries nothing forward"
+else
+	report FAIL "a lane unreadable before it was ever published carries nothing forward" \
+		"brakeman=$first, expected no line (0 would pin the lane at an outage)"
+fi
+rm -rf "$city"
+
+# ---------------------------------------------------------------------------
+# 19. AN UNREADABLE STAGE SIGNAL ESCALATES — ONCE PER EPISODE.
+#
+#     The balancer is now flying blind AND frozen on stale targets, which is
+#     precisely the state nobody notices: the file stays fresh, the lanes keep
+#     their numbers, and the report line goes to a log. So it mails.
+#
+#     Both directions are pinned, because each has a cheap wrong version that
+#     passes the other: a pass that never mails satisfies the once-per-episode
+#     bound, and a pass that mails every cycle satisfies "it escalates".
+# ---------------------------------------------------------------------------
+city="$(new_city 2 0)"
+printf 'BALANCER_RIGS="rigA"\n' >"$city/state/roster.conf"
+run_sweep "$city" >/dev/null 2>&1          # healthy
+healthy="$(mail_count "$city")"
+mv "$city/pool.json" "$city/pool.hidden"
+run_sweep "$city" >/dev/null 2>&1          # unreadable: mails
+first="$(mail_count "$city")"
+run_sweep "$city" >/dev/null 2>&1          # still unreadable: SAME episode
+second="$(mail_count "$city")"
+run_sweep "$city" >/dev/null 2>&1
+third="$(mail_count "$city")"
+if [ "$healthy" = 0 ]; then
+	report ok "a healthy cycle mails nothing"
+else
+	report FAIL "a healthy cycle mails nothing" "sent $healthy"
+fi
+if [ "$first" = 1 ]; then
+	report ok "an unreadable stage signal mails the mayor"
+else
+	report FAIL "an unreadable stage signal mails the mayor" "sent $first, expected 1"
+fi
+if [ "$second" = 1 ] && [ "$third" = 1 ]; then
+	report ok "a standing unreadable signal mails once per episode, not once per cycle"
+else
+	report FAIL "a standing unreadable signal mails once per episode" \
+		"after 2 more cycles: $second then $third, expected 1 and 1"
+fi
+# The mail must NAME the fault. A correctly-counted but empty escalation tells
+# the operator only that something happened somewhere.
+if mail_log "$city" | grep -q 'rigA/brakeman'; then
+	report ok "the escalation names the rig and lane that could not be read"
+else
+	report FAIL "the escalation names the rig and lane that could not be read" "$(mail_log "$city")"
+fi
+rm -rf "$city"
+
+# --- 19b. A CLEARED EPISODE CAN ALERT AGAIN. --------------------------------
+#
+# "At most once per episode" must not decay into "once, ever": a marker that is
+# never cleared silences the second outage, which is the one an operator most
+# needs to hear about. The episode ends only after the signal has been readable
+# for a clear window, so a single flapping read stays ONE episode rather than
+# mailing on every other cycle.
+city="$(new_city 2 0)"
+printf 'BALANCER_RIGS="rigA"\n' >"$city/state/roster.conf"
+run_sweep "$city" >/dev/null 2>&1
+mv "$city/pool.json" "$city/pool.hidden"
+run_sweep "$city" >/dev/null 2>&1          # episode 1: mails
+mv "$city/pool.hidden" "$city/pool.json"
+run_sweep "$city" >/dev/null 2>&1          # clear 1 — still inside the episode
+flap="$(mail_count "$city")"
+mv "$city/pool.json" "$city/pool.hidden"
+run_sweep "$city" >/dev/null 2>&1          # a flap, not a new episode
+flapped="$(mail_count "$city")"
+mv "$city/pool.hidden" "$city/pool.json"
+run_sweep "$city" >/dev/null 2>&1          # clear 1
+run_sweep "$city" >/dev/null 2>&1          # clear 2
+run_sweep "$city" >/dev/null 2>&1          # clear 3 — episode over
+mv "$city/pool.json" "$city/pool.hidden"
+run_sweep "$city" >/dev/null 2>&1          # episode 2: mails again
+again="$(mail_count "$city")"
+if [ "$flap" = 1 ] && [ "$flapped" = 1 ]; then
+	report ok "a signal that flaps back within the clear window stays one episode"
+else
+	report FAIL "a signal that flaps back within the clear window stays one episode" \
+		"after the clear cycle $flap, after the flap $flapped, expected 1 and 1"
+fi
+if [ "$again" = 2 ]; then
+	report ok "an episode that has fully cleared can alert again"
+else
+	report FAIL "an episode that has fully cleared can alert again" \
+		"sent $again, expected 2 (1 means the marker is never cleared)"
+fi
+rm -rf "$city"
+
+# --- 19c. A FAILED SEND IS RETRIED, not recorded as delivered. --------------
+#
+# Marking the episode alerted before the send succeeds turns one dropped mail
+# into permanent silence for that fault.
+city="$(new_city 2 0)"
+printf 'BALANCER_RIGS="rigA"\n' >"$city/state/roster.conf"
+run_sweep "$city" >/dev/null 2>&1
+: >"$city/mail_fail"
+mv "$city/pool.json" "$city/pool.hidden"
+run_sweep "$city" >/dev/null 2>&1          # the send fails
+rm -f "$city/mail_fail"
+run_sweep "$city" >/dev/null 2>&1          # same episode, but nothing was delivered
+if [ "$(mail_count "$city")" = 1 ]; then
+	report ok "a send that failed is retried on the next cycle"
+else
+	report FAIL "a send that failed is retried on the next cycle" \
+		"delivered $(mail_count "$city"), expected 1"
+fi
+rm -rf "$city"
+
+# ---------------------------------------------------------------------------
+# 20. A LANE PINNED AT ITS HARD CEILING ESCALATES — AFTER A PERSISTENT WINDOW.
+#
+#     This is the balancer reporting the end of its own authority: demand is
+#     above everything it is allowed to publish, so no further cycle can help
+#     and only a human raising BALANCER_BOUNDS or city.toml can. Left unsaid,
+#     the lane looks perfectly healthy — it is publishing its ceiling every
+#     cycle, exactly as designed.
+#
+#     THE WINDOW IS THE WHOLE POINT. A queue that spikes for one cycle and
+#     drains is the balancer working, not a fault, and mailing on it would
+#     train the operator to ignore the alert.
+# ---------------------------------------------------------------------------
+city="$(new_city 9 0)"
+printf 'BALANCER_RIGS="rigA"\nBALANCER_BOUNDS="brakeman=0:3"\n' >"$city/state/roster.conf"
+i=0
+while [ "$i" -lt 5 ]; do
+	run_sweep "$city" >/dev/null 2>&1
+	i=$((i + 1))
+done
+short="$(mail_count "$city")"
+run_sweep "$city" >/dev/null 2>&1          # the sixth cycle closes the window
+long="$(mail_count "$city")"
+run_sweep "$city" >/dev/null 2>&1
+run_sweep "$city" >/dev/null 2>&1          # and it stays one mail
+still="$(mail_count "$city")"
+if [ "$short" = 0 ]; then
+	report ok "demand over the ceiling for less than the window does not mail"
+else
+	report FAIL "demand over the ceiling for less than the window does not mail" "sent $short after 5 cycles"
+fi
+if [ "$long" = 1 ]; then
+	report ok "demand over the hard ceiling for a persistent window mails the mayor"
+else
+	report FAIL "demand over the hard ceiling for a persistent window mails the mayor" \
+		"sent $long, expected 1"
+fi
+if [ "$still" = 1 ]; then
+	report ok "a lane standing at its ceiling mails once per episode, not once per cycle"
+else
+	report FAIL "a lane standing at its ceiling mails once per episode" "sent $still, expected 1"
+fi
+if mail_log "$city" | grep -q 'rigA/brakeman'; then
+	report ok "the saturation escalation names the lane and what it is pinned at"
+else
+	report FAIL "the saturation escalation names the lane" "$(mail_log "$city")"
+fi
+rm -rf "$city"
+
+# --- 20b. Demand EQUAL to the ceiling is satisfied, not saturated. ----------
+#
+# The off-by-one that would mail on every well-tuned factory: a lane asking for
+# exactly what it is allowed is the balancer having got the answer right.
+city="$(new_city 3 0)"
+printf 'BALANCER_RIGS="rigA"\nBALANCER_BOUNDS="brakeman=0:3"\n' >"$city/state/roster.conf"
+i=0
+while [ "$i" -lt 8 ]; do
+	run_sweep "$city" >/dev/null 2>&1
+	i=$((i + 1))
+done
+if [ "$(mail_count "$city")" = 0 ] && [ "$(target_for "$city" brakeman)" = 3 ]; then
+	report ok "demand equal to the ceiling is satisfied and never escalates"
+else
+	report FAIL "demand equal to the ceiling is satisfied and never escalates" \
+		"sent $(mail_count "$city"), brakeman=$(target_for "$city" brakeman)"
+fi
+rm -rf "$city"
+
+# --- 20c. A THROTTLED lane is not saturated. --------------------------------
+#
+# Backpressure assigns the floor without measuring anything, so there is no
+# demand reading to compare against a ceiling. Counting it would escalate every
+# rig whose merge stage backed up for half an hour — reporting the backpressure
+# rule working as though it were a fault.
+#
+# THE FIXTURE PUTS THE FLOOR ABOVE CAPACITY, and it has to. With ordinary bounds
+# a throttled lane's assigned floor is BELOW its ceiling, so the comparison is
+# false whether or not the guard exists and the case passes vacuously — measured:
+# removing the guard fired nothing. A floor of 9 against a capacity of 3 is the
+# one shape where the assigned floor outruns the hard ceiling, which is exactly
+# the config the clamp order case above already calls this file's sharpest edge.
+city="$(new_city 9 0 3 9)"
+printf 'BALANCER_RIGS="rigA"\nBALANCER_BOUNDS="brakeman=9:9"\n' >"$city/state/roster.conf"
+merge_queue "$city" 9
+i=0
+while [ "$i" -lt 8 ]; do
+	run_sweep "$city" >/dev/null 2>&1
+	i=$((i + 1))
+done
+if [ "$(mail_count "$city")" = 0 ]; then
+	report ok "a lane clamped by backpressure is not counted as saturated"
+else
+	report FAIL "a lane clamped by backpressure is not counted as saturated" \
+		"sent $(mail_count "$city")"
 fi
 rm -rf "$city"
 

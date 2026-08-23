@@ -35,6 +35,26 @@
 # no target and is named in the report, because throttling the whole factory on
 # a timed-out repo call is the outage this order exists to prevent.
 #
+# WHAT IT ESCALATES, and it is only what turning the dial cannot fix. A dial has
+# two such failures: it has run out of travel, or it cannot see what it is
+# turning for. A lane whose demand stands above the hard ceiling — min(the
+# BALANCER_BOUNDS ceiling, the agent's own capacity) — for six consecutive
+# cycles is the first: the balancer is publishing everything it is allowed to
+# and the queue is still growing, so only a human raising that bound can help.
+# A stage signal that cannot be read is the second. Both mail the mayor ONCE per
+# episode, where an episode ends only after three clear cycles, so a flapping
+# forge read is one mail rather than one every ten minutes; a cycle that opens
+# several episodes sends one mail naming them all. The ledger lives in
+# balancer.alerts beside the targets, and a send that fails leaves the episode
+# unmarked so the next cycle retries it.
+#
+# A BLIND CYCLE CHANGES NOTHING. A lane whose demand or capacity cannot be read
+# republishes the target it is already on rather than dropping its line — to a
+# consumer a missing line means "no cap", so dropping it would run the lane up
+# to its full city.toml ceiling on a cycle that measured nothing, at the moment
+# the repo it could not reach is already struggling. A lane with nothing
+# published yet still writes no line, since there is no target to hold.
+#
 # OFF UNTIL BALANCER_RIGS NAMES A RIG. Unset, this order exits before it reads
 # anything and writes nothing at all, so an unopted city is byte-for-byte
 # unchanged — including any targets file already on disk, which is left exactly
@@ -75,7 +95,7 @@
 # project slug needs a RIG_PROJECTS entry, same as every other consumer.
 
 [order]
-description = "Snapshot every balanced rig's depth at all six pipeline stages as one JSON line per cycle in balancer.snapshots.jsonl, and publish brakeman/reviewer concurrency targets to balancer.targets, clamped into BALANCER_BOUNDS and never above the lane agent's own max_active_sessions, or down to their floors when the reviewed-but-unmerged queue backs up"
+description = "Snapshot every balanced rig's depth at all six pipeline stages as one JSON line per cycle in balancer.snapshots.jsonl, and publish brakeman/reviewer concurrency targets to balancer.targets, clamped into BALANCER_BOUNDS and never above the lane agent's own max_active_sessions, or down to their floors when the reviewed-but-unmerged queue backs up; a lane whose signal cannot be read keeps the target it is already on, and a lane pinned at its hard ceiling or a stage that cannot be read mails the mayor once per episode"
 trigger = "cooldown"
 interval = "5m"
 exec = "$PACK_DIR/assets/scripts/balance-sweep.sh"

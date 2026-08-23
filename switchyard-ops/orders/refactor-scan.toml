@@ -17,11 +17,24 @@
 # re-deriving the same ranking. It is not: the scout is also spawned by the
 # reconciler's revive loop, which does not consult this interval. Measured over
 # 24h (switchyard issue 163) this order fired 0 times and the lane ran 29 passes
-# anyway, at 45.4M tokens — 23.8% of the city's burn. The real guard is now the
-# HEAD-unchanged gate the scout runs as its own first action
-# (assets/scripts/refactor-scan-gate.sh); this interval only bounds the scheduled
-# path. When adding a guard to a lane, put it where every pass must cross it, not
-# where only one of the spawners will look.
+# anyway, at 45.4M tokens — 23.8% of the city's burn. When adding a guard to a
+# lane, put it where every pass must cross it, not where only one of the spawners
+# will look.
+#
+# SO THERE ARE TWO GUARDS, AND THEY ARE COMPLEMENTS RATHER THAN COPIES:
+#
+#   assets/scripts/refactor-scan.sh       (what this order execs) refuses to
+#   START a session for a rig whose HEAD has not moved since it last spawned for
+#   it. A no-demand cycle costs one marker read — zero tokens.
+#
+#   assets/scripts/refactor-scan-gate.sh  runs INSIDE the session, whoever
+#   started it, and stops a pass that reached a session anyway — the revive-loop
+#   spawner this order cannot see. It costs a session's startup, which is why it
+#   is not sufficient on its own.
+#
+# They key on SEPARATE markers on purpose: a shared one would let the pre-spawn
+# gate stamp the sha the in-session gate then reads as its own, silently
+# disabling the revive-loop coverage that is the reason the latter exists.
 #
 # Deliberately out of phase with security-scan (12h): security findings are
 # defects wanting fast turnaround, refactors are judgments wanting deliberation.
@@ -29,4 +42,4 @@
 description = "Start one refactor-scout per rig weekly; it files evidence-ranked refactor proposals into switchyard and writes no code"
 trigger = "cooldown"
 interval = "168h"
-exec = "$PACK_DIR/assets/scripts/lane-ensure.sh refactor-scout 'refactor scout'"
+exec = "$PACK_DIR/assets/scripts/refactor-scan.sh"

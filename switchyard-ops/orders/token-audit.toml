@@ -12,6 +12,15 @@
 # window that makes the strongest class of finding legible: cost-per-closed-bead
 # ratios need enough closed beads to be a ratio rather than an anecdote.
 #
+# THE CADENCE IS NOT THE ENFORCING GUARD. The reconciler's revive loop spawns
+# lanes without consulting an interval, so this 168h figure bounds the scheduled
+# path only — the same gap measured on the refactor-scout lane, where the order
+# fired 0 times in 24h while the lane ran 29 passes (switchyard issue 163). What
+# actually enforces "nothing new to attribute, so do not pay for a session" is
+# the pre-spawn demand gate this order now execs
+# (assets/scripts/token-audit.sh): no new lines in the city's usage sink since
+# the last audit means no spawn, at the cost of one marker read.
+#
 # The spike watch is what covers the fast axis. If a spike lands, the mayor gets
 # mail within 6h and can wake an auditor immediately:
 #   gc session new switchyard-ops.token-auditor --no-attach
@@ -22,4 +31,4 @@
 description = "Start the city token auditor weekly; it attributes spend to agents/rigs and files findings into switchyard"
 trigger = "cooldown"
 interval = "168h"
-exec = "$PACK_DIR/assets/scripts/city-lane-ensure.sh token-auditor 'token auditor'"
+exec = "$PACK_DIR/assets/scripts/token-audit.sh"

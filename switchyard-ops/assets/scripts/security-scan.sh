@@ -35,6 +35,7 @@
 set -u
 
 . "$(dirname "$0")/../lib/roster.sh"
+. "$(dirname "$0")/../lib/demand.sh"
 sy_load_conf
 
 # OPT-IN PER RIG, the *_RIGS roster idiom every sibling lane switch uses
@@ -127,5 +128,47 @@ property that is the point of it), see agents/security-scout/agent.toml for the
   # Prerequisites met — clear the marker so a future regression re-notifies.
   rm -f "$MARKER" 2>/dev/null
 fi
+
+# PRE-SPAWN DEMAND GATE — the second of this script's two questions, and it
+# runs SECOND on purpose. The readiness gate above asks "can this lane run at
+# all?"; this one asks "need it run this cycle?". Reversing them would let a
+# quiet cycle return before the readiness check, so a city that never configured
+# its provider would stop receiving the notice telling it so — the lane would
+# read as idle-by-choice rather than idle-because-broken.
+#
+# THE SIGNAL: the scout scopes its review to the diff since its last pass, so a
+# rig whose HEAD has not moved offers it nothing to review. Before this gate that
+# still cost a session twice a day per opted-in rig: start up, read an empty
+# diff, exit IDLE. Cheap next to a real review, but paid on every quiet rig on
+# every cycle forever.
+#
+# The predicate is shared with refactor-scan (lib/demand.sh) so the two scanners
+# cannot drift apart, and it FAILS OPEN: a repo whose HEAD cannot be read is
+# scanned rather than skipped. A gate that failed closed would silently retire
+# the lane, and a lane that never runs can never report that it isn't running.
+#
+# Narrows the allowlist rather than replacing the walk: survivors reach
+# lane-ensure through LANE_RIGS_FILTER, so a rig with no demand is out of the
+# lane's scope for this cycle entirely — no spawn, no reap, no escalation.
+wanted=""
+for rig in $SECURITY_SCAN_RIGS; do
+  repo="$(sy_rig_root "$rig")"
+  if sha="$(sy_demand_sha_moved "security-scan.$rig" "$repo")"; then
+    wanted="$wanted $rig"
+  else
+    echo "security-scan: $rig unchanged at $sha since its last scan — skipping, no session started."
+  fi
+done
+
+# Every opted-in rig quiet: the whole cycle is a no-op, said out loud. This line
+# is the difference between a lane that is deliberately idle and one that is
+# broken, and those look identical in a log that prints nothing.
+if [ -z "$wanted" ]; then
+  echo "security-scan: no opted-in rig has moved since its last scan — no session started."
+  exit 0
+fi
+
+LANE_RIGS_FILTER="$(printf '%s' "$wanted" | sed 's/^ *//')"
+export LANE_RIGS_FILTER
 
 exec "$(dirname "$0")/lane-ensure.sh" security-scout "security scout"

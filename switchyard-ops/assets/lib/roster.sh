@@ -688,3 +688,27 @@ sy_rig_root() {
     printf '%s/%s' "$(sy_city)" "$1"
   fi
 }
+
+# sy_lane_rigs QUALIFIED — the rigs whose roster defines the pack agent
+# QUALIFIED (e.g. "switchyard-ops.refactor-scout"), suspended agents excluded.
+#
+# THE LANE'S OWN RIG SET, and the reason it lives here rather than in the
+# spawner. lane-ensure.sh derives this to decide where to spawn; a PRE-SPAWN
+# demand gate has to decide where NOT to, against exactly the same set. Two
+# derivations that disagree would gate a rig the spawner never visits (a wasted
+# marker) or, worse, spawn for a rig the gate never judged — which is the
+# ungated lane the gate was added to close, hidden behind a gate that looks
+# present. One implementation, two callers, no drift.
+#
+# A rig whose agent is SUSPENDED is not in the lane: the reconciler is
+# deliberately skipping it, so gating or spawning for it accomplishes nothing.
+sy_lane_rigs() {
+  gc agent list --json 2>/dev/null \
+    | jq -r --arg q "$1" '(if type=="array" then . else (.agents // []) end)
+             | .[]
+             | select((.suspended // false) | not)
+             | .qualified_name
+             | select(endswith("/" + $q))
+             | rtrimstr("/" + $q)' 2>/dev/null \
+    | awk 'NF' | sort -u
+}

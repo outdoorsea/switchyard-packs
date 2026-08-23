@@ -563,16 +563,7 @@ LANE_TMUX_SOCKET="$(lane_tmux_socket)"
 # sweep reported success throughout, because a rig that is never in `rigs` is
 # never checked and so can never fail. A rig may legitimately have a lane queue
 # with no pinned coordinator; having the lane's agent is the honest test.
-lane_rigs() {
-  gc agent list --json 2>/dev/null \
-    | jq -r --arg q "$QUALIFIED" '(if type=="array" then . else (.agents // []) end)
-             | .[]
-             | select((.suspended // false) | not)
-             | .qualified_name
-             | select(endswith("/" + $q))
-             | rtrimstr("/" + $q)' 2>/dev/null \
-    | awk 'NF' | sort -u
-}
+lane_rigs() { sy_lane_rigs "$QUALIFIED"; }
 
 # The rigs the mayor has suspended, read ONCE per cycle.
 #

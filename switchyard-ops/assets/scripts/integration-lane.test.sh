@@ -1059,6 +1059,50 @@ case_bundle_size() {
 }
 
 # ---------------------------------------------------------------------------
+# 7b. The DEFAULT size is the one a run with no configuration actually uses,
+#     and a bundle SMALLER than it says so.
+# ---------------------------------------------------------------------------
+# case_bundle_size above pins the default by READING THE SOURCE, and every run
+# it makes passes INTEGRATION_LANE_BUNDLE_SIZE=2 explicitly. So nothing observes
+# the default in a run: a later assignment that overrode it — a helper exporting
+# its own, a stray edit, a typo — would leave `:-8` in the source with the grep
+# still green while every real run bundled some other number.
+#
+# The second assertion is the criterion's own worked example. A bundle of two
+# under a size of eight has to be readable as a SHORT QUEUE rather than as a
+# size somebody changed to two, and that is only true when the size and the
+# count are BOTH on the report — so both are asserted against the one run.
+case_bundle_size_default_is_what_a_run_uses() {
+	local city; city="$(new_city)"
+	add_pr "$city" 1 feat-1 touch_own
+	add_pr "$city" 2 feat-2 touch_own
+	queue "$city" "[$(pr_json 1 feat-1 "$(sha_of "$city" feat-1)"),$(pr_json 2 feat-2 "$(sha_of "$city" feat-2)")]"
+
+	# Deliberately NO INTEGRATION_LANE_BUNDLE_SIZE: this run must fall back to
+	# the configured default and report the number it really used.
+	run_lane "$city" INTEGRATION_LANE_VERIFY='true'
+	local mail; mail="$(mail_of "$city")"
+
+	# The variable name is part of the pattern so the size cannot partial-match
+	# a longer number: `: 8 (` cannot be read out of `: 80 (`.
+	if has "$mail" 'Bundle size in use: 8 (INTEGRATION_LANE_BUNDLE_SIZE)'; then
+		report ok "a run given no bundle size reports the default 8 it actually used"
+	else
+		report FAIL "a run given no bundle size reports the default 8 it actually used" \
+			"mail=$(printf '%s' "$mail" | head -10)"
+	fi
+
+	if has "$mail" 'Bundle size in use: 8 (INTEGRATION_LANE_BUNDLE_SIZE)' \
+		&& has "$mail" 'Constituents (2):'; then
+		report ok "a bundle under the size reports both, so a short queue is not a changed setting"
+	else
+		report FAIL "a bundle under the size reports both, so a short queue is not a changed setting" \
+			"mail=$(printf '%s' "$mail" | head -14)"
+	fi
+	rm -rf "$city"
+}
+
+# ---------------------------------------------------------------------------
 # 8. A schemaVersion collision is caught BEFORE the combination is tested.
 # ---------------------------------------------------------------------------
 case_schema_version_collision() {
@@ -1704,6 +1748,7 @@ case_ejects_culprit_and_rebundles
 case_requeries_mergeability
 case_exclusions_are_named
 case_bundle_size
+case_bundle_size_default_is_what_a_run_uses
 case_schema_version_collision
 case_stale_branch_is_not_a_bump
 case_equal_bump_is_refused

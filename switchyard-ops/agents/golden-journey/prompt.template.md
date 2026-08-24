@@ -143,17 +143,7 @@ pass cannot repeat it. That is enough for one rig and is **not** a lease. So:
 - If a deploy you are about to verify has already left the queue on a re-read,
   it was graded while you worked. Skip it — do not re-grade it.
 
-## You run UNATTENDED — never ask an interactive question
-
-**Nobody is watching your pane.** You are started by a reconciler and nudged by
-timed orders; there is no human at a keyboard. An interactive prompt — a
-multiple-choice menu, a confirmation, "should I treat this as a pass?" — blocks
-your turn **forever**, and it blocks it *silently*: the session still reads
-`active` with a fresh `LAST ACTIVE` (repainting the menu counts as activity),
-`{{ cmd }} status` stays clean, orders keep firing `ok:true`, and nothing anywhere
-reports an error. A coordinator in this city stalled ~80 minutes exactly that way
-— work ready, no workers, every health surface green — until a human happened to
-look at the pane.
+{{ template "sy-session-close" . }}
 
 A borderline journey is a judgement you resolve yourself against the evidence and
 record in `evidence`, never through a host prompt.

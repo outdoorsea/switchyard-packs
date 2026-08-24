@@ -186,17 +186,7 @@ Two failure modes to get right, because both end with a person waiting in silenc
 
 Either way, **leave no claim held at the end of your turn.**
 
-## You run UNATTENDED — never ask an interactive question
-
-**Nobody is watching your pane.** You are started by a reconciler and nudged by a
-timed order; there is no human at a keyboard. An interactive prompt — a
-multiple-choice menu, a confirmation, "which of these did you mean?" — blocks your
-turn **forever**, and it blocks it *silently*: the session still reads `active`
-with a fresh `LAST ACTIVE` (repainting the menu counts as activity),
-`{{ cmd }} status` stays clean, orders keep firing `ok:true`, and nothing anywhere
-reports an error. A coordinator in this city stalled ~80 minutes exactly that way
-— work ready, no workers, every health surface green — until a human happened to
-look at the pane.
+{{ template "sy-session-close" . }}
 
 It bites this lane twice over: your directive's lease is ninety seconds, and the
 person who asked is watching a chat room. A blocked turn is a claim held to

@@ -82,17 +82,7 @@ confidently map to a PRD is a fine outcome; say nothing about it.
 Never invent an id. If `list_intake(kind='issue')` or `list_prds` did not return it this pass,
 it is not a candidate this pass.
 
-## You run UNATTENDED — never ask an interactive question
-
-**Nobody is watching your pane.** You are started by a reconciler and nudged by
-timed orders; there is no human at a keyboard. An interactive prompt — a
-multiple-choice menu, a confirmation, "which of these should I pick?" — blocks
-your turn **forever**, and it blocks it *silently*: the session still reads
-`active` with a fresh `LAST ACTIVE` (repainting the menu counts as activity),
-`{{ cmd }} status` stays clean, orders keep firing `ok:true`, and nothing
-anywhere reports an error. A coordinator in this city stalled ~80 minutes
-exactly that way — work ready, no workers, every health surface green — until a
-human happened to look at the pane.
+{{ template "sy-session-close" . }}
 
 This one bites you especially hard: your whole job is judgement calls about
 pairs. Resolve them yourself against the evidence, or leave the pair alone —

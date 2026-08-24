@@ -761,9 +761,18 @@ job (`bash scripts/intake-readiness-gate.test.sh`).
 A section that must read identically to more than one agent lives in
 [`template-fragments/`](switchyard-ops/template-fragments) and is pulled in with a
 `{{ template "<name>" . }}` action, so the rule is written once and cannot drift
-between prompts. The pack ships two: `sy-review-findings` (the judge's finding
-order and confidence floor) and `tdd-discipline` (the brakeman's, vendored from
-gastown with its upstream sha256 recorded in the file).
+between prompts. The pack ships three: `sy-review-findings` (the judge's finding
+order and confidence floor), `sy-session-close` (the unattended-operation warning
+carried by all nine reconciler-started lanes) and `tdd-discipline` (the
+brakeman's, vendored from gastown with its upstream sha256 recorded in the file).
+
+`sy-session-close` draws a deliberate line: it holds the invariant — nobody is
+watching the pane, an interactive prompt blocks the turn silently, every health
+surface stays green — while the one sentence saying how that bites *this* lane
+stays in each agent prompt right after the include. That sentence is the part
+worth tailoring; the warning is the part that must not drift, and as nine
+copy-pasted prose blocks it already had, into three phrasings of the example
+question and two line-wrappings of otherwise identical text.
 
 **Naming here is load-bearing, not cosmetic.** `gc` loads every imported pack's
 `template-fragments/` into **one namespace**, so a generic name collides across

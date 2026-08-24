@@ -1,0 +1,37 @@
+# Close sessions that registered as active but never started a turn.
+#
+# The fifth member of the silent-stall family, after publish-gate (work closed
+# with no PR), pr-gate (PR opened and never merged), pane-stall (input never
+# submitted) and frozen-session-sweep (turn died at a terminal API error). Same
+# shape as all four: a condition every existing health surface reads as fine.
+# Here the runtime NEVER CAME UP — gc wrote the session to the registry as
+# active and nothing ever executed — so `last_active` still holds Go's zero
+# time (0001-01-01) while `gc status`, the reconciler and the scaler all count
+# the lane staffed. One such session seals a max=1 lane; four fill a max=4 one.
+#
+# Like frozen-session-sweep this order ACTS rather than only reporting, but the
+# action is the opposite one. A frozen session holds a live runtime and
+# recoverable context, so its remedy is a nudge and a kill would destroy work.
+# A zombie has neither: nothing is listening to nudge, and no turn ever ran, so
+# closing it costs nothing and is the only thing that frees the slot. It is
+# also why no prompt-side "close your session when you finish" instruction can
+# address this class — the agent never reaches its prompt.
+#
+# Cadence is 15m, matching the family. Detection latency is not the constraint
+# (a zombie holds its slot indefinitely), but the lane it seals is unstaffed
+# the whole time, and the 10-minute grace period inside the script means a
+# zombie is collected within ~25m of spawning. The grace period is what keeps
+# the sweep from reaping HEALTHY newborns, which are briefly indistinguishable:
+# between registration and first stamped activity they also read active with a
+# zero last_active.
+#
+# Closing is janitorial and does not fix the cause, so the script also counts
+# closures per agent template and escalates once when one template crosses the
+# recurrence cap. A single zombie is noise; one lane producing ten is a
+# misconfigured provider or transport, and that mail is the only surface on
+# which the pattern is visible.
+[order]
+description = "Close sessions that registered active but never executed a turn (last_active at Go zero time), escalating once per template on repeat offenders"
+trigger = "cooldown"
+interval = "15m"
+exec = "$PACK_DIR/assets/scripts/zombie-sweep.sh"

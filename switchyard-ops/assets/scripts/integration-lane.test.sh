@@ -1310,6 +1310,117 @@ case_concurrent_runs_are_excluded() {
 }
 
 # ---------------------------------------------------------------------------
+# 9b. A run still BUNDLING keeps its lock alive.
+# ---------------------------------------------------------------------------
+# The CI wait refreshes the lock (9a), but the bundle loop is the LONGER half:
+# prepare and verify are each bounded by INTEGRATION_LANE_VERIFY_TIMEOUT and the
+# loop runs both once per ejection, so on stock defaults a legitimate run can
+# outlive INTEGRATION_LANE_LOCK_STALE_MIN before it ever reaches CI. Ageing the
+# lock from the moment it was TAKEN would declare that run abandoned mid-bundle,
+# and the next cycle would bundle the same pull requests onto a second branch —
+# two runs on overlapping sets, which is the whole thing the lock exists to stop.
+case_bundle_loop_keeps_the_lock_alive() {
+	local city; city="$(new_city)"
+	add_pr "$city" 1 feat-1 touch_own
+	add_pr "$city" 2 feat-2 touch_own
+	add_pr "$city" 3 feat-3 touch_own
+	queue "$city" "[$(pr_json 1 feat-1 "$(sha_of "$city" feat-1)"),$(pr_json 2 feat-2 "$(sha_of "$city" feat-2)"),$(pr_json 3 feat-3 "$(sha_of "$city" feat-3)")]"
+
+	local lock="$city/state/integration-lane.$RIG.lock"
+	# Record the stamp the lane is holding, plant an ancient one, then fail so
+	# the loop ejects and verifies again. A run that keeps its own lock warm
+	# overwrites that ancient stamp before the second attempt reads it.
+	run_lane "$city" \
+		INTEGRATION_LANE_VERIFY="cat '$lock/started' >> '$city/state/bundle-lock.log' 2>/dev/null; printf '1\n' > '$lock/started' 2>/dev/null; exit 1"
+
+	local attempts; attempts="$(grep -c '' "$city/state/bundle-lock.log" 2>/dev/null || true)"
+	local second;   second="$(tail -n1 "$city/state/bundle-lock.log" 2>/dev/null)"
+	if [ "${attempts:-0}" -lt 2 ]; then
+		report FAIL "the bundle loop refreshes the lane's lock" \
+			"the verify ran ${attempts:-0} time(s); this case needs a re-bundle to observe a refresh"
+	elif [ "$second" = "1" ]; then
+		report FAIL "the bundle loop refreshes the lane's lock" \
+			"the lock still carried the ancient stamp on the re-bundle — a bundling run reads as abandoned"
+	else
+		report ok "the bundle loop refreshes the lane's lock, so a bundling run is not read as abandoned"
+	fi
+	rm -rf "$city"
+}
+
+# ---------------------------------------------------------------------------
+# 9c. A run releases only a lock it still owns.
+# ---------------------------------------------------------------------------
+# Release used to be unconditional, so ONE mistaken break cascaded: the slow
+# first run finished, deleted the SECOND run's live lock on its way out, and
+# admitted a third. The pid is written when the lock is taken; reading it back
+# on release is what stops the failure at one.
+case_release_is_ownership_checked() {
+	local city; city="$(new_city)"
+	add_pr "$city" 1 feat-1 touch_own
+	add_pr "$city" 2 feat-2 touch_own
+	queue "$city" "[$(pr_json 1 feat-1 "$(sha_of "$city" feat-1)"),$(pr_json 2 feat-2 "$(sha_of "$city" feat-2)")]"
+
+	local lock="$city/state/integration-lane.$RIG.lock"
+	# A concurrent run breaks this lock and retakes it while we are mid-bundle:
+	# from this point the directory belongs to pid 999999, not to us.
+	run_lane "$city" \
+		INTEGRATION_LANE_VERIFY="printf '999999\n' > '$lock/pid' 2>/dev/null; true"
+
+	if [ -d "$lock" ]; then
+		report ok "a finishing run does not release a lock it no longer owns"
+	else
+		report FAIL "a finishing run does not release a lock it no longer owns" \
+			"it deleted the successor's live lock — one broken lock then admits a third run"
+	fi
+	rm -rf "$city"
+}
+
+# ---------------------------------------------------------------------------
+# 9d. A lock taken microseconds ago is honoured, not broken on sight.
+# ---------------------------------------------------------------------------
+# The directory is the atomic claim and the stamp is written just after it, so
+# there is a window in which a live lock carries no stamp at all. Reading "no
+# stamp" as "stale" breaks a lock whose holder acquired it microseconds earlier
+# — by construction, not by bad luck. Honour it and stamp it instead: it is then
+# aged from first SIGHTING, so a run that really did die still ages out.
+case_unstamped_lock_is_not_broken_on_sight() {
+	local city; city="$(new_city)"
+	add_pr "$city" 1 feat-1 touch_own
+	add_pr "$city" 2 feat-2 touch_own
+	queue "$city" "[$(pr_json 1 feat-1 "$(sha_of "$city" feat-1)"),$(pr_json 2 feat-2 "$(sha_of "$city" feat-2)")]"
+
+	local lock="$city/state/integration-lane.$RIG.lock"
+	mkdir -p "$lock"
+	printf '999999\n' > "$lock/pid"
+
+	run_lane "$city" INTEGRATION_LANE_VERIFY='true'
+	if [ -n "$(created_of "$city")" ]; then
+		report FAIL "a held lock with no stamp yet is honoured, not broken on sight" \
+			"the second run bundled anyway — it broke a lock that had only just been taken"
+	else
+		report ok "a held lock with no stamp yet is honoured, not broken on sight"
+	fi
+
+	if [ -s "$lock/started" ]; then
+		report ok "an unstamped lock is stamped on first sighting, so it can still age out"
+	else
+		report FAIL "an unstamped lock is stamped on first sighting, so it can still age out" \
+			"nothing stamped it — a lock that cannot age is a lock that never releases"
+	fi
+
+	# ...and once it HAS aged past the window it is broken like any other.
+	printf '%s\n' "$(( $(date -u +%s) - 60 * 60 * 24 ))" > "$lock/started"
+	run_lane "$city" INTEGRATION_LANE_VERIFY='true'
+	if has "$(created_of "$city")" 'pr create'; then
+		report ok "an unstamped lock that has since aged past the window is broken"
+	else
+		report FAIL "an unstamped lock that has since aged past the window is broken" \
+			"honouring it forever wedges the lane"
+	fi
+	rm -rf "$city"
+}
+
+# ---------------------------------------------------------------------------
 # 10. Nothing to bundle -> no branch, no mail.
 # ---------------------------------------------------------------------------
 case_silent_when_nothing_to_add() {
@@ -1332,6 +1443,91 @@ case_silent_when_nothing_to_add() {
 		else
 			report FAIL "$n mergeable PR(s): no branch, no pull request, no mail" \
 				"branches=${branches:-none} mail=$(mail_of "$city" | head -3)"
+		fi
+		rm -rf "$city"
+	done
+
+	# ANTI-VACUITY CONTROL. Every assertion above is an ABSENCE — no branch, no
+	# mail, no pull request — and an absence proves nothing on its own. A lane
+	# that never mailed at all, or a fixture whose mail.log was simply never
+	# wired up, satisfies all of it. So the same fixture, the same helpers and
+	# the same predicates must produce the OPPOSITE result when the lane does
+	# have something to add. Without this the case is a green light bolted to a
+	# disconnected wire.
+	city="$(new_city)"
+	add_pr "$city" 1 feat-1 touch_own
+	add_pr "$city" 2 feat-2 touch_own
+	queue "$city" "[$(pr_json 1 feat-1 "$(sha_of "$city" feat-1)"),\
+$(pr_json 2 feat-2 "$(sha_of "$city" feat-2)")]"
+	run_lane "$city" INTEGRATION_LANE_VERIFY='true'
+	if [ -s "$city/state/mail.log" ] && [ -n "$(created_of "$city")" ]; then
+		report ok "control: two mergeable PRs DO branch and mail, so the silence above is a result"
+	else
+		report FAIL "control: two mergeable PRs DO branch and mail, so the silence above is a result" \
+			"the fixture never mails or never creates, so every absence asserted above is vacuous"
+	fi
+	rm -rf "$city"
+}
+
+# ---------------------------------------------------------------------------
+# 10b. Silence is for "nothing to ADD" — never for "nothing bundled".
+#
+# The lane decides whether to speak at TWO exits, and they disagreed. The late
+# one, after a bundle attempt, is right: it goes quiet only when there is no
+# bundle AND nothing was excluded. The early one — taken when fewer than two
+# candidates survive the filters — went quiet unconditionally. So a run with
+# one mergeable pull request and a queue full of rejected ones said nothing,
+# and every rejection went with it.
+#
+# That is the silent-truncation failure this whole file is written against,
+# and it is exactly what separates "the lane has nothing to add" from "the
+# lane had plenty to say and swallowed it". The report for this case already
+# exists in the lane — "nothing bundled, N PR(s) excluded", whose lead reads
+# "fewer than two pull requests survived the filters". The early exit simply
+# never reached it.
+#
+# Both arms below still assert the criterion's other half: no branch and no
+# bundle pull request. Speaking up must not turn into bundling a single PR.
+# ---------------------------------------------------------------------------
+case_exclusions_break_the_silence() {
+	local city n rows
+	for n in 0 1; do
+		city="$(new_city)"
+		# Two pull requests that cannot be bundled, for two different reasons,
+		# so a report that names only one is still a failure.
+		add_pr "$city" 2 draft-2 touch_own
+		add_pr "$city" 3 conflict-3 touch_own
+		printf '{"mergeable":"CONFLICTING","mergeStateStatus":"DIRTY"}\n' > "$city/fixtures/merge.3"
+		rows="$(pr_json 2 draft-2 "$(sha_of "$city" draft-2)" true),\
+$(pr_json 3 conflict-3 "$(sha_of "$city" conflict-3)")"
+		# n=0: nothing mergeable at all. n=1: exactly one, the boundary the
+		# criterion names — one PR is no COMBINATION, so it must not be bundled.
+		if [ "$n" -eq 1 ]; then
+			add_pr "$city" 1 feat-1 touch_own
+			rows="$(pr_json 1 feat-1 "$(sha_of "$city" feat-1)"),$rows"
+		fi
+		queue "$city" "[$rows]"
+
+		run_lane "$city" INTEGRATION_LANE_VERIFY='true'
+		local mail; mail="$(mail_of "$city")"
+
+		local branches
+		branches=$(git -C "$city/origin.git" for-each-ref --format='%(refname:short)' 'refs/heads/integration/*')
+		if [ -z "$branches" ] && [ -z "$(created_of "$city")" ]; then
+			report ok "$n mergeable + 2 excluded: still no branch and no bundle pull request"
+		else
+			report FAIL "$n mergeable + 2 excluded: still no branch and no bundle pull request" \
+				"branches=${branches:-none} created=$(created_of "$city")"
+		fi
+
+		local d c
+		d="$(exclusion_reason "$mail" 2)"
+		c="$(exclusion_reason "$mail" 3)"
+		if hasi "$d" 'draft' && hasi "$c" 'not mergeable'; then
+			report ok "$n mergeable + 2 excluded: the run still names every declined PR and why"
+		else
+			report FAIL "$n mergeable + 2 excluded: the run still names every declined PR and why" \
+				"a run that bundles nothing still owes the queue an account; mail=$(printf '%s' "$mail" | head -20)"
 		fi
 		rm -rf "$city"
 	done
@@ -1756,7 +1952,11 @@ case_prepare_failure_blames_nobody
 case_default_prepare_handles_templ
 case_create_failure_is_reported
 case_concurrent_runs_are_excluded
+case_bundle_loop_keeps_the_lock_alive
+case_release_is_ownership_checked
+case_unstamped_lock_is_not_broken_on_sight
 case_silent_when_nothing_to_add
+case_exclusions_break_the_silence
 case_merge_commit_is_required
 case_merge_conflict_names_the_counterpart
 case_conflict_with_base_implicates_nobody

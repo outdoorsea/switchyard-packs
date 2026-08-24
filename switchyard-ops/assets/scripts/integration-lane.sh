@@ -170,7 +170,17 @@ INTEGRATION_LANE_MERGE_POLL_SLEEP="${INTEGRATION_LANE_MERGE_POLL_SLEEP:-3}"
 INTEGRATION_LANE_CI_POLLS="${INTEGRATION_LANE_CI_POLLS:-60}"
 INTEGRATION_LANE_CI_POLL_SLEEP="${INTEGRATION_LANE_CI_POLL_SLEEP:-30}"
 
-# A lock older than this is treated as abandoned. Sized well above one full run.
+# A lock with no PROGRESS for this long is treated as abandoned.
+#
+# This is not sized against a full run, and sizing it that way is what made a
+# long run indistinguishable from a dead one: with a 900s prepare and a 900s
+# verify per attempt, and one attempt per ejection, a legitimate run reaches
+# roughly 120 minutes of bundling before the CI wait even starts — past this
+# window, on stock defaults. The lock is refreshed as the run makes progress
+# instead (lane_touch), so what has to fit under this window is the longest GAP
+# between two refreshes: one INTEGRATION_LANE_VERIFY_TIMEOUT inside the bundle
+# loop, one INTEGRATION_LANE_CI_POLL_SLEEP inside the CI wait. Both are well
+# under it. Raise this only if a rig raises those.
 INTEGRATION_LANE_LOCK_STALE_MIN="${INTEGRATION_LANE_LOCK_STALE_MIN:-90}"
 
 # Narrow the lane to named rigs (space-separated). Empty means every rig.
@@ -221,7 +231,11 @@ prepare_worktree() { # <worktree> <logfile>
   ( cd "$1" || exit 1
     tv=$(go list -m -f '{{.Version}}' github.com/a-h/templ 2>/dev/null)
     [ -n "$tv" ] || { echo "integration-lane: templ sources present but github.com/a-h/templ is not a module dependency"; exit 1; }
-    go install "github.com/a-h/templ/cmd/templ@$tv" >/dev/null 2>&1 \
+    # Bounded like every other step: an unbounded install ages the lock with no
+    # touch able to reach inside it, and a run that outlives the stale window is
+    # a run the next cycle bundles alongside.
+    sy_timeout "$INTEGRATION_LANE_VERIFY_TIMEOUT" \
+      go install "github.com/a-h/templ/cmd/templ@$tv" >/dev/null 2>&1 \
       || { echo "integration-lane: could not install templ $tv"; exit 1; }
     PATH="$(go env GOPATH)/bin:$PATH"
     export PATH
@@ -299,13 +313,23 @@ lane_lock() { # <rig>
 
   # Held. Break it only if it is older than the stale window — a run that is
   # genuinely in flight must keep the lock, and a crashed run must not hold it
-  # forever. Absent or unreadable `started` counts as stale: a lock we cannot age
-  # is a lock we can never release, which is worse than one extra run.
+  # forever.
   _started=$(cat "$_lock/started" 2>/dev/null)
   _now=$(date -u +%s)
   case "$_started" in
-    ''|*[!0-9]*) _age_min=$((INTEGRATION_LANE_LOCK_STALE_MIN + 1)) ;;
-    *)           _age_min=$(( (_now - _started) / 60 )) ;;
+    ''|*[!0-9]*)
+      # NO READABLE STAMP IS NOT STALENESS. The directory is the atomic claim
+      # and the stamp is written just after it, so this is exactly what a lock
+      # taken MICROSECONDS ago looks like from outside. Counting it as stale
+      # breaks a live run's lock by construction rather than by bad luck, and
+      # two runs then bundle overlapping sets — the defect the lock exists to
+      # prevent. Honour it and stamp it instead: from here it ages from first
+      # SIGHTING, so a run that really did die between the two statements still
+      # ages out of the window on a later cycle rather than wedging the lane.
+      date -u +%s > "$_lock/started" 2>/dev/null
+      return 1
+      ;;
+    *) _age_min=$(( (_now - _started) / 60 )) ;;
   esac
   if [ "$_age_min" -gt "$INTEGRATION_LANE_LOCK_STALE_MIN" ]; then
     rm -rf "$_lock" 2>/dev/null
@@ -324,10 +348,27 @@ lane_lock() { # <rig>
 # overlapping sets on one branch, which is the thing the lock exists to stop.
 # Refreshing it makes the stale window mean "no progress" instead of "no finish".
 lane_touch() { # <rig>
+  lane_owned "$1" || return 0
   date -u +%s > "$STATE_DIR/integration-lane.$1.lock/started" 2>/dev/null
 }
 
+# Do we still hold this lock? The pid is recorded when the lock is taken, and
+# reading it back is what stops ONE mistaken break from cascading. Release used
+# to be unconditional: a run whose lock had been broken and retaken by a
+# successor deleted the SUCCESSOR's live lock on its way out, admitting a third
+# run. The same applies to refreshing it — keeping someone else's lock warm
+# would hold a dead successor's lock open for as long as we ran.
+#
+# An unreadable pid reads as NOT ours, so a lock we cannot prove we own is left
+# alone. That cannot wedge the lane: every lock carries a `started` stamp (an
+# unstamped one is stamped on first sighting above), so it still ages out of the
+# stale window and is broken by a later cycle.
+lane_owned() { # <rig>
+  [ "$(cat "$STATE_DIR/integration-lane.$1.lock/pid" 2>/dev/null)" = "$$" ]
+}
+
 lane_unlock() { # <rig>
+  lane_owned "$1" || return 0
   rm -rf "$STATE_DIR/integration-lane.$1.lock" 2>/dev/null
 }
 
@@ -620,10 +661,173 @@ report_text() {
     done < "$TMP/candidates")
 }
 
+# Send the run report to the mayor, and hand the merge decision to a human.
+#
+# Shared by the two exits that report: the post-bundle one below, and the
+# early one that bundles nothing but still has declined pull requests to
+# name. One copy, so the two can never drift back apart. Reads the ledgers
+# report_text derived, and `combination` selects the verdict it describes.
+send_report() {
+  case "$combination" in
+    green)
+      subject="integration-lane: $rig bundle of $n_final is green — one merge is waiting for you"
+      # The CI claim is earned, never assumed: a POLLS=0 run skips the bundle-CI
+      # wait entirely, and a green mail that still said "green on the branch's
+      # own CI" would be the exact false-green this layer exists to end. Say
+      # what was measured, and only that.
+      if [ -n "$ci_checked" ]; then
+        lead="The combination is GREEN — and green on the integration branch's own CI, not
+just on the lane's pre-flight. $n_final pull requests were merged onto one branch
+and the repository's checks ran against that merge result; nothing else in this
+repository measures the combination."
+      else
+        lead="The combination BUILDS — on the lane's pre-flight only. $n_final pull requests
+were merged onto one branch and verified together, but INTEGRATION_LANE_CI_POLLS=0
+skipped the integration branch's own CI, so that stronger check has NOT run."
+      fi
+      lead="$lead
+
+  $pr_url
+
+Merge it with a MERGE COMMIT, not a squash. Each constituent auto-closes on
+reachability, and a squash destroys that — the bundle would land and leave every
+constituent open with its code already on main.
+
+The lane does not merge. That gate is yours and stays yours."
+      ;;
+    red)
+      subject="integration-lane: $rig — a combination failure survived $ejections ejection(s)"
+      lead="These pull requests are each green alone and BROKEN TOGETHER. The lane ejected
+its prime suspect $ejections time(s) and the remainder still fails, so it did not
+open a bundle. No branch was pushed.
+
+This is the defect class the lane exists to catch: it would have reached main,
+and Railway auto-deploys main."
+      ;;
+    ci-red)
+      subject="integration-lane: $rig — the integration branch's CI FAILED on the combination; do NOT merge"
+      lead="These $n_final pull requests build together and then FAIL CI TOGETHER. The bundle
+was opened, its checks ran against the merge result, and they came back red:
+
+  $pr_url
+
+This is the defect class the lane exists to catch, and it is the half the local
+pre-flight cannot see: that pre-flight is \`$INTEGRATION_LANE_VERIFY\`, while CI
+also runs the test suite. Each constituent is green on its own base; the
+combination is not.
+${ci_attribution:+
+$ci_attribution}
+Do NOT merge this bundle. Read the failing checks on it, and either fix the
+interaction or close the bundle and let the next run rebuild without the
+culprit. The pull request is left OPEN on purpose — it is the evidence, and its
+failing checks carry the full detail."
+      ;;
+    ci-pending)
+      subject="integration-lane: $rig bundle is UNMEASURED — its CI had not finished"
+      lead="The bundle was opened and its CI had not reported a verdict before the lane's
+wait ran out, so the combination is UNMEASURED:
+
+  $pr_url
+
+Treat this as \"not yet known\", never as green. The checks are still the
+answer — read them on the pull request before merging. If this repeats, CI is
+slower than INTEGRATION_LANE_CI_POLLS × INTEGRATION_LANE_CI_POLL_SLEEP
+(currently $INTEGRATION_LANE_CI_POLLS × ${INTEGRATION_LANE_CI_POLL_SLEEP}s) and that budget is the thing to raise."
+      ;;
+    ci-absent)
+      subject="integration-lane: $rig bundle has NO CI checks — the combination was never measured"
+      lead="The bundle was opened and no CI check ever appeared on it:
+
+  $pr_url
+
+An empty check rollup is NOT a pass. PR #1346 read green on zero checks, and on
+this branch that mistake would be the worst one available — measuring the
+combination is the only reason this lane exists, so a bundle nothing ran against
+has no verdict at all.
+
+Check that the workflow triggers cover this branch (\`on: pull_request:\` must
+name \`$default_branch\`), then read the checks yourself before merging."
+      ;;
+    unpreparable)
+      subject="integration-lane: $rig — THE LANE could not prepare a buildable tree (not a combination failure)"
+      lead="This is a fault in the LANE, not in any pull request. Preparation of the scratch
+worktree failed before the combination was ever tested, so NOTHING here is
+evidence about the constituents and nothing was ejected or blamed.
+
+No branch was pushed and no bundle was opened. Read this as \"the lane is not
+running\", not as \"the queue is broken\".
+
+Preparation is INTEGRATION_LANE_PREPARE (currently: $INTEGRATION_LANE_PREPARE).
+On this repo the default generates templ views at the go.mod-pinned version,
+because *_templ.go is gitignored and a fresh worktree cannot build without it.
+
+$(tail -n 25 "$TMP/prepare.log" 2>/dev/null | sanitize_ref_tokens)"
+      ;;
+    create-failed)
+      subject="integration-lane: $rig combination green but opening the bundle PR FAILED"
+      lead="The combination passed and \`gh pr create\` then failed, so there is NO pull
+request to review — do not go looking for one. The notes below say whether the
+pushed branch was cleaned up or is orphaned on origin.
+
+Nothing is lost: the next run rebuilds the bundle from scratch."
+      ;;
+    push-failed)
+      subject="integration-lane: $rig bundle verified green but could not be pushed"
+      lead="The combination passed and then the push failed, so no pull request exists.
+Nothing is lost — the next run rebuilds the bundle from scratch — but if this
+repeats, the lane's push credentials are the thing to check."
+      ;;
+    *)
+      subject="integration-lane: $rig — nothing bundled, $(printf '%s' "$excluded_txt" | grep -c 'excluded:') PR(s) excluded"
+      lead="No bundle was opened: fewer than two pull requests survived the filters. Every
+pull request the lane declined is named below with its reason, so nothing is
+silently left behind."
+      ;;
+  esac
+
+  # An ejection a human cannot trace back to its evidence is indistinguishable
+  # from a pull request that quietly went missing. On the ci-red path the
+  # attribution IS the lead, so it is already said; on every other path — above
+  # all a run that ejected somebody and then went GREEN, where the headline is
+  # rightly the merge that is waiting — it would otherwise be dropped along with
+  # the only account of why the bundle is one smaller than the queue.
+  attribution_section=""
+  if [ -n "$ci_attribution" ] && [ "$combination" != ci-red ]; then
+    attribution_section="What the CI failure was attributed to:
+$ci_attribution"
+  fi
+
+  gc mail send mayor -s "$subject" -m "$lead
+${attribution_section:+
+$attribution_section}
+Bundle size in use: $INTEGRATION_LANE_BUNDLE_SIZE (INTEGRATION_LANE_BUNDLE_SIZE)
+Candidates that passed the filters: $n_candidates
+Combination verify: $INTEGRATION_LANE_VERIFY
+${constituents:+
+Constituents ($n_final):
+$constituents}
+${excluded_txt:+
+Excluded, and why:
+$excluded_txt}
+${notes_txt:+
+Notes:
+$notes_txt}
+This lane never merges. It prepares a bundle and reports; the merge is a human
+decision. See packs/README.md for the full behaviour." >/dev/null 2>&1
+}
+
 # Merge the candidates onto one branch and test the COMBINATION, ejecting a
 # pre-flight culprit and re-verifying. Sets `combination`.
 combine_and_verify() {
   while : ; do
+    # PROGRESS, NOT START TIME. Each attempt runs a prepare and a verify, both
+    # bounded by INTEGRATION_LANE_VERIFY_TIMEOUT, and the loop runs one attempt
+    # per ejection — so a legitimate run can outlive
+    # INTEGRATION_LANE_LOCK_STALE_MIN before it ever reaches the CI wait that
+    # used to be the only thing keeping the lock warm. Ageing the lock from the
+    # moment it was TAKEN would declare this run abandoned mid-bundle and let
+    # the next cycle bundle the same pull requests onto a second branch.
+    lane_touch "$rig"
     n_in=$(wc -l < "$TMP/candidates" 2>/dev/null | tr -d ' ')
     [ -n "$n_in" ] || n_in=0
     if [ "$n_in" -lt 2 ]; then
@@ -711,6 +915,11 @@ combine_and_verify() {
       combination=unpreparable
       return 0
     fi
+
+    # Prepare is over; the verify is the other bounded half. Refreshing between
+    # them keeps the longest gap between two touches to a SINGLE timeout rather
+    # than to both of them back to back.
+    lane_touch "$rig"
 
     # THE COMBINATION TEST. This is the measurement the per-PR checks cannot
     # make, because they each ran against a different base.
@@ -1203,6 +1412,23 @@ merge button is the wrong one. To enable the lane:
   # and a mail that tell a human nothing their existing PR did not already say.
   # No branch, no pull request, no mail.
   if [ "$n_candidates" -lt 2 ]; then
+    # Silence is for having nothing to ADD, which is narrower than having
+    # bundled nothing. A run that DECLINED pull requests owes the queue an
+    # account of each one: an excluded PR nobody names is the silent-truncation
+    # failure, and it reads exactly like a clean run. That is the same rule the
+    # post-bundle exit below applies, and the report for this case is already
+    # written — its lead reads "fewer than two pull requests survived the
+    # filters". This exit simply never reached it.
+    report_text
+    if [ -n "$excluded_txt" ]; then
+      # Initialized here because `set -u` is on and the shared report reads
+      # both, while the per-run reset that normally sets them sits further
+      # down, past this exit. Any value outside the bundle verdicts selects the
+      # report's "nothing bundled" arm.
+      combination=nothing-bundled
+      ci_attribution=""
+      send_report
+    fi
     rm -rf "$TMP"; lane_unlock "$rig"; continue
   fi
 
@@ -1373,152 +1599,7 @@ merge button is the wrong one. To enable the lane:
     rm -rf "$TMP"; lane_unlock "$rig"; continue
   fi
 
-  case "$combination" in
-    green)
-      subject="integration-lane: $rig bundle of $n_final is green — one merge is waiting for you"
-      # The CI claim is earned, never assumed: a POLLS=0 run skips the bundle-CI
-      # wait entirely, and a green mail that still said "green on the branch's
-      # own CI" would be the exact false-green this layer exists to end. Say
-      # what was measured, and only that.
-      if [ -n "$ci_checked" ]; then
-        lead="The combination is GREEN — and green on the integration branch's own CI, not
-just on the lane's pre-flight. $n_final pull requests were merged onto one branch
-and the repository's checks ran against that merge result; nothing else in this
-repository measures the combination."
-      else
-        lead="The combination BUILDS — on the lane's pre-flight only. $n_final pull requests
-were merged onto one branch and verified together, but INTEGRATION_LANE_CI_POLLS=0
-skipped the integration branch's own CI, so that stronger check has NOT run."
-      fi
-      lead="$lead
-
-  $pr_url
-
-Merge it with a MERGE COMMIT, not a squash. Each constituent auto-closes on
-reachability, and a squash destroys that — the bundle would land and leave every
-constituent open with its code already on main.
-
-The lane does not merge. That gate is yours and stays yours."
-      ;;
-    red)
-      subject="integration-lane: $rig — a combination failure survived $ejections ejection(s)"
-      lead="These pull requests are each green alone and BROKEN TOGETHER. The lane ejected
-its prime suspect $ejections time(s) and the remainder still fails, so it did not
-open a bundle. No branch was pushed.
-
-This is the defect class the lane exists to catch: it would have reached main,
-and Railway auto-deploys main."
-      ;;
-    ci-red)
-      subject="integration-lane: $rig — the integration branch's CI FAILED on the combination; do NOT merge"
-      lead="These $n_final pull requests build together and then FAIL CI TOGETHER. The bundle
-was opened, its checks ran against the merge result, and they came back red:
-
-  $pr_url
-
-This is the defect class the lane exists to catch, and it is the half the local
-pre-flight cannot see: that pre-flight is \`$INTEGRATION_LANE_VERIFY\`, while CI
-also runs the test suite. Each constituent is green on its own base; the
-combination is not.
-${ci_attribution:+
-$ci_attribution}
-Do NOT merge this bundle. Read the failing checks on it, and either fix the
-interaction or close the bundle and let the next run rebuild without the
-culprit. The pull request is left OPEN on purpose — it is the evidence, and its
-failing checks carry the full detail."
-      ;;
-    ci-pending)
-      subject="integration-lane: $rig bundle is UNMEASURED — its CI had not finished"
-      lead="The bundle was opened and its CI had not reported a verdict before the lane's
-wait ran out, so the combination is UNMEASURED:
-
-  $pr_url
-
-Treat this as \"not yet known\", never as green. The checks are still the
-answer — read them on the pull request before merging. If this repeats, CI is
-slower than INTEGRATION_LANE_CI_POLLS × INTEGRATION_LANE_CI_POLL_SLEEP
-(currently $INTEGRATION_LANE_CI_POLLS × ${INTEGRATION_LANE_CI_POLL_SLEEP}s) and that budget is the thing to raise."
-      ;;
-    ci-absent)
-      subject="integration-lane: $rig bundle has NO CI checks — the combination was never measured"
-      lead="The bundle was opened and no CI check ever appeared on it:
-
-  $pr_url
-
-An empty check rollup is NOT a pass. PR #1346 read green on zero checks, and on
-this branch that mistake would be the worst one available — measuring the
-combination is the only reason this lane exists, so a bundle nothing ran against
-has no verdict at all.
-
-Check that the workflow triggers cover this branch (\`on: pull_request:\` must
-name \`$default_branch\`), then read the checks yourself before merging."
-      ;;
-    unpreparable)
-      subject="integration-lane: $rig — THE LANE could not prepare a buildable tree (not a combination failure)"
-      lead="This is a fault in the LANE, not in any pull request. Preparation of the scratch
-worktree failed before the combination was ever tested, so NOTHING here is
-evidence about the constituents and nothing was ejected or blamed.
-
-No branch was pushed and no bundle was opened. Read this as \"the lane is not
-running\", not as \"the queue is broken\".
-
-Preparation is INTEGRATION_LANE_PREPARE (currently: $INTEGRATION_LANE_PREPARE).
-On this repo the default generates templ views at the go.mod-pinned version,
-because *_templ.go is gitignored and a fresh worktree cannot build without it.
-
-$(tail -n 25 "$TMP/prepare.log" 2>/dev/null | sanitize_ref_tokens)"
-      ;;
-    create-failed)
-      subject="integration-lane: $rig combination green but opening the bundle PR FAILED"
-      lead="The combination passed and \`gh pr create\` then failed, so there is NO pull
-request to review — do not go looking for one. The notes below say whether the
-pushed branch was cleaned up or is orphaned on origin.
-
-Nothing is lost: the next run rebuilds the bundle from scratch."
-      ;;
-    push-failed)
-      subject="integration-lane: $rig bundle verified green but could not be pushed"
-      lead="The combination passed and then the push failed, so no pull request exists.
-Nothing is lost — the next run rebuilds the bundle from scratch — but if this
-repeats, the lane's push credentials are the thing to check."
-      ;;
-    *)
-      subject="integration-lane: $rig — nothing bundled, $(printf '%s' "$excluded_txt" | grep -c 'excluded:') PR(s) excluded"
-      lead="No bundle was opened: fewer than two pull requests survived the filters. Every
-pull request the lane declined is named below with its reason, so nothing is
-silently left behind."
-      ;;
-  esac
-
-  # An ejection a human cannot trace back to its evidence is indistinguishable
-  # from a pull request that quietly went missing. On the ci-red path the
-  # attribution IS the lead, so it is already said; on every other path — above
-  # all a run that ejected somebody and then went GREEN, where the headline is
-  # rightly the merge that is waiting — it would otherwise be dropped along with
-  # the only account of why the bundle is one smaller than the queue.
-  attribution_section=""
-  if [ -n "$ci_attribution" ] && [ "$combination" != ci-red ]; then
-    attribution_section="What the CI failure was attributed to:
-$ci_attribution"
-  fi
-
-  gc mail send mayor -s "$subject" -m "$lead
-${attribution_section:+
-$attribution_section}
-Bundle size in use: $INTEGRATION_LANE_BUNDLE_SIZE (INTEGRATION_LANE_BUNDLE_SIZE)
-Candidates that passed the filters: $n_candidates
-Combination verify: $INTEGRATION_LANE_VERIFY
-${constituents:+
-Constituents ($n_final):
-$constituents}
-${excluded_txt:+
-Excluded, and why:
-$excluded_txt}
-${notes_txt:+
-Notes:
-$notes_txt}
-This lane never merges. It prepares a bundle and reports; the merge is a human
-decision. See packs/README.md for the full behaviour." >/dev/null 2>&1
+  send_report
 
   rm -rf "$TMP"
   lane_unlock "$rig"

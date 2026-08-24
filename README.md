@@ -345,7 +345,10 @@ empty check rollup (PR #1346 read green on *zero* checks, so an empty rollup is
 refused rather than rounded up), a conflict with a **named** constituent, a
 `schemaVersion` collision, or simply not fitting the bundle size — each is
 reported with its reason. A run that finds fewer than two mergeable PRs has no
-combination to test, so it creates no branch and sends no mail.
+combination to test, so it creates no branch and opens no pull request. It goes
+quiet only if it also turned nobody away: a run that declined pull requests still
+mails their reasons, because an exclusion nobody is told about reads exactly like
+a clean run.
 
 > **Merge the bundle with a MERGE COMMIT, never a squash.** Each constituent's
 > own head commit is reachable from the branch, and that reachability is the
@@ -368,7 +371,11 @@ When the combination fails, the lane ejects its prime suspect and re-verifies, s
 one bad PR delays *itself* rather than the whole set, and the report attributes
 the break to the pull requests that **interacted** rather than to the bundle as a
 whole. A `mkdir` lock (atomic, unlike test-then-create on a lock file) keeps two
-runs from bundling overlapping sets and racing on the branch.
+runs from bundling overlapping sets and racing on the branch. The primitive is
+only half of it: the lock is refreshed as the run makes progress, so the stale
+window means *no progress* rather than *no finish* and a long bundle is not
+mistaken for an abandoned one; and it is released only by the run that still
+owns it, so one mistaken break cannot cascade into a third run.
 
 **Both failure layers name a culprit, by different means.** The pre-flight can
 eject-and-re-verify, so a wrong guess is corrected within the run. CI cannot be

@@ -763,6 +763,21 @@ because *_templ.go is gitignored and a fresh worktree cannot build without it.
 
 $(tail -n 25 "$TMP/prepare.log" 2>/dev/null | sanitize_ref_tokens)"
       ;;
+    unpreparable-worktree)
+      subject="integration-lane: $rig — THE LANE could not create its scratch worktree (not a combination failure)"
+      lead="This is a fault in the LANE, not in any pull request. The scratch worktree could
+not be created, so no combination was ever tested and nothing below is evidence
+about any pull request's quality.
+
+No branch was pushed and no bundle was opened. Read this as \"the lane is not
+running\", not as \"the queue is broken\". The pull requests that passed the
+filters are listed as not included — the next run picks them up — and anything
+the lane declined this run is named with its reason.
+
+The scratch tree is \`git worktree add --detach\` from origin/$default_branch
+inside $rig_root. A default branch that no longer resolves on the remote is the
+first thing to check."
+      ;;
     create-failed)
       subject="integration-lane: $rig combination green but opening the bundle PR FAILED"
       lead="The combination passed and \`gh pr create\` then failed, so there is NO pull
@@ -785,6 +800,19 @@ silently left behind."
       ;;
   esac
 
+  # A pull request that passed every filter and was never bundled is NOT a
+  # constituent. That word names the contents of a bundle, so on a path where no
+  # bundle exists it asserts membership of something that was never opened.
+  # `combine_and_verify` abandons at fewer than two inputs without clearing
+  # $TMP/candidates, and no exit clears it either, so every non-bundling path
+  # arrives here with the survivors still listed. Same list, heading that
+  # matches what happened: a run that publishes a FALSE disposition for a pull
+  # request has left it behind just as surely as one that says nothing at all.
+  case "$combination" in
+    green|ci-red|ci-pending|ci-absent) roster_label="Constituents" ;;
+    *) roster_label="Not included this run (they passed the filters; the next run picks them up)" ;;
+  esac
+
   # An ejection a human cannot trace back to its evidence is indistinguishable
   # from a pull request that quietly went missing. On the ci-red path the
   # attribution IS the lead, so it is already said; on every other path — above
@@ -804,7 +832,7 @@ Bundle size in use: $INTEGRATION_LANE_BUNDLE_SIZE (INTEGRATION_LANE_BUNDLE_SIZE)
 Candidates that passed the filters: $n_candidates
 Combination verify: $INTEGRATION_LANE_VERIFY
 ${constituents:+
-Constituents ($n_final):
+$roster_label ($n_final):
 $constituents}
 ${excluded_txt:+
 Excluded, and why:
@@ -1348,7 +1376,26 @@ merge button is the wrong one. To enable the lane:
     # Never bundle a previous bundle. An integration branch is not a
     # constituent, and a lane that ate its own output would compound bundles.
     case "$head" in
-      integration/*) continue ;;
+      integration/*)
+        # Recorded in the NOTES ledger, deliberately not the exclusion one. The
+        # lane's own bundle stays open until a human merges it, so an exclusion
+        # entry here would be non-empty on every run of that entire window —
+        # and the exclusion ledger is exactly what the silent exits test. The
+        # mayor would get "nothing bundled, 1 PR(s) excluded", naming the lane's
+        # own output, every couple of hours until the merge. A note rides along
+        # in whatever mail the run was already sending and forces none of its
+        # own, which names the pull request without costing the lane its
+        # silence on a quiet queue.
+        #
+        # Worded as an observation about the branch name, because that is all
+        # this test can know: `integration/` is a prefix a contributor may also
+        # use, and calling someone's integration/oauth-rework "a previous
+        # bundle" would publish a false claim to the mayor and into the next
+        # bundle's public body.
+        printf '#%s was not considered: its head branch is under integration/, the prefix this lane opens its own bundles on\n' \
+          "$num" >> "$TMP/notes"
+        continue
+        ;;
     esac
 
     if [ "$draft" = "true" ]; then
@@ -1461,8 +1508,35 @@ merge button is the wrong one. To enable the lane:
   WT="$TMP/wt"
   git -C "$rig_root" fetch --quiet origin "$default_branch" >/dev/null 2>&1
   if ! git -C "$rig_root" worktree add --detach --quiet "$WT" "origin/$default_branch" >/dev/null 2>&1; then
-    printf 'could not create a scratch worktree from %s\n' "$rig_root" >> "$TMP/notes"
-    rm -rf "$TMP"; lane_unlock "$rig"; continue
+    printf 'could not create a scratch worktree from %s at origin/%s\n' \
+      "$rig_root" "$default_branch" >> "$TMP/notes"
+    # The candidate loop has already run by this point, so the ledger can hold
+    # exclusions — the bundle-size cap alone writes one per PR over the cap.
+    # This exit used to delete that ledger unread and continue with status 0,
+    # which is a run that declined pull requests and then looked exactly like a
+    # clean one. Report from the exit: everything the mail needs is already on
+    # disk, so this costs no further git I/O.
+    report_text
+    # Set explicitly for the same reason the shortfall exit above sets them:
+    # `set -u` is on and the per-run reset that normally initialises them sits
+    # further down, past this exit.
+    combination=unpreparable-worktree
+    ci_attribution=""
+    send_report
+    rm -rf "$TMP"
+    # DEFENSIVE, and deliberately after the delete. An add that failed while
+    # laying down the tree can leave a registration pointing into $TMP, and
+    # pruning before the delete would find that directory still present and
+    # keep it — so the prune belongs here, where the path is already gone. The
+    # shared teardown prunes on every path that reaches it; this exit never
+    # did. Untested on purpose rather than by omission: the failure this suite
+    # can reproduce with a real git is an unresolvable ref, which git rejects
+    # BEFORE registering anything, so an assertion here would pass whether or
+    # not the prune ran. Note also that git assigns wt, wt1, ... rather than
+    # colliding on the fixed basename, so this is hygiene against accumulated
+    # registrations, not a fix for a wedged lane.
+    git -C "$rig_root" worktree prune >/dev/null 2>&1
+    lane_unlock "$rig"; continue
   fi
 
   base_sha=$(git -C "$WT" rev-parse HEAD 2>/dev/null)

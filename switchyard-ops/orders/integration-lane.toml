@@ -33,11 +33,15 @@
 # bundle about a dozen times a day, which is more often than a human clears the
 # queue. That puts this with the reapers, not with `pool-spawn`'s 1m race.
 #
-# The lane is SILENT when it has nothing to add: fewer than two mergeable pull
-# requests means there is no combination to test, and the run ends without
-# creating a branch and without mailing. So tightening the interval does not
-# make the mayor's inbox noisier on a quiet queue — it just spends more cycles
-# discovering the queue is quiet.
+# The lane is SILENT when it has nothing to add, and "nothing to add" is
+# narrower than "nothing to bundle": fewer than two mergeable pull requests
+# means there is no combination to test, so the run creates no branch and opens
+# no pull request — but if it TURNED ANYBODY AWAY it still mails their reasons,
+# because an exclusion nobody is told about reads exactly like a clean run. A
+# genuinely quiet queue (nothing bundled AND nobody declined) says nothing, so
+# tightening the interval does not make the mayor's inbox noisier there; on a
+# queue that is quiet but not empty — one mergeable pull request beside a draft,
+# say — a tighter interval does mean more mail, and that is the cost to weigh.
 #
 # Configuration lives in roster.conf (all optional):
 #   INTEGRATION_LANE_BUNDLE_SIZE      8      PRs per bundle; reported every run

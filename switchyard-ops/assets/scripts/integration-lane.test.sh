@@ -146,7 +146,8 @@ new_city() {
 		#!/bin/sh
 		case "\$1 \$2" in
 		  "rig list")
-		    printf '[{"name":"$RIG","default_branch":"main"}]\n' ;;
+		    b=\$(cat "$city/fixtures/default-branch" 2>/dev/null || echo main)
+		    printf '[{"name":"$RIG","default_branch":"%s"}]\n' "\$b" ;;
 		  "mail send")
 		    shift 2
 		    printf '=== MAIL %s\n' "\$*" >> "$city/state/mail.log" ;;
@@ -311,6 +312,11 @@ merge_config() {
 
 # queue <city> <json> — the `gh pr list` answer.
 queue() { printf '%s\n' "$2" > "$1/fixtures/prs.json"; }
+
+# default_branch_is <city> <name> — what `gc rig list` reports for the rig.
+# A name with no matching ref makes the scratch `worktree add` fail on a REAL
+# git, which is how a lane fault is reproduced without shimming git itself.
+default_branch_is() { printf '%s\n' "$2" > "$1/fixtures/default-branch"; }
 
 # pr_json <num> <branch> <sha> [draft] [review] [checks-json]
 pr_json() {
@@ -1933,6 +1939,252 @@ case_merge_commit_is_required() {
 
 echo "integration-lane self-test (sh=$SH)"
 echo
+# ---------------------------------------------------------------------------
+# A LANE FAULT still names the pull requests the run declined.
+#
+# The scratch-worktree exit was the last path that recorded exclusions and then
+# threw them away: it appended a note, deleted $TMP with the ledger inside it,
+# and continued with status 0. From outside, that run is indistinguishable from
+# a clean one — the exact shape the criterion forbids, "never silently left
+# behind while the run reports success".
+#
+# Failing `git worktree add` WITHOUT shimming git: point the rig's configured
+# default branch at a ref that does not exist. The fetch finds nothing and
+# `worktree add --detach ... origin/<name>` dies on `invalid reference`. That is
+# a real git failure on the real repository the rest of this suite depends on,
+# and it is a real-world fault too — a rig whose default branch was renamed.
+# ---------------------------------------------------------------------------
+case_lane_fault_names_what_it_declined() {
+	local city mail branches
+	city="$(new_city)"
+	default_branch_is "$city" gone-branch
+	add_pr "$city" 1 feat-1 touch_own
+	add_pr "$city" 2 feat-2 touch_own
+	add_pr "$city" 3 feat-3 touch_own
+	queue "$city" "[$(pr_json 1 feat-1 "$(sha_of "$city" feat-1)"),\
+$(pr_json 2 feat-2 "$(sha_of "$city" feat-2)"),\
+$(pr_json 3 feat-3 "$(sha_of "$city" feat-3)" true)]"
+
+	run_lane "$city" INTEGRATION_LANE_VERIFY='true'
+	mail="$(mail_of "$city")"
+
+	# Read the reason off #3's OWN ledger line, not from the mail at large: a
+	# bare `has "$mail" draft` passes on any sentence anywhere containing it.
+	if hasi "$(exclusion_reason "$mail" 3)" 'draft'; then
+		report ok "a lane fault still names the pull request it declined, and why"
+	else
+		report FAIL "a lane fault still names the pull request it declined, and why" \
+			"reason for #3='$(exclusion_reason "$mail" 3)' mail=$(printf '%s' "$mail" | head -4)"
+	fi
+
+	if hasi "$mail" 'fault in the LANE'; then
+		report ok "the lane fault reads as a lane fault, not as a verdict on the queue"
+	else
+		report FAIL "the lane fault reads as a lane fault, not as a verdict on the queue" \
+			"mail=$(printf '%s' "$mail" | head -4)"
+	fi
+
+	# ANTI-VACUITY. Both assertions above would also be satisfied by a run that
+	# failed somewhere EARLIER and happened to mail. Pin that the run really
+	# reached — and stopped at — the worktree: nothing was bundled or pushed,
+	# and the two PRs that passed every filter are accounted for rather than
+	# dropped.
+	branches=$(git -C "$city/origin.git" for-each-ref --format='%(refname:short)' 'refs/heads/integration/*')
+	if [ -z "$branches" ] && [ -z "$(created_of "$city")" ]; then
+		report ok "control: the lane-fault run opened no branch and no pull request"
+	else
+		report FAIL "control: the lane-fault run opened no branch and no pull request" \
+			"branches=${branches:-none} created=$(created_of "$city")"
+	fi
+	if hasE "$mail" '#1[[:space:]]' && hasE "$mail" '#2[[:space:]]'; then
+		report ok "control: the two PRs that passed the filters are named, not dropped"
+	else
+		report FAIL "control: the two PRs that passed the filters are named, not dropped" \
+			"mail=$(printf '%s' "$mail" | head -12)"
+	fi
+	rm -rf "$city"
+}
+
+# ---------------------------------------------------------------------------
+# A previous bundle's own pull request is NOTED, never put in the exclusion
+# ledger.
+#
+# Both halves matter and they pull in opposite directions, which is why they are
+# one case. The lane's own bundle stays open until a human merges it, so an
+# entry in the EXCLUSION ledger would be non-empty on every run of that whole
+# window — and the ledger is what the silent exits test. The mayor would get
+# "nothing bundled, 1 PR(s) excluded", naming the lane's own output, every two
+# hours until the merge. The notes ledger is carried into whatever mail the run
+# was already sending and forces none of its own, which satisfies "name every
+# pull request it did not include" without falsifying "a run with nothing to
+# add is silent".
+# ---------------------------------------------------------------------------
+case_previous_bundle_is_noted_not_excluded() {
+	local city mail
+
+	# (a) A queue holding ONLY the lane's own open bundle is still a quiet
+	#     queue. Nothing to add, so nothing is said.
+	city="$(new_city)"
+	add_pr "$city" 9 integration/prev-bundle touch_own
+	queue "$city" "[$(pr_json 9 integration/prev-bundle "$(sha_of "$city" integration/prev-bundle)")]"
+	run_lane "$city" INTEGRATION_LANE_VERIFY='true'
+	if [ ! -s "$city/state/mail.log" ]; then
+		report ok "a queue holding only the lane's own bundle stays silent"
+	else
+		report FAIL "a queue holding only the lane's own bundle stays silent" \
+			"mail=$(mail_of "$city" | head -4)"
+	fi
+	rm -rf "$city"
+
+	# (b) When the run DOES speak, that pull request is named — as an
+	#     observation about its branch, and not as an exclusion.
+	city="$(new_city)"
+	add_pr "$city" 1 feat-1 touch_own
+	add_pr "$city" 2 feat-2 touch_own
+	add_pr "$city" 9 integration/prev-bundle touch_own
+	queue "$city" "[$(pr_json 1 feat-1 "$(sha_of "$city" feat-1)"),\
+$(pr_json 2 feat-2 "$(sha_of "$city" feat-2)"),\
+$(pr_json 9 integration/prev-bundle "$(sha_of "$city" integration/prev-bundle)")]"
+	run_lane "$city" INTEGRATION_LANE_VERIFY='true'
+	mail="$(mail_of "$city")"
+
+	if hasE "$mail" '#9[[:space:]]'; then
+		report ok "a run that speaks names the previous bundle it skipped"
+	else
+		report FAIL "a run that speaks names the previous bundle it skipped" \
+			"mail=$(printf '%s' "$mail" | head -12)"
+	fi
+	# exclusion_reason returns the line after `  #9  `; it is empty when #9 was
+	# never written to the exclusion ledger, which is the claim under test.
+	if [ -z "$(exclusion_reason "$mail" 9)" ]; then
+		report ok "the previous bundle is not recorded as an exclusion"
+	else
+		report FAIL "the previous bundle is not recorded as an exclusion" \
+			"#9 carries an exclusion reason: '$(exclusion_reason "$mail" 9)'"
+	fi
+	# ANTI-VACUITY: this same fixture, same helper, MUST find a reason for a PR
+	# that genuinely was excluded — otherwise the emptiness above proves only
+	# that exclusion_reason never matches anything here.
+	rm -rf "$city"
+
+	city="$(new_city)"
+	add_pr "$city" 1 feat-1 touch_own
+	add_pr "$city" 2 feat-2 touch_own
+	add_pr "$city" 3 feat-3 touch_own
+	add_pr "$city" 9 integration/prev-bundle touch_own
+	queue "$city" "[$(pr_json 1 feat-1 "$(sha_of "$city" feat-1)"),\
+$(pr_json 2 feat-2 "$(sha_of "$city" feat-2)"),\
+$(pr_json 3 feat-3 "$(sha_of "$city" feat-3)" true),\
+$(pr_json 9 integration/prev-bundle "$(sha_of "$city" integration/prev-bundle)")]"
+	run_lane "$city" INTEGRATION_LANE_VERIFY='true'
+	mail="$(mail_of "$city")"
+	if hasi "$(exclusion_reason "$mail" 3)" 'draft' && [ -z "$(exclusion_reason "$mail" 9)" ]; then
+		report ok "control: the same helper DOES find a reason for a genuinely excluded PR"
+	else
+		report FAIL "control: the same helper DOES find a reason for a genuinely excluded PR" \
+			"#3='$(exclusion_reason "$mail" 3)' #9='$(exclusion_reason "$mail" 9)'"
+	fi
+	rm -rf "$city"
+}
+
+# ---------------------------------------------------------------------------
+# A pull request that was never bundled is not called a constituent.
+#
+# `report_text` fills `constituents` from $TMP/candidates unconditionally, and
+# `combine_and_verify` abandons at fewer than two inputs WITHOUT clearing that
+# file. So every exit that reports without opening a bundle rendered the
+# survivors under "Constituents (N)" — asserting membership of a bundle that
+# does not exist. For this criterion that is the inverse of a silent drop and
+# just as wrong: the run states a disposition for the pull request, and the
+# disposition is false. Same list, honest heading.
+# ---------------------------------------------------------------------------
+case_unbundled_survivors_are_not_constituents() {
+	local city mail
+	city="$(new_city)"
+	add_pr "$city" 1 feat-1 touch_own
+	add_pr "$city" 2 feat-2 touch_own
+	queue "$city" "[$(pr_json 1 feat-1 "$(sha_of "$city" feat-1)"),\
+$(pr_json 2 feat-2 "$(sha_of "$city" feat-2)" true)]"
+	run_lane "$city" INTEGRATION_LANE_VERIFY='true'
+	mail="$(mail_of "$city")"
+
+	if has "$mail" 'Constituents ('; then
+		report FAIL "a survivor of a run that bundled nothing is not called a constituent" \
+			"mail=$(printf '%s' "$mail" | head -12)"
+	else
+		report ok "a survivor of a run that bundled nothing is not called a constituent"
+	fi
+	if hasE "$mail" '#1[[:space:]]' && hasi "$mail" 'not included'; then
+		report ok "that survivor is still named, under a heading that says it was not included"
+	else
+		report FAIL "that survivor is still named, under a heading that says it was not included" \
+			"mail=$(printf '%s' "$mail" | head -12)"
+	fi
+	rm -rf "$city"
+
+	# ANTI-VACUITY. "Constituents (" being absent proves nothing unless this
+	# fixture can produce it: a lane that never said it, or a mail.log never
+	# wired up, satisfies the assertion above for free. A run that DOES bundle
+	# must still use the word.
+	city="$(new_city)"
+	add_pr "$city" 1 feat-1 touch_own
+	add_pr "$city" 2 feat-2 touch_own
+	queue "$city" "[$(pr_json 1 feat-1 "$(sha_of "$city" feat-1)"),\
+$(pr_json 2 feat-2 "$(sha_of "$city" feat-2)")]"
+	run_lane "$city" INTEGRATION_LANE_VERIFY='true'
+	if has "$(mail_of "$city")" 'Constituents ('; then
+		report ok "control: a run that DOES bundle still calls them constituents"
+	else
+		report FAIL "control: a run that DOES bundle still calls them constituents" \
+			"the heading never appears, so the absence asserted above is vacuous"
+	fi
+	rm -rf "$city"
+}
+
+# ---------------------------------------------------------------------------
+# The two pre-queue exits are correct BY ORDER — and the order is now asserted.
+#
+# "gh returned nothing" and "merge commits are disabled" both leave with
+# `rm -rf "$TMP"` and mail a bespoke body that does not carry the exclusion
+# ledger. That is correct today for exactly one reason: both sit ABOVE the
+# candidate loop, so nothing has been excluded yet and there is nothing to
+# carry. Nothing in the file said so and no test held it, so a filter added
+# later that recorded an exclusion before the queue read would silently re-arm
+# the discard bug at both sites.
+#
+# This asserts the ORDER, not a spelling, and fails loudly if any anchor stops
+# matching — so it cannot pass by quietly finding nothing.
+# ---------------------------------------------------------------------------
+case_pre_queue_exits_precede_the_ledger() {
+	local loop_start first_exclude gh_exit merge_exit
+	# Scoped to the rig loop deliberately. `exclude` is also called from
+	# combine_and_verify, whose body is DEFINED hundreds of lines above the loop
+	# and RUNS long after it — so comparing line numbers across the whole file
+	# measures text order and mistakes it for execution order.
+	loop_start=$(grep -n '^for rig in \$rigs; do' "$LANE" | head -1 | cut -d: -f1)
+	if [ -z "$loop_start" ]; then
+		report FAIL "both pre-queue exits sit above the first exclusion" \
+			"the rig loop anchor stopped matching, so this assertion would prove nothing"
+		return
+	fi
+	first_exclude=$(awk -v s="$loop_start" 'NR>s && /^[[:space:]]*exclude "/ {print NR; exit}' "$LANE")
+	gh_exit=$(awk -v s="$loop_start" 'NR>s && /gh returned nothing for/ {print NR; exit}' "$LANE")
+	merge_exit=$(awk -v s="$loop_start" 'NR>s && /is not bundling — merge commits/ {print NR; exit}' "$LANE")
+
+	if [ -z "$first_exclude" ] || [ -z "$gh_exit" ] || [ -z "$merge_exit" ]; then
+		report FAIL "both pre-queue exits sit above the first exclusion" \
+			"an anchor stopped matching, so this assertion would prove nothing: first_exclude=${first_exclude:-none} gh_exit=${gh_exit:-none} merge_exit=${merge_exit:-none}"
+		return
+	fi
+	if [ "$gh_exit" -lt "$first_exclude" ] && [ "$merge_exit" -lt "$first_exclude" ]; then
+		report ok "both pre-queue exits sit above the first exclusion, so neither can drop a ledger"
+	else
+		report FAIL "both pre-queue exits sit above the first exclusion, so neither can drop a ledger" \
+			"first exclude at $first_exclude, gh exit at $gh_exit, merge-commit exit at $merge_exit — an exit BELOW the first exclusion must carry the ledger into its report"
+	fi
+}
+
+
 case_bundles_and_tests_the_combination
 case_combination_only_defect
 case_bundle_ci_is_the_verdict
@@ -1962,6 +2214,10 @@ case_merge_conflict_names_the_counterpart
 case_conflict_with_base_implicates_nobody
 case_ceiling_break_reports_output
 case_static_guards
+case_lane_fault_names_what_it_declined
+case_previous_bundle_is_noted_not_excluded
+case_unbundled_survivors_are_not_constituents
+case_pre_queue_exits_precede_the_ledger
 
 echo
 echo "$pass passed, $fail failed"

@@ -63,16 +63,18 @@ first: you take it yourself, and a rival is refused.
          $PACK_DIR/assets/scripts/fanout-integrate.sh \
            --worktree "$PWD" --branch <your branch> --plan <plan-file> \
            --parent <decomposer's parent bead> --crit <crit_label> --prd <prd_id> \
-           --verify '<the bead's verify_command>'
+           --rig {{ .Rig }} --verify '<the bead's verify_command>'
 
-   Two details in that line are load-bearing. It runs THROUGH the lease keeper
+   Three details in that line are load-bearing. It runs THROUGH the lease keeper
    for the same reason the fan-out itself does — you are blocked for the whole
    gate, a blocked session heartbeats nothing, and a lease that lapses mid-gate
-   hands your bead to a successor while you are still holding the worktree. And
+   hands your bead to a successor while you are still holding the worktree.
    `--parent`/`--crit`/`--prd` are what put the criterion and PRD lines in each
    child's brief: without them the harness briefs children under a fabricated
    bead id with those lines absent, which is one of the three confirmed causes
-   of a child that does nothing.
+   of a child that does nothing. And `--rig` is the rig the gate forwards to
+   every child it runs, so the concurrency cap the children enforce is the one
+   the decomposer reported — see the fan-out section below.
 
    It runs each item exactly once through the child harness — serially, one
    child at a time, by design for now: the per-item did-it-produce-anything
@@ -196,12 +198,21 @@ your bead survive; only your context is discarded.
 A criterion too big for one turn is decomposed into local child beads, and
 those children are run **by the integration gate**: `fanout-integrate.sh`
 invokes `$PACK_DIR/assets/scripts/fanout-child-run.sh` once per child, one
-child at a time. You never invoke the child harness yourself, and you never
+child at a time, forwarding `--rig {{ .Rig }}` from step 8's gate line to
+every child it runs. You never invoke the child harness yourself, and you never
 build a plan item ahead of the gate — the gate is the build step, and it
 certifies only work it ran. They are **run, not slung**: `{{ cmd }} sling` and
 `{{ cmd }} session new` would each give a child its own worktree and this
 pack's default publish formula, which is the one thing a fan-out cannot
 afford.
+
+That forwarded `--rig {{ .Rig }}` is load-bearing, not decoration: the child
+harness's load-aware concurrency gate matches the balancer's published target
+**by rig name**, so children run without it enforce only the configured cap
+while the decomposer's decision line — the one you paste into your PR body —
+reports the balancer's, and the two report lines of one fan-out disagree. Give
+the gate the same rig you gave the decomposer in step 6, and the cap on the
+decision line is the cap every child actually ran under.
 
 What that harness holds true, so you do not have to police it:
 

@@ -21,7 +21,7 @@
 #
 #   fanout-decompose: decision=<fanout|serial> items=<n> threshold=<n> \
 #     enabled=<0|1> serial_past_threshold=<0|1> reason=<slug> parent=<id|-> \
-#     children=<n>
+#     children=<n> cap=<n> cap_source=<default|config|balancer|floor>
 #
 # A decomposer that fans out correctly and stays SILENT when it declines is,
 # from the outside, indistinguishable from one that crashed: both leave a
@@ -33,6 +33,14 @@
 # Two paths reach serial despite a long plan, and both must be loud:
 #   - reason=disabled     the operator's kill switch (SY_FANOUT_ENABLED=0)
 #   - reason=mint-failed  the bead tree could not be created
+#
+# THE CAP IS REPORTED FOR THE SAME REASON, one axis over (crit:b88e92ac18fe).
+# serial_past_threshold disambiguates how many children were PLANNED; cap
+# disambiguates how many may run AT ONCE. Without it, a fan-out seen running two
+# children at a time is ambiguous between a two-item plan and a box the balancer
+# has throttled — and those want opposite responses. So cap and cap_source are on
+# every decision line, including the serial ones that mint nothing: a reader
+# comparing items against cap can always tell a short task list from a throttle.
 #
 # FAIL-SAFE, NOT FAIL-FAST. A mint failure folds back to serial rather than
 # dying. Dying here would strand a brakeman holding a live cloud claim with no
@@ -48,6 +56,9 @@
 #                         take the builder lane down.
 #   SY_FANOUT_ENABLED     1 (default) or 0 to force serial everywhere.
 #   SY_FANOUT_DECISION_LOG optional path; the decision line is appended to it.
+#   SY_FANOUT_MAX_CONCURRENCY children that may run at once, before the
+#                         load-aware gate lowers it. Default 3; resolved and
+#                         documented in lib/fanout.sh.
 #
 # USAGE
 #   fanout-decompose.sh --plan <file|-> [--rig <rig>] [--crit <label>]
@@ -123,6 +134,10 @@ done
 # ---------------------------------------------------------------------------
 . "$(dirname "$0")/../lib/roster.sh"
 sy_load_conf
+# AFTER sy_load_conf, never before: roster.conf is where an operator sets
+# SY_FANOUT_MAX_CONCURRENCY, so a cap resolved above this line would report the
+# default on every city that configures one.
+. "$(dirname "$0")/../lib/fanout.sh"
 
 threshold="${SY_FANOUT_THRESHOLD:-$FANOUT_DEFAULT_THRESHOLD}"
 case "$threshold" in
@@ -134,6 +149,15 @@ case "$enabled" in
 1) enabled=1 ;;
 *) enabled=0 ;;
 esac
+
+# The concurrency cap this fan-out would run under, resolved ONCE and reported
+# on every path out — including the paths that mint nothing. A serial run
+# reports it too, because "two children ran" has two causes that want opposite
+# responses (a two-item plan, or a throttled box) and only the pair
+# items+cap tells them apart. See lib/fanout.sh.
+cap="$(sy_fanout_cap "$rig")"
+cap_source="${cap#* }"
+cap="${cap%% *}"
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/fanout-decompose.XXXXXX")" || {
 	printf 'fanout-decompose: cannot create a work directory\n' >&2
@@ -184,14 +208,15 @@ children=0
 spt=0
 
 emit_and_exit() {
-	printf 'fanout-decompose: decision=%s items=%s threshold=%s enabled=%s serial_past_threshold=%s reason=%s parent=%s children=%s\n' \
-		"$decision" "$items" "$threshold" "$enabled" "$spt" "$reason" "$parent" "$children"
+	printf 'fanout-decompose: decision=%s items=%s threshold=%s enabled=%s serial_past_threshold=%s reason=%s parent=%s children=%s cap=%s cap_source=%s\n' \
+		"$decision" "$items" "$threshold" "$enabled" "$spt" "$reason" "$parent" "$children" \
+		"$cap" "$cap_source"
 
 	if [ -n "${SY_FANOUT_DECISION_LOG:-}" ]; then
-		printf '%s\tdecision=%s\titems=%s\tthreshold=%s\tenabled=%s\tserial_past_threshold=%s\treason=%s\tparent=%s\tchildren=%s\tcrit=%s\n' \
+		printf '%s\tdecision=%s\titems=%s\tthreshold=%s\tenabled=%s\tserial_past_threshold=%s\treason=%s\tparent=%s\tchildren=%s\tcap=%s\tcap_source=%s\tcrit=%s\n' \
 			"$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo unknown)" \
 			"$decision" "$items" "$threshold" "$enabled" "$spt" "$reason" \
-			"$parent" "$children" "${crit:--}" \
+			"$parent" "$children" "$cap" "$cap_source" "${crit:--}" \
 			>>"$SY_FANOUT_DECISION_LOG" 2>/dev/null || :
 	fi
 	exit 0

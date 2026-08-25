@@ -97,9 +97,19 @@
 #                                run as a command line in the worktree.
 #   SY_FANOUT_INTEGRATE_LOG      optional path; the report line is appended.
 #
+# WHY THE GATE CARRIES A RIG. The child harness resolves its concurrency cap
+# from the balancer's published target for a RIG, and it learns that rig only
+# from its own --rig / SY_FANOUT_RIG. Since #1983 the gate is the only thing
+# that invokes the harness, so a rig that stops here never reaches a child:
+# every child would fall back to the configured cap while the decomposer — which
+# does get --rig — reports the balancer's, and the two report lines of one
+# fan-out disagree. So --rig is FORWARDED, not consumed. Absent, nothing is
+# forwarded and the harness takes its own SY_FANOUT_RIG/config path unchanged.
+#
 # USAGE
 #   fanout-integrate.sh --worktree <path> --branch <name> --plan <file>
 #                       [--parent <bead>] [--crit <label>] [--prd <id>]
+#                       [--rig <rig>]
 #                       [--build <cmd>] [--verify <cmd>] [--serial-runner <cmd>]
 #                       [--child-runner <path>] [--prepare auto|none|<cmd>]
 #
@@ -129,6 +139,7 @@ usage() {
 	cat >&2 <<'USAGE'
 usage: fanout-integrate.sh --worktree <path> --branch <name> --plan <file>
                           [--parent <bead>] [--crit <label>] [--prd <id>]
+                          [--rig <rig>]
                           [--build <cmd>] [--verify <cmd>] [--serial-runner <cmd>]
                           [--child-runner <path>] [--prepare auto|none|<cmd>]
 USAGE
@@ -141,6 +152,7 @@ plan=""
 parent=""
 crit=""
 prd=""
+rig=""
 build_cmd=""
 verify_cmd=""
 serial_cmd=""
@@ -177,6 +189,11 @@ while [ $# -gt 0 ]; do
 	--prd)
 		[ $# -ge 2 ] || usage
 		prd="$2"
+		shift 2
+		;;
+	--rig)
+		[ $# -ge 2 ] || usage
+		rig="$2"
 		shift 2
 		;;
 	--build)
@@ -222,6 +239,10 @@ done
 [ -n "$serial_cmd" ] || serial_cmd="${SY_FANOUT_INTEGRATE_SERIAL:-}"
 [ -n "$child_runner" ] || child_runner="$(dirname "$0")/fanout-child-run.sh"
 [ -n "$prepare_cmd" ] || prepare_cmd="${SY_FANOUT_INTEGRATE_PREPARE:-auto}"
+# The flag beats the environment here too, and an absent rig stays absent: the
+# harness must be free to report cap_source=config rather than claim a
+# balancer-awareness nobody configured.
+[ -n "$rig" ] || rig="${SY_FANOUT_RIG:-}"
 [ -n "$parent" ] || parent="fanout"
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/fanout-integrate.XXXXXX")" || {
@@ -348,6 +369,7 @@ while IFS= read -r item; do
 		--item-file "$item_file" \
 		${crit:+--crit "$crit"} \
 		${prd:+--prd "$prd"} \
+		${rig:+--rig "$rig"} \
 		${parent:+--parent "$parent"} </dev/null
 	child_rc=$?
 

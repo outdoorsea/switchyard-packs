@@ -82,11 +82,30 @@
 #                             ship without them.
 #   SY_FANOUT_REFUSAL_LOG     where the confinement records what a child tried.
 #                             Defaults to <brief>.refusals.
+#   SY_FANOUT_MAX_CONCURRENCY children that may run at once. Default 3, lowered
+#                             by the balancer's live target for the rig. This
+#                             script takes one slot for the duration of the
+#                             child and reports the cap it ran under.
+#   SY_FANOUT_RIG             the rig whose balancer target gates that cap, when
+#                             --rig is not passed (the flag wins). This is NOT
+#                             optional plumbing: the load-aware gate matches
+#                             balancer targets BY RIG NAME, so a child run with
+#                             neither --rig nor this variable enforces only the
+#                             configured cap — while the decomposer, which does
+#                             get --rig, reports the balancer's. The brakeman
+#                             prompt's documented invocation passes --rig for
+#                             exactly that reason: so the cap on the decision
+#                             line is the cap every child actually ran under.
+#   SY_FANOUT_SLOT_DIR        where those slots live. Defaults to a path derived
+#                             from the shared worktree.
+#   SY_FANOUT_SLOT_WAIT       seconds to wait for a slot before running anyway.
+#                             Default 300. See lib/fanout.sh.
 #
 # USAGE
 #   fanout-child-run.sh --bead <id> --worktree <path> --branch <name>
 #                       [--item <text> | --item-file <path>] [--crit <label>]
 #                       [--prd <id>] [--parent <bead>] [--brief-out <path>]
+#                       [--rig <rig>]
 #
 # Prefer --item-file for anything long: Linux caps a single argument at 128 KiB
 # and a longer --item fails to exec, with no report line at all.
@@ -105,6 +124,9 @@ set -u
 # of this PRD) carries the same two lines for the same reason.
 . "$(dirname "$0")/../lib/roster.sh"
 sy_load_conf
+# AFTER sy_load_conf: roster.conf is where SY_FANOUT_MAX_CONCURRENCY is set, so
+# a cap resolved above this line would ignore the operator's configuration.
+. "$(dirname "$0")/../lib/fanout.sh"
 
 FANOUT_BRIEF_DEFAULT_BYTES=4000
 REFUSED_EXIT=3
@@ -115,6 +137,7 @@ usage() {
 usage: fanout-child-run.sh --bead <id> --worktree <path> --branch <name>
                           [--item <text> | --item-file <path>] [--crit <label>]
                           [--prd <id>] [--parent <bead>] [--brief-out <path>]
+                          [--rig <rig>]
 USAGE
 	exit 2
 }
@@ -128,6 +151,7 @@ crit=""
 prd=""
 parent=""
 brief=""
+rig="${SY_FANOUT_RIG:-}"
 
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -140,6 +164,7 @@ while [ $# -gt 0 ]; do
 	--prd) [ $# -ge 2 ] || usage; prd="$2"; shift 2 ;;
 	--parent) [ $# -ge 2 ] || usage; parent="$2"; shift 2 ;;
 	--brief-out) [ $# -ge 2 ] || usage; brief="$2"; shift 2 ;;
+	--rig) [ $# -ge 2 ] || usage; rig="$2"; shift 2 ;;
 	-h | --help) usage ;;
 	*)
 		printf 'fanout-child-run: unknown argument %s\n' "$1" >&2
@@ -166,9 +191,9 @@ work="$(mktemp -d "${TMPDIR:-/tmp}/fanout-child.XXXXXX")" || {
 # handler and falls through to a 0 exit, so a parent (or a lease timeout) that
 # kills this harness to bound a fan-out would record the child as a clean
 # success. fanout-decompose.sh splits the traps for the same reason.
-trap 'rm -rf "$work"' EXIT
-trap 'rm -rf "$work"; exit 130' INT
-trap 'rm -rf "$work"; exit 143' TERM
+trap 'sy_fanout_slot_release "$slot"; rm -rf "$work"' EXIT
+trap 'sy_fanout_slot_release "$slot"; rm -rf "$work"; exit 130' INT
+trap 'sy_fanout_slot_release "$slot"; rm -rf "$work"; exit 143' TERM
 
 # Inside the work directory, not a predictable /tmp/fanout-brief-<bead>.md: the
 # old path was symlink-followable and took `../` from an attacker-influenced
@@ -182,6 +207,15 @@ brief_bytes=0
 confined=0
 refusals=0
 launcher_name="-"
+slot="-"
+slot_state="none"
+
+# The concurrency cap this child runs under, resolved BEFORE the first refusal
+# path so every report line carries it — a child refused for a wrong branch
+# still says what the box would have allowed. See lib/fanout.sh.
+cap="$(sy_fanout_cap "$rig")"
+cap_source="${cap#* }"
+cap="${cap%% *}"
 
 # The report goes to STDERR. The child's own output — LLM prose, under the
 # default launcher — owns stdout, and a child that merely PRINTS the words
@@ -191,9 +225,10 @@ launcher_name="-"
 emit_and_exit() {
 	_rc="$1"
 	trace_fate
-	printf 'fanout-child-run: child=%s status=%s reason=%s worktree=%s branch=%s brief_bytes=%s confined=%s refusals=%s launcher=%s\n' \
+	printf 'fanout-child-run: child=%s status=%s reason=%s worktree=%s branch=%s brief_bytes=%s confined=%s refusals=%s launcher=%s cap=%s cap_source=%s slot=%s\n' \
 		"$bead" "$status" "${reason:--}" "$wt" "$branch" "$brief_bytes" \
-		"$confined" "$refusals" "$launcher_name" >&2
+		"$confined" "$refusals" "$launcher_name" "$cap" "$cap_source" \
+		"$slot_state" >&2
 	exit "$_rc"
 }
 
@@ -441,6 +476,29 @@ refusals_before="$(grep -c . "$refusal_log" 2>/dev/null)"
 [ -n "$refusals_before" ] || refusals_before=0
 
 confined=1
+
+# ---------------------------------------------------------------------------
+# The concurrency slot, taken LAST — after every refusal path, and immediately
+# before the launch. Order matters in both directions: a child that is going to
+# be refused for a wrong branch must not first occupy a slot a runnable sibling
+# is waiting for, and a slot taken any earlier would be held across the
+# preflight rather than across the work.
+#
+# This is where the cap becomes real. Resolving it and printing it would leave
+# a number nothing obeys; the gate is here, in the one script the pack
+# documents as "one invocation per child", so the cap binds whatever drives the
+# fan-out — a serial loop, backgrounded jobs, or a future runner — without any
+# of them having to know it exists.
+# ---------------------------------------------------------------------------
+slot_dir="$(sy_fanout_slot_dir "$wt")"
+_acq="$(sy_fanout_slot_acquire "$slot_dir" "$cap")"
+slot_state="${_acq#* }"
+slot="${_acq%% *}"
+if [ "$slot_state" = "overrun" ]; then
+	printf 'fanout-child-run: waited out SY_FANOUT_SLOT_WAIT for one of %s slot(s) in %s; running %s anyway\n' \
+		"$cap" "$slot_dir" "$bead" >&2
+	printf '  Exceeding the cap briefly costs throughput; dropping the child would ship the criterion short.\n' >&2
+fi
 
 # The brief arrives on STDIN and its path in SY_FANOUT_BRIEF — it is NOT
 # appended to the launcher's argv. The default launcher is `claude -p`, which

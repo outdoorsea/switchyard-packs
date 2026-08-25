@@ -258,6 +258,42 @@
 # SY_FANOUT_THRESHOLD="4"
 # SY_FANOUT_ENABLED="1"
 
+# SY_FANOUT_MAX_CONCURRENCY — how many fan-out children may run AT ONCE
+# (switchyard PRD #372). The threshold above decides how many children a plan
+# is split into; this decides how many of them are in flight together, and the
+# two are independent: an eight-item plan under a cap of two runs eight
+# children, two at a time.
+#
+# It matters because a child is a full model session, not a thread. Eight at
+# once do not finish eight times sooner — they compete for the box the parent,
+# its lease keeper and every other rig's workers are already on, and they draw
+# on one shared usage limit.
+#
+# THE CAP IS LOAD-AWARE. If the balancer has published a live target for this
+# rig's brakeman lane, the cap is lowered to it: the right number is a property
+# of the box at the moment the fan-out runs, not of the plan, and a fan-out is
+# just another spawn site honouring the signal four others already honour. It
+# only ever lowers — a published target above this value is not authority to
+# exceed what you set here. An absent, stale or malformed balancer file changes
+# nothing, so a city with no balancer running simply gets the value below.
+#
+# A non-numeric value falls back to the default, as above. Zero does NOT mean
+# "no children" — a cap of zero is a stalled fan-out rather than a throttle, so
+# it is raised to one and the run reports cap_source=floor.
+#
+# Every run reports `cap` and `cap_source` on its decision line, so a fan-out
+# running two children at a time is never ambiguous between a two-item plan and
+# a throttled box.
+#
+# A child that finds no free slot waits for SY_FANOUT_SLOT_WAIT seconds and
+# then runs anyway, reporting slot=overrun. Dropping it would ship the
+# criterion short, which is worse than briefly exceeding the cap.
+#
+# Defaults: SY_FANOUT_MAX_CONCURRENCY=3, SY_FANOUT_SLOT_WAIT=300.
+#
+# SY_FANOUT_MAX_CONCURRENCY="3"
+# SY_FANOUT_SLOT_WAIT="300"
+
 # ---------------------------------------------------------------------------
 # MERGE_STRATEGY is GONE, and setting it now does nothing.
 #

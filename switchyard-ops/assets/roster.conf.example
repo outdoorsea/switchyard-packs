@@ -391,6 +391,59 @@
 # SY_FANOUT_REAP_GRACE="5"
 # SY_FANOUT_LEASE_LOG="/var/log/switchyard/fanout-lease.log"
 
+# SY_FANOUT_INTEGRATE_* — the local integration gate (switchyard PRD #372).
+#
+#   fanout-integrate.sh is what stands between a fan-out and a criterion
+#   shipped one item short. It runs each plan item, folds a failed, dead or
+#   empty-handed child back to a serial retry by the PARENT, and then proves
+#   the combined tree with a build and the criterion's own targeted tests. Its
+#   exit code is the publish gate: zero means the pull request may be opened.
+#
+#   It reads the TREE, not the children's report lines. A child reports its
+#   launcher's exit code, so one that changed zero files reports `status=ok
+#   reason=ok` byte-for-byte identically to one that built the whole item —
+#   confirmed three separate times in this pack, from an empty brief, from a
+#   child that asked permission instead of writing, and from a child SIGTERM'd
+#   before it printed any line. An item whose tree is untouched afterwards is
+#   folded back exactly as a crashed one is.
+#
+# SY_FANOUT_INTEGRATE_BUILD — the build command run over the combined tree.
+#   Default `go build ./...`.
+#
+# SY_FANOUT_INTEGRATE_VERIFY — the criterion's TARGETED tests. There is
+#   deliberately NO default: unset is a gate failure, not a skip. switchyard
+#   judges a criterion by its verify_command and a validator re-runs exactly
+#   that, so a gate that quietly substituted a suite of its own would certify
+#   the criterion under a command nobody is judged by. A brakeman normally
+#   passes `--verify` with the value the claim served rather than setting this.
+#
+# SY_FANOUT_INTEGRATE_SERIAL — the parent's serial-retry command line for a
+#   folded-back item. The item text arrives as SY_FANOUT_ITEM (and its path as
+#   SY_FANOUT_ITEM_FILE), the worktree as SY_FANOUT_WORKTREE. It runs
+#   UNCONFINED, in the parent's worktree: the confinement exists to stop a
+#   CHILD opening a second pull request, and the parent is the session that
+#   will legitimately open the first. Unset means a folded-back item cannot be
+#   retried at all, and the run fails with it counted unfinished — never
+#   skipped.
+#
+# SY_FANOUT_INTEGRATE_PREPARE — how to make the tree buildable BEFORE the build
+#   judges it. templ files generate Go, so a fan-out where one child edits a
+#   .templ and a sibling edits Go against the generated symbol would otherwise
+#   compile the stale *_templ.go — certifying a combination that reds in CI, or
+#   failing with an undefined-symbol error charged to the wrong item. `auto`
+#   (the default) runs templ generate when the repo has .templ sources and does
+#   nothing when it does not; `none` disables it; anything else is run as a
+#   command line in the worktree. A preparation failure is reported as a fault
+#   in the gate (reason=prepare-failed), never as a verdict on the work.
+#
+# SY_FANOUT_INTEGRATE_LOG — optional path; the gate's report line is appended.
+#
+# SY_FANOUT_INTEGRATE_BUILD="go build ./..."
+# SY_FANOUT_INTEGRATE_VERIFY=""
+# SY_FANOUT_INTEGRATE_SERIAL=""
+# SY_FANOUT_INTEGRATE_PREPARE="auto"
+# SY_FANOUT_INTEGRATE_LOG="/var/log/switchyard/fanout-integrate.log"
+
 # --- Merge authority (merge-lane + staging-promote, owner directive 2026-08-19) ---
 #
 # Both lanes are OFF until their rig list is set — merge authority is a

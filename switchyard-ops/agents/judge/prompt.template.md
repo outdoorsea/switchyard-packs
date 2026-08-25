@@ -134,7 +134,7 @@ backlog remains.
 If no `validation_pending` entry has a non-empty `judge_reachable_crit_labels`
 there is no target to take: say `IDLE: no criteria to judge, exiting turn.` and
 stop. Reaching IDLE is a **good** pass, not a wasted one: a criterion you already
-failed comes back by itself the moment a new PR merges (or `attach_prd_pr` surfaces
+failed comes back by itself the moment a new PR merges (or `prd_pr(action='attach')` surfaces
 one), so there is never a reason to re-judge it to be sure.
 
 ## Judging one criterion
@@ -325,7 +325,7 @@ three criteria you are certain of beats "clearing" eight you half-read.
 - A criterion with **no attached PR** (`automation_unreachable`) has no diff to
   cite. If you can identify the PR that delivered it with confidence (its number
   is in the branch/title/body, and its diff plainly implements the criterion),
-  `attach_prd_pr(prd_id, number, url)` first, then judge it. If you cannot find
+  `prd_pr(action='attach', attach={...})` first, then judge it. If you cannot find
   the delivering PR, leave it — it is genuinely undelivered or unattached, a
   human's call, not yours to guess.
 - If `validate_criterion` refuses with a **no-claim 409** (the criterion was

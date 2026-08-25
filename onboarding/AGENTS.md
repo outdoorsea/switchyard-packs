@@ -31,7 +31,7 @@ and let completion flow back. Anything else forks the truth.
 ## The loop
 
 ### 1 · Triage intake
-- `list_intake` — for anything untriaged: `recommend_idea`, or
+- `list_intake` — for anything untriaged: `idea_action(action='recommend')`, or
   `claim(kind='issue')` + `claim_action(kind='issue', action='categorize')`.
   **Recommend, don't decide** — routing an idea to a pitch is a human's call.
 - `list_dispatched_epics` — set priorities on any epic that has none.
@@ -85,7 +85,7 @@ drives it, and `kind` says what you are holding (`bead`, `criterion`, `issue`).
 | Phase | Tools |
 |---|---|
 | Orient | `whoami`, `list_projects`, `set_scope`, `get_project_briefing` |
-| Triage | `list_intake`, `recommend_idea`, `claim`, `claim_action`, `list_dispatched_epics`, `list_prd_questions`, `prd_question` |
+| Triage | `list_intake`, `idea_action`, `claim`, `claim_action`, `list_dispatched_epics`, `list_prd_questions`, `prd_question` |
 | Author | `create_blueprint`, `draft_prd`, `set_prd_phases`, `prd_question`, `prd_action`, `create_beads_from_prd` |
 | Deliver | `list_claimable_beads`, `claim`, `claim_action` |
 | Validate | `list_criteria`, `validate_criterion`, `link_bead_to_criterion` |

@@ -210,7 +210,7 @@ gc bd update "$WORK_BEAD_ID" \
   --notes "Published: <brief summary>"
 ```
 
-`pr_url` is load-bearing. Switchyard's `attach_prd_pr` and the PRD Completion
+`pr_url` is load-bearing. Switchyard's `prd_pr(action='attach')` and the PRD Completion
 tab read it, and the `publish-gate` order escalates any closed pool bead that
 has no `pr_url` — which is what turns a silent non-publish into mayor mail
 within one order cycle.

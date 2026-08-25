@@ -50,7 +50,7 @@ exactly once, and a self-assigned repair double-works it.
      `release` handoff so the routing stops retrying the wrong fix.
 5. **Fix on a branch, verify, deliver**: run the criterion's own
    `verify_command` locally before pushing — the contract lane will run
-   exactly that. Open the PR against the served base branch, `attach_prd_pr`,
+   exactly that. Open the PR against the served base branch, `prd_pr(action='attach')`,
    then `claim_action complete` with the PR as evidence.
 6. **If you cannot deliver**, `claim_action release` WITH a handoff that says
    what you learned — the next attempt starts from your diagnosis, not from

@@ -190,11 +190,73 @@ launcher_name="-"
 # and take the LAST match.
 emit_and_exit() {
 	_rc="$1"
+	trace_fate
 	printf 'fanout-child-run: child=%s status=%s reason=%s worktree=%s branch=%s brief_bytes=%s confined=%s refusals=%s launcher=%s\n' \
 		"$bead" "$status" "${reason:--}" "$wt" "$branch" "$brief_bytes" \
 		"$confined" "$refusals" "$launcher_name" >&2
 	exit "$_rc"
 }
+
+# ---------------------------------------------------------------------------
+# The trace (switchyard PRD #372, crit:cc901595a33b). A child's fate is legible
+# to a successor only if it outlives this process: the report line above dies
+# with the terminal it was printed to, and the parent may be a session that is
+# itself about to be reclaimed. So every terminal path also records the fate to
+# the fan-out's ledger, from which the parent builds the handoff that names its
+# unfinished children.
+#
+# Best-effort BY CONSTRUCTION. A fan-out that has not configured a ledger is the
+# pack's ordinary path and must not start failing because this exists — so a
+# missing ledger, parent or script is a silent no-op here, and only here. Where
+# the ledger IS configured, fanout-trace.sh reports its own failures rather than
+# swallowing them.
+# ---------------------------------------------------------------------------
+trace_script="$script_dir/fanout-trace.sh"
+trace_parent="${parent:-${SY_FANOUT_PARENT_BEAD:-}}"
+traced=0
+
+trace_record() {
+	[ -n "${SY_FANOUT_LEDGER:-}" ] || return 0
+	[ -n "$trace_parent" ] || return 0
+	[ -x "$trace_script" ] || return 0
+	# stdout is discarded; STDERR IS NOT. The trace script's one report line —
+	# `fanout-trace: ... posted=... post_reason=...` — is its only way to say
+	# the cloud half did not happen (`posted=0 post_reason=no-agent|
+	# no-lease-seconds|post-failed`), and swallowing it here made exactly that
+	# failure invisible in production: the harness reported the child's fate
+	# while the parent-bead trace silently never fired. It flows to this
+	# harness's own stderr, next to the report line below.
+	"$trace_script" record --parent "$trace_parent" --child "$bead" \
+		--status "$1" --reason "${2:--}" --ledger "$SY_FANOUT_LEDGER" \
+		>/dev/null || :
+}
+
+# trace_fate — the terminal record, exactly once. Guarded because a signal that
+# arrives DURING emit_and_exit would otherwise re-enter and write the child's
+# fate twice, which reads downstream as two children.
+trace_fate() {
+	[ "$traced" -eq 0 ] || return 0
+	traced=1
+	case "${reason:-}" in
+	timeout) trace_record timeout "${reason:--}" ;;
+	*) trace_record "$status" "${reason:--}" ;;
+	esac
+}
+
+# ---------------------------------------------------------------------------
+# The signal traps are RE-SET here, now that emit_and_exit and trace_fate
+# exist. Until this line a signal could only clean up: the original pair ran
+# `rm -rf "$work"; exit 143` and left through it WITHOUT a report line, so a
+# child harness killed by a caller's timeout — or by the lease keeper reaping a
+# dead parent — was indistinguishable from one still working. That silence is
+# the failure this criterion is named after.
+#
+# Signals are still RE-RAISED as a nonzero exit, never absorbed: a bare
+# `trap ... TERM` that falls through to 0 would record a killed child as a
+# clean success, which is worse than the silence it replaced.
+# ---------------------------------------------------------------------------
+trap 'status=failed; reason=timeout; rm -rf "$work"; emit_and_exit 130' INT
+trap 'status=failed; reason=timeout; rm -rf "$work"; emit_and_exit 143' TERM
 
 # ---------------------------------------------------------------------------
 # Preflight: the parent's worktree, on the parent's branch. Fails closed. Each
@@ -407,6 +469,13 @@ mkdir -p "$empty_home" 2>/dev/null || :
 # them: a comment inside a backslash-continued command TERMINATES it, which
 # silently drops the remaining assignments AND the launcher, and the harness
 # still reports status=ok because `env` with no command exits 0.
+#
+# The child is recorded as `started` BEFORE it is launched, and that ordering is
+# the point: a SIGKILLed harness runs no trap and reports nothing at all, so a
+# ledger of failures alone could not tell that child from one that never ran.
+# Recording the start makes "unfinished" derivable from the ABSENCE of a
+# terminal record — a fact no dying process can suppress.
+trace_record started launched
 (
 	cd "$wt" || exit 127
 	exec env \

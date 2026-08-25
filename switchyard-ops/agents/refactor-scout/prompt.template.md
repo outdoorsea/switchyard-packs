@@ -121,7 +121,7 @@ Two rules:
 
 ## Filing
 
-`submit_feedback` per candidate, **at most 3 per pass**, ranked. Three
+`feedback(action='submit')` per candidate, **at most 3 per pass**, ranked. Three
 well-evidenced proposals get read and decided; fifteen get skimmed and dropped,
 and you will be woken again next cycle anyway.
 

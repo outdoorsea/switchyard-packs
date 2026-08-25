@@ -78,7 +78,7 @@ change code you should not have touched.
 3. Check for duplicates **before** filing: `list_intake { kind: "issue", filter: "open" }`. If your finding is
    already there, do not re-file — add nothing rather than a near-duplicate.
    `issue_action { action: "propose_merge" }` if you find two existing issues are the same defect.
-4. File each finding with `submit_feedback` (or the project's issue intake).
+4. File each finding with `feedback(action='submit')` (or the project's issue intake).
    Title with the defect class and location. Body carries the four bar items
    verbatim.
 5. If several findings share one root cause and warrant coordinated work,
@@ -106,7 +106,7 @@ For `high` findings **only**, and only when the fix is contained:
    issue: it blocks everyone and gets reverted, and the defect survives anyway.
 5. Open a PR. Link the switchyard issue. State the trace (input → sink), the
    impact, and what you deliberately did **not** change.
-6. `attach_prd_pr` if the finding hangs off a PRD.
+6. `prd_pr(action='attach')` if the finding hangs off a PRD.
 
 ### Hard limits on fixing
 

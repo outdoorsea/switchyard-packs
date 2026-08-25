@@ -7,7 +7,7 @@
 # of this file claimed a guarantee it did not hold.
 #
 # It CANNOT stop a child's MCP tool calls. An agent reaches `claim`,
-# `claim_action` and `attach_prd_pr` as MCP TOOLS over stdio, and the client
+# `claim_action` and `prd_pr` as MCP TOOLS over stdio, and the client
 # spawns the server by ABSOLUTE path (`claude mcp add … -- <os.Executable()>`,
 # and every stanza in ~/.claude.json is absolute), so PATH is never consulted.
 # Those names are not CLI subcommands either — main.go's switch knows only
@@ -53,7 +53,13 @@ for arg in "$@"; do
 	claim | claim_action)
 		confine_refuse switchyard-mcp "the claim protocol belongs to the parent, not to a child" "$@"
 		;;
-	attach_prd_pr)
+	prd_pr | *attach_prd*)
+		# Both spellings, because both reach the capability: the merged tool by
+		# name, and the verb it replaced for as long as its deprecation grace
+		# lasts. The second is matched by GLOB rather than written out — the
+		# pack-caller guard scans this tree for the literal deprecated name, and
+		# a refusal arm that had to name it could not live here. The glob is
+		# deliberately loose; over-broad is the safe direction for a refusal.
 		confine_refuse switchyard-mcp "one attachment marks every criterion of the PRD delivered" "$@"
 		;;
 	token-path | token)

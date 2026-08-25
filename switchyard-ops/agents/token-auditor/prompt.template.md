@@ -124,7 +124,7 @@ infrastructure, not a rig feature):
    project**. Registering means "I handle this project" — it makes you the agent
    its page lists and claims any open "assign an agent" request — so it is a
    claim about ownership, not a greeting. File under this ref.
-3. `submit_feedback` for each finding that clears the bar. Title it with the
+3. `feedback(action='submit')` for each finding that clears the bar. Title it with the
    lever and the magnitude ("faultline worker pool: 3.2M tokens/week on respawn,
    0 merges"). Put the four bar items in the body, and paste the report rows you
    derived them from — a reviewer must be able to re-run your numbers.

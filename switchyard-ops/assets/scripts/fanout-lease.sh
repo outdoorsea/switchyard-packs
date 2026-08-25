@@ -231,6 +231,22 @@ grace="$(norm_num "$grace" "$LEASE_DEFAULT_GRACE")"
 # the record most worth having — silently does not.
 [ -z "${SY_FANOUT_LEASE_LOG:-}" ] || export SY_FANOUT_LEASE_LOG
 
+# The agent ref and the lease length travel into the WRAPPED COMMAND's
+# environment too, and this export is what makes the fan-out's failure trace
+# reachable at all. fanout-trace.sh — run by fanout-child-run.sh for a child
+# that dies or times out — refuses to POST to the parent bead without
+# SY_FANOUT_AGENT and SY_FANOUT_LEASE_SECONDS (the same no-bare-beat rule as
+# the keeper's own heartbeat), and NOTHING else on the documented path supplies
+# them: the prompt's arming block names only the ledger pair, and roster.conf's
+# plain assignments are un-exported shell variables. This script is the one
+# place on that path that already holds both values. Without this export the
+# ledger fills correctly and the cloud trace never fires — every record ends
+# `posted=0 post_reason=no-lease-seconds` (or `no-agent`), and the parent bead
+# learns nothing.
+SY_FANOUT_AGENT="$agent"
+SY_FANOUT_LEASE_SECONDS="$lease"
+export SY_FANOUT_AGENT SY_FANOUT_LEASE_SECONDS
+
 # A caller may name the work directory to keep it after the run, exactly as
 # the child harness's --brief-out exists so a brief can be inspected. It is
 # for debugging a beat that is being refused: the generated hook, the JSON it

@@ -44,13 +44,51 @@ first: you take it yourself, and a rival is refused.
    nothing is minted and it answers `decision=serial`. Those children are local
    execution detail only — they share this worktree and this branch, and the
    criterion still ships exactly one PR.
-7. Build it, sending `claim_action` `heartbeat` as you go. A quiet claim reads
-   as *stalled* on the PRD page, and a lapsed lease hands your bead back to the
-   pool while you are still holding the worktree.
-8. Publish — push the branch and open the pull request against the
+7. **`decision=serial`? Build it yourself**, sending `claim_action` `heartbeat`
+   as you go. A quiet claim reads as *stalled* on the PRD page, and a lapsed
+   lease hands your bead back to the pool while you are still holding the
+   worktree. On `decision=fanout` you build **no plan item in this step** —
+   step 8's gate is the fan-out's build step, and it must find the items
+   unbuilt: an item you built here gets re-briefed to a child who then has
+   nothing left to do, and the gate refuses (exit 4) a run whose children
+   produced nothing — even over a complete tree.
+8. **`decision=fanout`? The gate IS the build step.** Run the integration
+   gate — it runs the children *and* proves the combination, and it is the
+   only thing standing between a fan-out and a criterion shipped one item
+   short:
+
+       $PACK_DIR/assets/scripts/fanout-lease.sh \
+         --bead <pool-bead> --agent <your claimed_by> \
+         --tenant <tenant> --project <project> -- \
+         $PACK_DIR/assets/scripts/fanout-integrate.sh \
+           --worktree "$PWD" --branch <your branch> --plan <plan-file> \
+           --parent <decomposer's parent bead> --crit <crit_label> --prd <prd_id> \
+           --verify '<the bead's verify_command>'
+
+   Two details in that line are load-bearing. It runs THROUGH the lease keeper
+   for the same reason the fan-out itself does — you are blocked for the whole
+   gate, a blocked session heartbeats nothing, and a lease that lapses mid-gate
+   hands your bead to a successor while you are still holding the worktree. And
+   `--parent`/`--crit`/`--prd` are what put the criterion and PRD lines in each
+   child's brief: without them the harness briefs children under a fabricated
+   bead id with those lines absent, which is one of the three confirmed causes
+   of a child that does nothing.
+
+   It runs each item exactly once through the child harness — serially, one
+   child at a time, by design for now: the per-item did-it-produce-anything
+   check reads the tree before and after ONE child, which attributes work
+   correctly only while nothing else touches the tree, and this PRD's
+   concurrency-cap criterion owns introducing bounded parallelism. It folds a
+   failed, dead or empty-handed child back to a serial retry by you, then runs
+   the build and the criterion's own targeted tests over the combined tree.
+   **Its exit code is the publish gate**: zero means publish, anything else
+   means do not. Paste its `fanout-integrate:` line into the PR body beside
+   the decomposer's. A serial build skips this step — you gate by running
+   build and tests yourself, which step 7 already has you doing.
+9. Publish — push the branch and open the pull request against the
    claim-served base from step 5, never against a base you inferred from the
    repo.
-9. `claim_action` `complete`, carrying the delivering PR. **Which PR fields
+10. `claim_action` `complete`, carrying the delivering PR. **Which PR fields
    belong on that call, and when, is the attach rule below** — send them wrong
    and you sign off code that never shipped.
 
@@ -103,7 +141,7 @@ gh api repos/<owner>/<repo>/pulls/<n> --jq .merged_at
 ```
 
 A `null` there means your PR is still **open**. Then `complete` **without** the
-PR fields and attach later with `attach_prd_pr` once it lands — never pass them
+PR fields and attach later with `prd_pr(action='attach')` once it lands — never pass them
 early. Attaching an open PR marks every criterion of that PRD delivered and
 judge-reachable, which gets unlanded code signed off as done.
 
@@ -156,11 +194,14 @@ your bead survive; only your context is discarded.
 ## Fan-out: many children, still exactly ONE pull request
 
 A criterion too big for one turn is decomposed into local child beads, and
-those children are run by
-`$PACK_DIR/assets/scripts/fanout-child-run.sh` — one invocation per
-child. They are **run, not slung**: `{{ cmd }} sling` and `{{ cmd }} session
-new` would each give a child its own worktree and this pack's default publish
-formula, which is the one thing a fan-out cannot afford.
+those children are run **by the integration gate**: `fanout-integrate.sh`
+invokes `$PACK_DIR/assets/scripts/fanout-child-run.sh` once per child, one
+child at a time. You never invoke the child harness yourself, and you never
+build a plan item ahead of the gate — the gate is the build step, and it
+certifies only work it ran. They are **run, not slung**: `{{ cmd }} sling` and
+`{{ cmd }} session new` would each give a child its own worktree and this
+pack's default publish formula, which is the one thing a fan-out cannot
+afford.
 
 What that harness holds true, so you do not have to police it:
 
@@ -178,6 +219,16 @@ None of that changes what you owe. **You keep the cloud claim for the whole
 fan-out and you open the single pull request that delivers the criterion** —
 one criterion, one deliverable, one PR, one verdict. A child's work is a commit
 on your branch, nothing more; integrating it and publishing it is yours.
+
+**Integrating it means the gate, not a glance at the report lines.** A child
+reports its LAUNCHER'S exit code, not whether it did anything: a child that
+changed zero files reports `status=ok reason=ok` byte-for-byte identically to
+one that built the whole item, and this pack has been bitten by that three
+separate times from three different causes. `fanout-integrate.sh` reads the
+tree instead — an item whose child left the tree untouched is folded back to a
+serial retry by you, exactly as a crashed child's is, and an item that still
+has nothing after that fails the run no matter how green the build is. Run it
+before you publish, every fan-out, and let its exit code decide.
 
 **Keeping that claim is not something you can do by hand while children run.**
 You are blocked in one long call for the whole fan-out, and a blocked session
@@ -206,6 +257,38 @@ an MCP client's config never reaches the keeper, and the refusal is how that
 surfaces. And when a fan-out finishes, read its report line: a nonzero
 `beats_failed=` with `status=ok` means the work succeeded while renewals were
 failing, so verify you still hold the bead before publishing.
+
+**A fan-out must not end silently partial.** A child can die, and a child can be
+killed by a timeout — and the one killed hardest writes nothing at all, so you
+cannot learn its fate by waiting for it to report. Point every child at one
+ledger, and the harness records each fate as it happens:
+
+    export SY_FANOUT_LEDGER="$PWD/.fanout-ledger"
+    export SY_FANOUT_PARENT_BEAD=<your pool bead>
+
+With those set, `fanout-child-run.sh` records each child as `started` before it
+launches and records its terminal fate on the way out — including the signal
+paths, so a child you never see again is still on the record. A fate that is
+neither `started` nor `ok` also posts a task trace to YOUR bead's event record,
+which is what makes a lost child visible to a judge and to your successor rather
+than only to the terminal you are no longer attached to.
+
+Then, before you publish, ask the ledger what you actually finished:
+
+    $PACK_DIR/assets/scripts/fanout-trace.sh handoff \
+      --parent <your pool bead> --ledger "$SY_FANOUT_LEDGER"
+
+It prints nothing when every child finished. When it prints, **that text is
+your handoff** — pass it as `handoff.broken_or_unverified` on your
+`claim_action`, and say the same thing in the PR body. A fan-out that lost a
+child and shipped anyway, without naming it, is the silent partial this
+machinery exists to prevent: the branch looks complete, the report lines were
+all green, and the missing work is discovered by whoever trusts the verdict.
+
+The ledger is written before the trace is posted, so it still names your
+unfinished children with the network down. If `handoff` exits nonzero it found
+no ledger at all — that is not "all clear", it is **no information**, and every
+child should be treated as unfinished.
 
 {{ template "tdd-discipline" . }}
 

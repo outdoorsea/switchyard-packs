@@ -10,7 +10,7 @@ Over the switchyard MCP:
    merge proposals, invites, and the awaiting-validation backlog). Read its
    `contract_coverage` rollup to see the validation picture. Use it to decide
    where this pass is best spent, then drill in with the tools below.
-2. `list_intake` — for anything untriaged: `recommend_idea`, or
+2. `list_intake` — for anything untriaged: `idea_action(action='recommend')`, or
    `claim(kind='issue')` + `claim_action(kind='issue', action='categorize')`.
    Recommend, don't decide: routing an idea to a pitch is a human's call.
 3. `list_dispatched_epics` — set priorities on any epic that has none.

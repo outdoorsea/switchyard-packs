@@ -1,0 +1,38 @@
+# Documented consumer shape for switchyard-ops.
+#
+# A rig that imports this pack must already carry the sibling imports below, at
+# the pinned commits shown. This file is the authoritative declaration of that
+# requirement; scripts/check-pack-importable.sh reads it to build the scratch
+# city it resolves the pack in, and scripts/check-derived-pack-compat.sh
+# enforces that every derived pack here has one.
+#
+# WHY THIS PACK NEEDS ONE DESPITE DECLARING NO IMPORTS
+# ----------------------------------------------------
+# switchyard-ops has no [imports.*] of its own, so it reads as self-contained
+# and was never importability-checked. It is not. formulas/sy-item-work.formula
+# .toml carries `extends = ["implementation-base"]` and routes its steps to
+# gascity's `gc.implementation-worker`, `gc.publisher` and `gc.run-operator`
+# targets — none of which this pack ships. In a rig that does not already carry
+# gascity's roles under the `gc` binding, every one of those targets dangles.
+#
+# That dependency was stated only in a pack.toml prose comment, which no gate
+# reads. This file is the machine-readable half of the same claim.
+#
+# THE BINDING NAME IS PART OF THE CONTRACT.
+# The roles must be bound as `gc` specifically: the formula names its targets
+# `gc.*`, so importing the same roles under any other key leaves them unresolved
+# while looking correctly installed.
+#
+# JOINT PIN, JOINT SOURCE. This is byte-for-byte the binding
+# packs/switchyard-build declares in its own [imports.gc] and consumer shape,
+# and the one gc-factory's rigs carry: the same gascity-packs commit AND the
+# same source. A city binds `gc` once, so the two packs' shape files must name
+# the same source for it — and they must move together on the pin, or the city
+# cannot hold both packs at once: the exact failure PRD #367 was written
+# about. Do not bump one alone, and do not narrow the source (e.g. to
+# .../gascity/roles) — no real consumer binds the narrower pack, so the gate
+# would resolve this pack in a city nobody runs.
+
+[gc]
+source = "https://github.com/gastownhall/gascity-packs/tree/main/gascity"
+version = "sha:3b3b89f2011e06d84459aa7bea1552382f13930a"

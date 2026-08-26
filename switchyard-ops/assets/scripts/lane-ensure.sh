@@ -131,14 +131,28 @@ QUALIFIED="$SY_NS.$AGENT"
 # naming the gate it uses.
 LANE_QUEUE_SUFFIX=""
 LANE_QUEUE_COUNT_JQ=""
+# LANE_ROLE — the catalog role this lane serves, for the governance gate and the
+# liveness stamp (switchyard PRD #365, crit:fc020b45069d; see the role section
+# below). Declared IN the same case block as the lane's queue because the two
+# name one fact from different angles — which switchyard surface this lane is —
+# and a lane whose queue moves should never have its role mapping drift apart in
+# a second list. Empty (an unmapped lane) disables BOTH halves: no heartbeat is
+# stamped and no registry verdict can withhold a spawn, so a lane added later,
+# and the scouts (whose tree-scanning work has no catalog role — borrowing the
+# nearest one would let disabling that role silently kill a scanner nobody
+# meant to touch), keep working exactly as the queue check's own rule promises.
+LANE_ROLE=""
 case "$AGENT" in
   judge)
     LANE_QUEUE_SUFFIX="/validations?lane=judgment"
     LANE_QUEUE_COUNT_JQ='if (.validations|type) == "array" then (.validations|length) else empty end'
+    # validate_criterion is the validator role's bound surface.
+    LANE_ROLE="validator"
     ;;
   answerer)
     LANE_QUEUE_SUFFIX="/questions/open"
     LANE_QUEUE_COUNT_JQ='if (.questions|type) == "array" then (.questions|length) else empty end'
+    LANE_ROLE="answerer"
     ;;
   intake-triage)
     # The unified intake queue — untriaged ideas AND issues (switchyard PRD #327).
@@ -153,10 +167,16 @@ case "$AGENT" in
     # lost if the key is guessed, since a wrong name reads as a drained queue.
     LANE_QUEUE_SUFFIX="/intake"
     LANE_QUEUE_COUNT_JQ='if (.items|type) == "array" then (.items|length) else empty end'
+    LANE_ROLE="triager"
     ;;
   dupe-scout)
     LANE_QUEUE_SUFFIX="/issues/open"
     LANE_QUEUE_COUNT_JQ='if (.issues|type) == "array" then (.issues|length) else empty end'
+    # Also `triager`, deliberately shared with intake-triage: the dupe-scout's
+    # merge and covered-by proposals are triage OF the issue queue — the same
+    # surface, not a distinct role — so one registry toggle governs both lanes
+    # and both stamp the one role's liveness.
+    LANE_ROLE="triager"
     ;;
   golden-journey)
     # The ship stage's verification queue: succeeded deploys carrying no grade yet
@@ -175,6 +195,7 @@ case "$AGENT" in
     # is genuinely nothing this lane could do for it.
     LANE_QUEUE_SUFFIX="/deploys/pending-verification"
     LANE_QUEUE_COUNT_JQ='if (.deploys|type) == "array" then (.deploys|length) else empty end'
+    LANE_ROLE="shipper"
     ;;
 esac
 
@@ -948,6 +969,144 @@ lane_escalate_idle() {
   return 0
 }
 
+# ===========================================================================
+# SERVER-SIDE ROLE GOVERNANCE + ROLE LIVENESS (switchyard PRD #365,
+# crit:fc020b45069d)
+# ===========================================================================
+#
+# THE GAP THIS CLOSES. The server carries per-project role GOVERNANCE (the
+# project_roles registry: which roles MAY run) and per-role LIVENESS
+# (project_role_liveness: which roles ARE reporting), and the companion honors
+# both — its RoleSupervisor refuses a disabled role at startup and stamps each
+# running role's heartbeat. The pack honored neither: an operator who disabled a
+# role in project settings kept paying for that lane's sessions anyway, and a
+# project driven entirely by pack lanes read permanently DARK on the dashboard's
+# role-liveness surface, because nothing ever stamped it. Each signal is one
+# cheap HTTP call, which is what lets both sit on the order script's own cycle:
+# deterministic HTTP, no session started and no model tokens spent.
+#
+# WHICH ROLE A LANE IS is declared beside its queue (LANE_ROLE, in the case
+# block at the top), and an unmapped lane is untouched by BOTH halves — the
+# same day-one-keeps-working rule the queue check follows.
+#
+# THE GATE FAILS OPEN, like every other spawn-side gate in this file: only a
+# CONFIDENT `enabled:false` withholds a spawn. An unreadable registry, a
+# missing token, an unresolvable project, a response without this role, a
+# non-boolean `enabled` — all answer EMPTY, and the sweep behaves byte-for-byte
+# as it did before governance existed. The boolean strictness is the same
+# safety property the queue count's array strictness buys: without it an error
+# envelope or a renamed field could read as a verdict and silently unstaff a
+# lane that has work.
+#
+# ONE MAIL PER TRANSITION, NOT PER CYCLE OR PER EPISODE-FOREVER. A disable is
+# announced once when it is first seen, a re-enable once when it ends the
+# pause; the cycles in between are silent. This is the lane_escalate_once
+# marker idiom with BOTH edges reported, because a governance pause is a human
+# decision whose end matters as much as its start: an operator re-enabling a
+# role should hear the pack obey without grepping session lists.
+
+# lane_role_verdict RIG — the server's governance verdict on this lane's mapped
+# role for RIG's project: `enabled`, `disabled`, or NOTHING when no confident
+# answer exists (no mapping, no token, no resolvable project, an unreadable
+# registry, a role the response does not carry, a non-boolean enabled). Callers
+# must treat empty as "no verdict" and change nothing on it, in either
+# direction — see the fail-open note above and lane_role_resume's fail-safe one.
+lane_role_verdict() {
+  [ -n "$LANE_ROLE" ] || return 0
+  [ -n "$lane_token" ] || return 0
+  _lrv_project="$(sy_project_for_rig "$1" "$lane_projects")"
+  [ -n "$_lrv_project" ] || return 0
+  _lrv_body="$(sy_api_get "/api/v1/projects/$_lrv_project/roles" "$lane_token")"
+  [ -n "$_lrv_body" ] || return 0
+  printf '%s' "$_lrv_body" | jq -r --arg r "$LANE_ROLE" '
+      [ (.roles // [])[]
+        | select((.role // "") == $r)
+        | .enabled
+        | select(type == "boolean")
+        | if . then "enabled" else "disabled" end ]
+      | first // empty' 2>/dev/null \
+    | awk 'NF' | head -n1
+}
+
+# lane_role_marker RIG — where "this rig's lane is paused by governance" is
+# remembered between cycles, so the pause and resume mails fire once per
+# TRANSITION rather than once per cycle. Keyed per AGENT and per rig like
+# lane_rung_file, and sanitised the same way for the same reason.
+lane_role_marker() {
+  printf '%s/lane-ensure.%s.role-disabled.%s' "$(sy_state_dir)" \
+    "$(printf '%s' "$AGENT" | tr -c 'A-Za-z0-9._-' '_')" \
+    "$(printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_')"
+}
+
+# lane_role_pause RIG — the registry says disabled: announce the transition to
+# the mayor ONCE. The skip itself never depends on this function or its marker
+# — the caller has already declined to spawn on the verdict alone — so a broken
+# mail path degrades the announcement, never the governance.
+#
+# The marker is written only when the mail is accepted, like lane_escalate_once:
+# a failed send leaves no record, so the next cycle retries the announcement
+# while the skip continues regardless.
+lane_role_pause() {
+  _lrp_marker="$(lane_role_marker "$1")"
+  [ -f "$_lrp_marker" ] && return 0
+  mkdir -p "$(sy_state_dir)" 2>/dev/null || return 0
+  gc mail send mayor \
+    -s "$AGENT-sweep: $LANE_ROLE role disabled — $SUBJECT lane paused on $1" \
+    -m "The role registry for $1's switchyard project reports the \`$LANE_ROLE\` role DISABLED, so the $SUBJECT lane is skipped before any spawn on $1: no session will be started there until the role is re-enabled in the project's settings. Finished sessions are still reaped — governance withholds the spawn, not the cleanup, the same split the suspended-rig guard draws. This is the server's own per-project verdict being obeyed, not a pack fault: nothing here needs fixing unless the disable was unintended. One mail per transition: this notice does not repeat while the role stays disabled, and a matching notice is sent when it is re-enabled." \
+    >/dev/null 2>&1 || return 0
+  : > "$_lrp_marker" 2>/dev/null || true
+}
+
+# lane_role_resume RIG — the registry says enabled and a pause stands on
+# record: close the episode with ONE resume mail and clear the marker. Only a
+# CONFIDENT `enabled` reaches here (the caller's empty-verdict arm changes
+# nothing), so a registry blip can neither end an episode nor mail a false
+# resume — the fail-SAFE direction, where the gate itself fails open.
+#
+# The marker is cleared only when the mail is accepted, so a failed send
+# retries next cycle rather than losing the transition. While it waits, a
+# re-disable sends no second pause mail — the standing marker is right: that is
+# one continuing episode, not a new one.
+lane_role_resume() {
+  _lrr_marker="$(lane_role_marker "$1")"
+  [ -f "$_lrr_marker" ] || return 0
+  gc mail send mayor \
+    -s "$AGENT-sweep: $LANE_ROLE role re-enabled — $SUBJECT lane resumed on $1" \
+    -m "The role registry for $1's switchyard project reports the \`$LANE_ROLE\` role enabled again, so the $SUBJECT lane resumes normal spawning on $1 from this cycle onward. This closes the pause announced under \"$AGENT-sweep: $LANE_ROLE role disabled — $SUBJECT lane paused on $1\"." \
+    >/dev/null 2>&1 || return 0
+  rm -f "$_lrr_marker" 2>/dev/null || true
+}
+
+# lane_role_heartbeat RIG — stamp the mapped role's liveness for RIG's project
+# (POST .../roles/<role>/heartbeat), so project_role_liveness reflects a
+# project whose roles are driven by pack lanes instead of reading permanently
+# dark. Best-effort in both directions: an accepted stamp needs no answer read,
+# and a refused or unreachable one changes nothing about the sweep — liveness
+# reporting must never be the reason a lane went unstaffed.
+#
+# The agent_ref is informational (the dashboard names who holds the role); the
+# rig-qualified lane name is the honest answer. It is built with jq rather than
+# interpolated because the rig name is data from `gc rig list`, and one quote
+# in it would otherwise break the JSON silently.
+#
+# THIS CANNOT MASK THE IDLE LADDER, and that is checked fact rather than hope:
+# the stamp writes project_role_liveness (role-keyed), while lane_role_state
+# reads the briefing's liveness.agents block, which the server assembles from
+# AGENT registrations — a different table. The sweep saying "this lane is
+# tended" therefore never overwrites the stalled-session heartbeat the ladder
+# escalates on.
+lane_role_heartbeat() {
+  [ -n "$LANE_ROLE" ] || return 0
+  [ -n "$lane_token" ] || return 0
+  _lrh_project="$(sy_project_for_rig "$1" "$lane_projects")"
+  [ -n "$_lrh_project" ] || return 0
+  _lrh_body="$(jq -nc --arg ref "$1/$QUALIFIED" '{agent_ref: $ref}' 2>/dev/null)"
+  [ -n "$_lrh_body" ] || _lrh_body='{"agent_ref":""}'
+  sy_api_post "/api/v1/projects/$_lrh_project/roles/$LANE_ROLE/heartbeat" \
+    "$lane_token" "$_lrh_body" >/dev/null
+  return 0
+}
+
 # lane_agent_probe — did `gc agent list --json` ANSWER, as distinct from what it
 # answered? Echoes the agent count (possibly 0) when the probe returned a
 # parseable list, and nothing when the probe itself failed.
@@ -1132,6 +1291,35 @@ for rig in $rigs; do
   if lane_rig_suspended "$rig"; then
     continue
   fi
+
+  # SERVER-SIDE ROLE GOVERNANCE GATES THE SPAWN (switchyard PRD #365,
+  # crit:fc020b45069d). Placed AFTER the reap and the suspension guard, and
+  # BEFORE everything that can start a session — which includes
+  # lane_escalate_idle's top rung, not just the spawn at the loop's foot — so a
+  # disabled verdict is honored before ANY spawn. Like suspension, a disabled
+  # role withholds the spawn and never the reap: a role disabled while its
+  # session is finishing must still be swept, or governance opens the exact
+  # retention hole the suspended-rig guard's own notes close.
+  #
+  # Only the two CONFIDENT verdicts act. The empty answer — no mapping for
+  # this lane, no token, no project, an unreadable registry — falls through
+  # with nothing withheld, nothing mailed and nothing cleared: fail-open on
+  # the spawn side (the asymmetry every gate here shares), and fail-safe on
+  # the episode side, since a blip that ended a pause would mail a false
+  # resume and re-announce the same pause when the registry answers again.
+  case "$(lane_role_verdict "$rig")" in
+    disabled) lane_role_pause "$rig"; continue ;;
+    enabled)  lane_role_resume "$rig" ;;
+  esac
+
+  # THE ROLE'S LIVENESS HEARTBEAT, STAMPED FROM THE ORDER SCRIPT each cycle,
+  # for every rig the sweep tends — whether it then spawns, finds a session
+  # already live, or finds the queue drained: the lane is being kept staffed
+  # either way, and that is what the stamp asserts. Deliberately NOT stamped
+  # for a rig whose role is disabled (skipped above — the server reads a
+  # disabled role's silence as expected, and a fresh stamp would make a
+  # switched-off role read alive) nor one the mayor suspended.
+  lane_role_heartbeat "$rig"
 
   n="$(lane_live_count "$rig" "$reaped")"
   case "$n" in

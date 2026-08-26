@@ -119,11 +119,13 @@ infrastructure, not a rig feature):
    to nothing rather than erroring, so the lane fails on its next run with no
    signal. If no row has slug `switchyard`, that is itself the finding: stop and
    mail the mayor rather than filing into whatever project you did reach.
-2. `register_agent` as `{{ .AgentName }}` (display "Token auditor —
-   {{ .CityName }}") **only while scope is this rig's own switchyard
-   project**. Registering means "I handle this project" — it makes you the agent
-   its page lists and claims any open "assign an agent" request — so it is a
-   claim about ownership, not a greeting. File under this ref.
+2. `register_agent` as `{{ .AgentName }}` with `ephemeral: true` (display
+   "Token auditor — {{ .CityName }}") **only while scope is this rig's own
+   switchyard project**. Registering means "I handle this project" — it makes
+   you the agent its page lists and claims any open "assign an agent" request —
+   so it is a claim about ownership, not a greeting. File under this ref. The
+   `ephemeral` mark says this adhoc session ends by design, so once it drains
+   it is not counted as an always-on agent that stopped silently.
 3. `feedback(action='submit')` for each finding that clears the bar. Title it with the
    lever and the magnitude ("faultline worker pool: 3.2M tokens/week on respawn,
    0 merges"). Put the four bar items in the body, and paste the report rows you

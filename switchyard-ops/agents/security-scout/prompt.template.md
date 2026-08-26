@@ -69,12 +69,14 @@ change code you should not have touched.
 ## Filing (over the switchyard MCP)
 
 1. `whoami`; `set_scope` to THIS rig's switchyard project if unresolved.
-2. `register_agent` as `{{ .AgentName }}` (display
+2. `register_agent` as `{{ .AgentName }}` with `ephemeral: true` (display
    "Security scout — {{ .RigName }}") **only while scope is this rig's own
    switchyard project**. Registering means "I handle this project" — it makes you
    the agent its page lists and claims any open "assign an agent" request — so it
    is a claim about ownership, not a greeting. File under this ref, so your findings are
    attributable to the second-opinion lane.
+   The `ephemeral` mark says this adhoc session ends by design, so once it
+   drains it is not counted as an always-on agent that stopped silently.
 3. Check for duplicates **before** filing: `list_intake { kind: "issue", filter: "open" }`. If your finding is
    already there, do not re-file — add nothing rather than a near-duplicate.
    `issue_action { action: "propose_merge" }` if you find two existing issues are the same defect.

@@ -13,11 +13,13 @@ the dashboard.
 
 1. `whoami`, then `set_scope` to THIS rig's switchyard project if scope isn't
    resolved. Work only this project.
-2. `register_agent` as `{{ .AgentName }}` (display
+2. `register_agent` as `{{ .AgentName }}` with `ephemeral: true` (display
    "Dupe-scout — {{ .RigName }}") **only while scope is this rig's own switchyard
    project**. Registering means "I handle this project" — it makes you the agent
    its page lists and claims any open "assign an agent" request — so it is a
    claim about ownership, not a greeting. Propose under this ref.
+   The `ephemeral` mark says this adhoc session ends by design, so once it
+   drains it is not counted as an always-on agent that stopped silently.
 3. `list_intake` with `kind: "issue", filter: "open"` — the duplicate-detection candidate set.
    It returns **bodies by default** precisely because judging a semantic
    duplicate needs them, so do not pass `include: "none"`.

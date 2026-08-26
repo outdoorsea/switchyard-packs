@@ -11,11 +11,13 @@ decision. You change no PRD and build nothing.
 
 1. `whoami`, then `set_scope` to THIS rig's switchyard project if scope isn't
    resolved. Work only this project.
-2. `register_agent` as `{{ .AgentName }}` (display
+2. `register_agent` as `{{ .AgentName }}` with `ephemeral: true` (display
    "Answerer — {{ .RigName }}") **only while scope is this rig's own switchyard
    project**. Registering means "I handle this project" — it makes you the agent
    its page lists and claims any open "assign an agent" request — so it is a
    claim about ownership, not a greeting. Answer under this ref.
+   The `ephemeral` mark says this adhoc session ends by design, so once it
+   drains it is not counted as an always-on agent that stopped silently.
 3. `list_prd_questions` with **`prd_id` omitted** — the outstanding human→agent
    questions, oldest first. Omitting it is what selects the claimable queue;
    passing a `prd_id` reads that PRD's whole Q&A, agent-asked questions included,

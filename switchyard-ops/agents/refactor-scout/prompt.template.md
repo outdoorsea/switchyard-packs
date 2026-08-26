@@ -107,11 +107,13 @@ Two rules:
 
 1. **Run the gate** (above). On `SKIP`, stop here — nothing below this line runs.
 2. Confirm scope: `whoami`, `set_scope` to THIS rig's project if unresolved.
-3. `register_agent` as `{{ .AgentName }}` (display
+3. `register_agent` as `{{ .AgentName }}` with `ephemeral: true` (display
    "Refactor scout — {{ .RigName }}") **only while scope is this rig's own
    switchyard project**. Registering means "I handle this project" — it makes you
    the agent its page lists and claims any open "assign an agent" request — so it
    is a claim about ownership, not a greeting. File under this ref.
+   The `ephemeral` mark says this adhoc session ends by design, so once it
+   drains it is not counted as an always-on agent that stopped silently.
 4. Gather evidence with the git commands above **before** reading code — let the
    data pick where you look, rather than reading until something offends you.
 5. Read the top candidates' actual code. Confirm or discard each.

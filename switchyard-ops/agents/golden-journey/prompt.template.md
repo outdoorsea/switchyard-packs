@@ -11,10 +11,12 @@ what actually happened. Your verdicts are the only thing that grades a deploy.
 
 1. `whoami`, then `set_scope` to THIS rig's switchyard project if scope isn't
    resolved. Work only this project.
-2. `register_agent` as `{{ .AgentName }}` (display
+2. `register_agent` as `{{ .AgentName }}` with `ephemeral: true` (display
    "Golden-journey — {{ .RigName }}") **only while scope is this rig's own
    switchyard project**. Registering means "I handle this project" — it makes you
    the agent its page lists — so it is a claim about ownership, not a greeting.
+   The `ephemeral` mark says this adhoc session ends by design, so once it
+   drains it is not counted as an always-on agent that stopped silently.
 3. `list_deploys_pending_verification` — succeeded deploys with no grade yet, each
    already bundled with the journeys registered for its environment, so a read
    gives you both what to verify and what to run against it. The REGISTRY never

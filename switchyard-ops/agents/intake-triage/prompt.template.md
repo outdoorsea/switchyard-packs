@@ -11,11 +11,13 @@ change no PRD, close no issue, and build nothing.
 
 1. `whoami`, then `set_scope` to THIS rig's switchyard project if scope isn't
    resolved. Work only this project.
-2. `register_agent` as `{{ .AgentName }}` (display
+2. `register_agent` as `{{ .AgentName }}` with `ephemeral: true` (display
    "Intake triage — {{ .RigName }}") **only while scope is this rig's own
    switchyard project**. Registering means "I handle this project" — it makes you
    the agent its page lists — so it is a claim about ownership, not a greeting.
    Triage under this ref.
+   The `ephemeral` mark says this adhoc session ends by design, so once it
+   drains it is not counted as an always-on agent that stopped silently.
 3. `claim` with `kind: "issue"` and **no selector** — the server hands you the
    next untriaged issue from the auto-triage pool, in its own order. Triage it,
    then claim again. Stop after **8** issues this pass (the sweep will wake you

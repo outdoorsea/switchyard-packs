@@ -19,6 +19,16 @@
 # double-routes nothing but delays every retry, a longer one re-routes a repair
 # that is still being worked.
 #
+# THE WINDOW GOVERNS A WORKER WHO HAS NOT CLAIMED YET — NOT A STAKE THAT ENDED.
+# A worker that took the repair and died leaves a lease the server reclaims;
+# the sweep returns that repair to the queue on the cycle it notices, inside
+# the window, and exactly once (a fresh assignment marker suppresses a second).
+# A worker that DELIVERED leaves a closed bead awaiting a judge, which is not
+# re-routed at all. The sweep tells those apart from its marker stamps and the
+# project event feed (`criterion.reclaimed` / `bead.reclaimed`) since the
+# marker was written, so a lease that began and ended between two cycles is
+# still read as a lapse rather than as an ignored assignment.
+#
 # Judgment lives in the session, not in the script: the sweep decides only WHICH
 # criterion and WHO to wake. What the repair should actually change is decided
 # by the brakeman that receives the assignment, which has the switchyard MCP and

@@ -74,6 +74,37 @@
 # absorbs a fresh assignment every cycle, forever, and every one of those cycles
 # exits 0 having "routed" one — a criterion refused by a judge, with nobody on
 # it, and no signal anywhere. That is the silent drop this criterion names.
+#
+# A LAPSED STAKE RETURNS TO THE QUEUE EXACTLY ONCE (crit:f6de67fd022f). A worker
+# that took the repair and then died leaves a lease that expires, and the server's
+# reclaim sweep frees it. To this sweep that reads as: no live claim, criterion
+# still `outstanding`, and an assignment marker on disk. The same read describes
+# three other states, and each wants a different answer:
+#
+#   * the worker DELIVERED the repair (bead closed, or a completion on the feed)
+#     and the criterion is waiting on a judge — route NOBODY, the judging lane
+#     owns it now; a repair re-routed here is the "multiplies" fault, one fresh
+#     worker per TTL on work that is already done;
+#   * the worker's stake LAPSED or was RELEASED without a delivery — route it
+#     again NOW, once, and say so: waiting out the assignment window strands a
+#     repair nobody holds, and a second route on the next cycle would be the
+#     duplicate the fresh marker exists to suppress;
+#   * the worker never claimed at all — the consumption path above, unchanged.
+#
+# The discriminator is the assignment's OWN history, read two ways. The
+# `consumed` stamp proves a lease was seen live. For a stake that began and
+# ended entirely between two cycles — the common shape of a quick death — the
+# project event feed is the durable record: the marker carries the feed head at
+# routing time, and the reclaim/complete/release events since it name the
+# criterion (`criterion.*`, by prd + label) or its pool bead (`bead.*`, by the
+# deterministic bead id). An unreadable feed degrades to the stamp alone, and
+# the stamp's absence degrades to the consumption path — every fallback lands
+# on "route it, once" or "alarm", never on "leave it".
+#
+# A DELIVERED repair's marker is kept and stamped `delivered` so the judge's
+# turn is not re-routed, and it is retired the moment the rollup carries a NEWER
+# `fail` than the one that routed it — a second rejection is a new repair, and
+# the fresh marker it earns starts the lifecycle over.
 set -u
 
 . "$(dirname "$0")/../lib/roster.sh"
@@ -187,9 +218,25 @@ fails() {
 # written by a sweep that predates this check — parsing exactly as before. An
 # older marker simply carries no stamp, which reads as "not yet observed
 # consumed": that can cost one extra alarm, never a suppressed one.
-marker_consumed() {
+marker_consumed() { marker_stamped "$1" consumed; }
+
+# marker_stamped FILE WORD — does the marker carry a WORD stamp on any line
+# after the first? The stamp vocabulary is `consumed` (a lease was seen live)
+# and `delivered` (the repair landed and awaits a judge); both are appended,
+# never rewritten, for the reason marker_consumed's header gives.
+marker_stamped() {
   [ -f "$1" ] || return 1
-  awk 'NR>1 && $1 == "consumed" { found = 1 } END { exit !found }' "$1" 2>/dev/null
+  awk -v w="$2" 'NR>1 && $1 == w { found = 1 } END { exit !found }' "$1" 2>/dev/null
+}
+
+# marker_field FILE N — field N of the marker's routing line, or empty. Line 1
+# is `<routed-at> <target> [<feed-head>] [<verdict-at>]`: the two optional
+# trailing fields were added for the lapsed-stake check and are absent from
+# markers written before it, which read as `-` (unknown) here rather than as an
+# error, so an older marker keeps its full pre-existing lifecycle.
+marker_field() {
+  [ -f "$1" ] || return 0
+  awk -v n="$2" 'NR==1 { print $n }' "$1" 2>/dev/null
 }
 
 # mark_consumed FILE — record that this assignment became a held lease.
@@ -199,6 +246,71 @@ marker_consumed() {
 mark_consumed() {
   marker_consumed "$1" && return 0
   printf 'consumed %s\n' "$now" >>"$1" 2>/dev/null || true
+}
+
+# mark_delivered FILE — record that this assignment's repair was delivered and
+# is now the judging lane's to act on. Idempotent like mark_consumed.
+mark_delivered() {
+  marker_stamped "$1" delivered && return 0
+  printf 'delivered %s\n' "$now" >>"$1" 2>/dev/null || true
+}
+
+# stake_ended PROJECT TOKEN PRD LABEL SINCE — how this criterion's most recent
+# stake ended, according to the project event feed since event id SINCE:
+# `lapsed` (the lease expired and the reclaim sweep freed it), `delivered` (the
+# holder completed) or `released` (the holder gave it back), else empty.
+#
+# Two event families name a criterion's stake, and both are matched because a
+# repair reaches the worker down either lane: the criterion-claim API writes
+# `criterion.{reclaimed,completed,released}` scoped to the PRD with the label in
+# its detail, and the pool writes `bead.{reclaimed,closed,released}` keyed on the
+# criterion's deterministic pool bead id (PoolBeadID: prd-{prd}-{hash}). The
+# detail match is anchored on a trailing space so `crit:aaa` cannot match
+# `crit:aaab`.
+#
+# The NEWEST matching event wins: a stake that was reclaimed and then re-taken
+# and completed reads `delivered`, which is the state the criterion is actually
+# in. Pages the feed in the server's batch size, bounded so a runaway feed cannot
+# hold the cycle; a page that fails to read ends the scan with what was seen so
+# far, and an unknown SINCE (`-`, or empty) answers nothing at all — the caller
+# then falls back to the `consumed` stamp, which fails toward re-routing.
+#
+# `_se_`-prefixed locals: this runs inside the routing loop, and POSIX sh has no
+# `local`.
+stake_ended() {
+  _se_since="$5"
+  case "${_se_since:-}" in '' | '-' | *[!0-9]*) return 0 ;; esac
+  _se_bead="prd-$3-$(printf '%s' "$4" | sed 's/^crit://')"
+  _se_verdict=""
+  _se_pages=0
+  while [ "$_se_pages" -lt 5 ]; do
+    _se_pages=$((_se_pages + 1))
+    _se_page="$(sy_api_get "/api/v1/projects/$1/events?since_id=$_se_since" "$2")"
+    [ -n "$_se_page" ] || break
+    _se_hit="$(printf '%s' "$_se_page" | jq -r --arg p "$3" --arg l "$4" --arg b "$_se_bead" '
+        [ (.events // [])[]
+          | select(((.bead_id // "") == $b)
+                   or ((((.prd_id // 0) | tostring) == $p)
+                       and (((.detail // "") + " ") | contains("criterion " + $l + " "))))
+          | select(.type == "criterion.reclaimed" or .type == "bead.reclaimed"
+                   or .type == "criterion.completed" or .type == "bead.closed"
+                   or .type == "criterion.released" or .type == "bead.released") ]
+        | sort_by(.id) | last
+        | if . == null then empty
+          elif (.type | endswith(".reclaimed")) then "lapsed"
+          elif (.type | endswith(".released")) then "released"
+          else "delivered" end' 2>/dev/null | head -n1)"
+    [ -n "$_se_hit" ] && _se_verdict="$_se_hit"
+    _se_n="$(printf '%s' "$_se_page" | jq -r '(.events // []) | length' 2>/dev/null)"
+    _se_last="$(printf '%s' "$_se_page" | jq -r '(.events // []) | last | .id // empty' 2>/dev/null)"
+    case "${_se_n:-}" in '' | *[!0-9]*) break ;; esac
+    case "${_se_last:-}" in '' | *[!0-9]*) break ;; esac
+    [ "$_se_n" -ge 200 ] || break
+    [ "$_se_last" -gt "$_se_since" ] || break
+    _se_since="$_se_last"
+  done
+  [ -n "$_se_verdict" ] && printf '%s\n' "$_se_verdict"
+  return 0
 }
 
 # verdict_for ROLLUPS PRD LABEL — the NEWEST recorded `fail` for that PRD and
@@ -362,6 +474,15 @@ $prev"
   # mid-cycle blip answer differently for two criteria in the same sweep.
   criteria="$(sy_api_get "/api/v1/projects/$project/criteria" "$token")"
 
+  # The project feed's head, read ONCE per rig and recorded on every marker this
+  # cycle writes, so a later cycle can ask the feed what happened to that
+  # assignment (see stake_ended). A single event with the head is the cheapest
+  # read the cursor endpoint offers. Unknown reads as `-`, never as 0: a marker
+  # anchored at 0 would replay the project's whole history on every check.
+  feed_head="$(sy_api_get "/api/v1/projects/$project/events?since_id=0&limit=1" "$token" \
+    | jq -r '.head_id // empty' 2>/dev/null | head -n1)"
+  case "${feed_head:-}" in '' | *[!0-9]*) feed_head="-" ;; esac
+
   # Dedicated rework lane for opted-in rigs; the shared brakeman pool for the
   # rest. See the REWORK_RIGS note beside POOL_SUFFIX above.
   worker_suffix="$POOL_SUFFIX"
@@ -419,7 +540,9 @@ $prev"
     # one's verdict would report a drop against whichever criterion happened to
     # be read next.
     cstatus=""
+    bead_closed=""
     unconsumed=0
+    ended=""
     prev_target=""
 
     # GUARD 1 — a live claim. The criteria read surfaces a claim only while its
@@ -467,6 +590,15 @@ $prev"
           | map(select((.crit_label // "") == $l)
                 | select(((.prd_id // 0) | tostring) == $p))
           | .[0].status // empty' 2>/dev/null | awk 'NF' | head -n1)"
+      # The delivery leg the criteria read exposes. A rejection re-opens the
+      # criterion's bead (crit:123a5d5345fb), so a CLOSED bead with no live claim
+      # on a criterion we routed is the repair worker's completion — the judging
+      # lane's turn, not this one's.
+      bead_closed="$(printf '%s' "$criteria" | jq -r --arg l "$label" --arg p "$prd" '
+          (.criteria // [])
+          | map(select((.crit_label // "") == $l)
+                | select(((.prd_id // 0) | tostring) == $p))
+          | .[0].bead_closed // false | tostring' 2>/dev/null | awk 'NF' | head -n1)"
     fi
 
     # THE REPAIR IS SETTLED. A criterion that reached `done` was repaired and
@@ -485,37 +617,96 @@ $prev"
       continue
     fi
 
+    # The verdict this cycle is acting on, by its timestamp. Recorded on the
+    # marker so a later cycle can tell "the same rejection, still in flight"
+    # from "rejected AGAIN after the repair landed" by string equality alone —
+    # no date arithmetic, no host clock. Empty (a rollup row without one) is
+    # recorded as `-` and never compared.
+    verdict_at="$(verdict_for "$rollups" "$prd" "$label" | cut -f3)"
+
+    # A SECOND REJECTION RETIRES A DELIVERED MARKER. Once the repair was
+    # delivered, its marker is kept so the judge's turn is not re-routed (below).
+    # That hold must end when the judge rules against it again: the rollup then
+    # carries a `fail` NEWER than the one this marker was routed for, which is a
+    # new repair and starts the lifecycle over with a fresh marker. Only a
+    # `delivered` marker is retired this way — an assignment still in flight
+    # keeps its window, so a replayed or re-judged verdict on an unchanged
+    # delivery cannot put a second worker beside the first.
+    if [ -f "$marker" ] && marker_stamped "$marker" delivered; then
+      routed_for_verdict="$(marker_field "$marker" 4)"
+      if [ -n "$verdict_at" ] && [ -n "$routed_for_verdict" ] &&
+        [ "$routed_for_verdict" != "-" ] && [ "$routed_for_verdict" != "$verdict_at" ]; then
+        echo "repair-sweep: $rig/$label was rejected again after its repair landed; routing it afresh"
+        rm -f "$marker" 2>/dev/null || true
+      fi
+    fi
+
     # GUARD 2 — an assignment we already routed that has not aged out. Nothing
     # on the criterion can show this: a worker nudged one minute ago has not
     # claimed yet and reads exactly like a worker nobody has told.
+    #
+    # ...unless the assignment's first life has demonstrably ENDED, which the
+    # header's lapsed-stake section spells out (crit:f6de67fd022f). We are past
+    # guard 1, so no claim is live; the question is how the stake we routed
+    # ended, and it is answered from the cheapest evidence first:
+    #
+    #   1. a `delivered` stamp, or a closed bead on the criteria read — the
+    #      repair landed and the judging lane owns it: route nobody;
+    #   2. the event feed since this marker's routing head — a reclaim is a
+    #      lapse, a completion a delivery, a release a hand-back, whatever
+    #      cycle did or did not happen to observe the lease;
+    #   3. a `consumed` stamp with nothing on the feed — the lease WAS seen
+    #      live and is gone with the criterion still open: a lapse, and the
+    #      direction every fallback here takes is toward the queue, never
+    #      away from it.
+    #
+    # A lapsed or released stake is re-routed NOW, inside the window: the
+    # window measures a worker who has not claimed YET, and a stake that ended
+    # is not that. It is re-routed ONCE because the route below writes a fresh
+    # marker, and this same check finds nothing ended on the next cycle.
     if [ -f "$marker" ]; then
-      at="$(awk 'NR==1{print $1}' "$marker" 2>/dev/null)"
-      case "${at:-}" in
-      *[!0-9]* | "") at=0 ;;
-      esac
-      [ "$((now - at))" -lt "$REPAIR_ASSIGNMENT_TTL" ] && continue
+      if marker_stamped "$marker" delivered || [ "$bead_closed" = true ]; then
+        ended=delivered
+      else
+        ended="$(stake_ended "$project" "$token" "$prd" "$label" "$(marker_field "$marker" 3)")"
+        [ -n "$ended" ] || ! marker_consumed "$marker" || ended=lapsed
+      fi
+      case "$ended" in
+      delivered)
+        mark_delivered "$marker"
+        continue
+        ;;
+      lapsed | released)
+        prev_target="$(marker_field "$marker" 2)"
+        echo "repair-sweep: $rig/$label stake $ended (held via ${prev_target:-unknown}); returning it to the repair queue once"
+        ;;
+      *)
+        at="$(marker_field "$marker" 1)"
+        case "${at:-}" in
+        *[!0-9]* | "") at=0 ;;
+        esac
+        [ "$((now - at))" -lt "$REPAIR_ASSIGNMENT_TTL" ] && continue
 
-      # THE WINDOW CLOSED. Falling through re-routes it either way — the
-      # question this answers is whether the assignment was ever consumed, and
-      # so whether its disappearance is worth waking a human over.
-      #
-      # A stamp means a worker did hold it; its lease ending afterwards is an
-      # expired claim, which is a different fault with its own handling, so it
-      # is re-routed quietly rather than reported as ignored.
-      #
-      # An UNREADABLE criteria body leaves cstatus empty and is counted as
-      # unconsumed. That direction is deliberate: this whole check exists to
-      # stop a rejection going quiet, so an unverifiable assignment is reported
-      # rather than assumed fine. It costs a duplicate alarm at worst.
-      if ! marker_consumed "$marker"; then
+        # THE WINDOW CLOSED. Falling through re-routes it either way — the
+        # question this answers is whether the assignment was ever consumed,
+        # and so whether its disappearance is worth waking a human over.
+        # Reaching here means neither the feed nor a stamp showed the stake
+        # ending, so the only way a lease existed is one no cycle saw AND the
+        # feed did not record — reported rather than assumed.
+        #
+        # An UNREADABLE criteria body leaves cstatus empty and is counted as
+        # unconsumed. That direction is deliberate: this whole check exists to
+        # stop a rejection going quiet, so an unverifiable assignment is
+        # reported rather than assumed fine. It costs a duplicate alarm at worst.
         case "$cstatus" in
         "" | outstanding)
           unconsumed=1
-          prev_target="$(awk 'NR==1{print $2}' "$marker" 2>/dev/null)"
+          prev_target="$(marker_field "$marker" 2)"
           dropped="$dropped $rig/$label(nudged:${prev_target:-unknown})"
           ;;
         esac
-      fi
+        ;;
+      esac
     fi
 
     if [ "$target_known" -eq 0 ]; then
@@ -659,6 +850,33 @@ rather than worked. You are the retry. If you cannot take this repair, say so
 instead of leaving it: that silence is what cost this rejection a cycle."
     fi
 
+    # A RETURN TO THE QUEUE SAYS SO TOO, and says something different: a prior
+    # worker HELD this repair. Their partial work may already sit on a branch,
+    # their handoff (if any) is on the bead, and a lease that lapsed mid-repair
+    # usually means the worker died, not that the approach failed — none of
+    # which a worker told only "repair this" would think to look for.
+    case "$ended" in
+    lapsed)
+      note="$note
+
+A worker already held this repair — via ${prev_target:-a session that no longer
+resolves} — and its lease expired without a delivery, so the stake was reclaimed
+and the repair has been returned to the queue once. You are its second holder.
+Before you start, read the bead's handoffs and delivery evidence for anything
+that worker left behind: a lapsed lease usually means the session died, not that
+its approach was wrong, and partial work may already sit on a branch."
+      ;;
+    released)
+      note="$note
+
+A worker already held this repair — via ${prev_target:-a session that no longer
+resolves} — and released it without a delivery, so it has been returned to the
+queue once. You are its second holder. Their release handoff is on the bead:
+read it before you start, so you build on what they learned rather than
+repeating it."
+      ;;
+    esac
+
     if gc session nudge "$target" "REPAIR $label (PRD #$prd, project $project)
 
 A judge recorded a \`fail\` on this criterion: it was delivered, reviewed, and
@@ -679,7 +897,13 @@ repair as a pull request.$note" </dev/null >/dev/null 2>&1; then
       # the next cycle routes a second worker onto the same repair, then a third.
       # Reporting it is the only way that duplication is ever visible; the old
       # `|| true` made an unwritable state directory look like a clean cycle.
-      if printf '%s %s\n' "$now" "$target" >"$marker" 2>/dev/null; then
+      #
+      # LINE 1 CARRIES FOUR FIELDS: the routing timestamp and target that every
+      # older reader parses (`NR==1 {print $1}` / `$2`, here and in
+      # pr-rework-sweep's mirror check), then the feed head at routing and the
+      # timestamp of the verdict routed for — the two anchors the lapsed-stake
+      # check reads back through marker_field. Unknown values are `-`.
+      if printf '%s %s %s %s\n' "$now" "$target" "$feed_head" "${verdict_at:--}" >"$marker" 2>/dev/null; then
         routed=$((routed + 1))
       else
         failed="$failed $rig/$label(marker-write-failed)"

@@ -154,6 +154,112 @@ Publishing is not this step's job: a factory run publishes PR-only, from the
 `publish` stage, and switchyard's repository forbids pushing to `main`. Commit
 in the worktree and leave the branch for the publisher.
 
+## Rule 4 — judge the item's plan before you build it, and fan out past the threshold
+
+**Run this before Rule 3's gates, and before you write a line of the item.**
+
+An epic-sized item is epic-sized whichever lane reached it. A `switchyard-ops`
+brakeman that claims a criterion from the cloud pool and this drain's per-item
+step do the same job at the same granularity: build ONE criterion, in ONE
+worktree, on ONE branch, and leave ONE pull request. So the fan-out decision is
+the same decision, and it is made by the same script — never by a second one
+written on this side of the seam.
+
+### The item's plan artifact
+
+Before building, write your build plan for THIS item as an artifact: one plan
+item per line, no numbering needed, `#` comments and blank lines ignored. Put it
+under the run's artifact root beside the other build artifacts, at
+`<artifact_root>/items/<sy.pool.bead_id>/plan.txt`, and record its absolute path
+on the claimed step bead:
+
+    gc bd update "<claimed-step-id>" \
+      --set-metadata "gc.build.item_plan_path=<absolute path>"
+
+This is a per-ITEM artifact and not the run's `gc.build.plan_path`. The run-level
+plan artifact is PRD-shaped — phases and criteria, which the `decompose` stage
+already mapped to this convoy — so its items are the criteria, not the tasks
+inside the one criterion you hold. The plan that can exceed a fan-out threshold
+is this one.
+
+### Judge it with the shared decomposer
+
+    packs/switchyard-build/assets/scripts/resolve-fanout.sh decompose \
+      --plan <gc.build.item_plan_path> --rig <the run's rig> \
+      --crit "<sy.pool.crit_label>" --prd "<sy.pool.prd_id>"
+
+`resolve-fanout.sh` locates the installed `switchyard-ops` pack and `exec`s
+`fanout-decompose.sh`; it decides nothing itself. Everything the decomposer
+governs stays the decomposer's: `SY_FANOUT_THRESHOLD` (default 4, which the plan
+must **strictly exceed**), the `SY_FANOUT_ENABLED=0` kill switch, the
+concurrency cap, and the one `fanout-decompose:` decision line an operator
+reads. **Do not implement any part of that judgment here** — a second threshold
+comparison drifts from the first at the boundary, and a kill switch that stops
+the pool lane but not the factory lane is worse than no kill switch, because
+nothing says which lane a reader is looking at.
+
+Set `SY_FANOUT_OPS_PACK_DIR` to the installed `switchyard-ops` pack root if the
+resolver cannot find it (it reports `source=` on every run, and `source=none` on
+none). **If it exits `3` it has resolved nothing: build the item SERIALLY and say
+so in `## Remaining Risks`.** Do not answer the fan-out question locally. That
+degradation is the same one `fanout-decompose.sh` takes when it cannot mint —
+one worker, building serially, reporting it — and it is the only correct one.
+
+### `decision=serial` — build the item yourself
+
+Nothing was minted and nothing changed: implement the plan, heartbeating under
+Rule 1, and run Rule 3's gates yourself. This is byte-for-byte the behaviour
+this step had before fan-out existed, which is what a run that configures
+nothing gets.
+
+### `decision=fanout` — the integration gate IS the build step
+
+Build **no plan item yourself**. The gate runs each item exactly once through the
+child harness and refuses (exit `4`) a run whose children produced nothing — so
+an item you pre-built re-briefs a child over finished work, that child changes
+nothing, and the gate fails over a tree that is in fact complete.
+
+Run the gate through the lease keeper, resolving both through the same resolver:
+
+    "$(packs/switchyard-build/assets/scripts/resolve-fanout.sh --which lease)" \
+      --bead "<sy.pool.bead_id>" --agent "<sy.pool.claimed_by>" \
+      --tenant <tenant> --project <project> -- \
+      "$(packs/switchyard-build/assets/scripts/resolve-fanout.sh --which integrate)" \
+        --worktree "$WORKTREE" --branch <this item's branch> \
+        --plan <gc.build.item_plan_path> \
+        --parent <the decomposer's parent bead> --crit "<sy.pool.crit_label>" \
+        --prd "<sy.pool.prd_id>" --rig <the run's rig> \
+        --verify '<this criterion's verify_command>'
+
+The keeper is not optional. You are blocked in one long call for the whole
+fan-out, and a blocked session heartbeats nothing — Rule 1's cadence cannot be
+kept from inside a fan-out, so the beat has to come from a process that is not
+this session. A lease that lapses mid-gate hands your bead to a successor while
+you still hold the worktree.
+
+`--verify` is **this criterion's own `verify_command`**, which the run's plan
+artifact records in its test strategy for your `sy.pool.crit_label`. switchyard
+judges the criterion by exactly that command, so a gate that chose its own suite
+would be green against a contract nobody is judged by. **A criterion that
+declares no `verify_command` cannot be fanned out**: the gate fails
+`reason=no-verify` by design. Build that item serially and record the missing
+contract in `## Remaining Risks`.
+
+The gate's exit code is the publish gate — zero means the item is done, anything
+else means it is not, and it runs the build and the targeted tests over the
+combined tree, which is Rule 3's gates discharged for a fan-out. A nonzero exit
+is a Rule 2 release with the gate's own report line in the handoff, not a green
+summary with a caveat in it.
+
+### Report the decision either way
+
+Paste both the `fanout-decompose:` line and, on a fan-out, the
+`fanout-integrate:` line verbatim into the item summary's `## Verification`
+section. A serial run reports too: a decomposer that fans out correctly and
+stays silent when it declines is, from outside, indistinguishable from one that
+crashed — both leave a serial build and no beads. The behaviour, every knob and
+every failure path are documented in `docs/epic-fanout.md`.
+
 ## Inherited instructions — carried over from the base implement prompt, none dropped
 
 ### Resolving the worktree

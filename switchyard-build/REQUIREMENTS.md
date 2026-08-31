@@ -151,6 +151,28 @@ being left implicit:
   `implement-item-gate` CI job asserts each one is still present, so a rewrite
   cannot silently install a weaker prompt at the stronger one's path.
 
+- **One decomposer, shared with the pool lane** (switchyard PRD #372,
+  `crit:6a3b156b1a02`). The per-item `implement` stage and the `switchyard-ops`
+  brakeman build a criterion at the same granularity — one criterion, one
+  worktree, one branch, one pull request — so past `SY_FANOUT_THRESHOLD` the impl
+  stage fans out through `switchyard-ops`'s own
+  `assets/scripts/fanout-decompose.sh`, and this pack ships **no decomposer of its
+  own**. Rule 4 of the implement override writes the per-ITEM plan artifact
+  (`gc.build.item_plan_path`, deliberately not the run's PRD-shaped
+  `gc.build.plan_path`, whose items are the criteria the `decompose` stage already
+  mapped to this convoy) and hands it to that script through
+  `assets/scripts/resolve-fanout.sh`, which resolves the installed ops pack and
+  `exec`s it — argv, stdin, stdout and the exit code cross untouched, its own
+  report goes to stderr, and it prints no `decision=` ever. Unresolvable, it exits
+  `3` and the item is built serially; it never answers the question locally. A
+  second implementation would pass every functional test while drifting the one
+  decision line an operator reads, disagreeing at the strictly-exceeds boundary,
+  and leaving `SY_FANOUT_ENABLED=0` stopping one lane and not the other — so
+  `scripts/fanout-shared-decomposer.test.sh` asserts the STRUCTURE (exactly one
+  shell file under `packs/` formats a decision line; no `switchyard-build` script
+  dereferences the threshold knobs) before any behaviour. Behaviour:
+  [docs/epic-fanout.md §6](../../docs/epic-fanout.md).
+
 - **Review and gap analysis.** Both verdict reports trace the PRD's acceptance
   criteria one row each, keyed by `crit:<hash>`, carrying switchyard's
   `met`/`partially_met`/`missing` verdict alongside the base `coverage_statuses`
@@ -292,6 +314,19 @@ bash scripts/implement-item-gate.test.sh
 
 # The same suite runs in CI as the `implement-item-gate self-test` job.
 grep -n 'implement-item-gate' .github/workflows/ci.yml
+
+# One decomposer (crit:6a3b156b1a02): the structural claim first — exactly one
+# shell file in packs/ formats a fan-out decision line, and it is switchyard-ops's
+# — then resolution precedence, exec-passthrough, refusal-not-substitution, and
+# the impl prompt's route. 37 assertions, under bash and dash.
+bash scripts/fanout-shared-decomposer.test.sh
+FANOUT_TEST_SH=dash bash scripts/fanout-shared-decomposer.test.sh
+
+# This pack ships NO decomposer. Expect exactly one hit, in switchyard-ops.
+grep -rl --include='*.sh' 'serial_past_threshold=%s' packs/
+
+# The same suite runs in CI as the `one-decomposer self-test` job.
+grep -n 'fanout-shared-decomposer' .github/workflows/ci.yml
 
 # Convoy mapping (crit:f8594ebe6dba): the override sits on the BASE id, not a
 # renamed one. Expect `id = "decompose"` and NO step whose id is

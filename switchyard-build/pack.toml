@@ -8,7 +8,15 @@
 #                        PRD's own sections
 #   map-pool-to-convoy — claim the PRD's pool beads under lease and mint a local
 #                        convoy ordered by phase
-#   implement          — drain the convoy in parallel worktrees
+#   implement          — drain the convoy in parallel worktrees. Past
+#                        SY_FANOUT_THRESHOLD items in an ITEM's own plan the
+#                        per-item step fans out through switchyard-ops's
+#                        fanout-decompose.sh — the SAME script the brakeman
+#                        uses, reached via assets/scripts/resolve-fanout.sh.
+#                        This pack ships no decomposer of its own; two would
+#                        drift the one decision line an operator reads and
+#                        split the SY_FANOUT_ENABLED kill switch across lanes
+#                        (PRD #372; docs/epic-fanout.md §6).
 #   review             — the factory review + gap-analysis gate
 #   publish            — PR-only, with the PRD and bead ids in the PR title
 #   finalize           — complete each bead back with its PR attached, and post a

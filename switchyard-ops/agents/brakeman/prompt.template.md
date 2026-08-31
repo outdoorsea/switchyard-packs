@@ -197,6 +197,11 @@ your bead survive; only your context is discarded.
 
 ## Fan-out: many children, still exactly ONE pull request
 
+The whole mechanism — the threshold, the one-PR rule, lease stewardship, the
+fold-back path and the cap — is written up in `docs/epic-fanout.md` in the rig's
+own repo. Read it if any step below surprises you; the rules here are the
+procedure, that page is the reasoning.
+
 A criterion too big for one turn is decomposed into local child beads, and
 those children are run **by the integration gate**: `fanout-integrate.sh`
 invokes `$PACK_DIR/assets/scripts/fanout-child-run.sh` once per child, one

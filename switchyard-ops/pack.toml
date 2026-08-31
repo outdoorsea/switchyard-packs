@@ -39,6 +39,20 @@
 #                    Runs this pack's own sy-item-work (formulas/), which extends
 #                    gascity's implementation-base and adds the publish leg:
 #                    build, push, open a PR, then close. Nothing merges for it.
+#                    Past SY_FANOUT_THRESHOLD plan items it FANS OUT (PRD #372):
+#                    the criterion is decomposed into local bd child beads run as
+#                    short-lived workers in the brakeman's OWN worktree and
+#                    branch, integrated locally, and shipped as the SAME single
+#                    pull request. Local beads are execution detail — the cloud
+#                    contract (criterion = one deliverable = one PR = one
+#                    verdict) is untouched, and a child is structurally unable to
+#                    open a PR or take a cloud claim. Below the threshold the
+#                    lane is byte-for-byte what it was, so a city that configures
+#                    nothing gets today's behaviour. The threshold, the one-PR
+#                    rule, lease stewardship across the fan-out, the fold-back
+#                    path and the concurrency cap are documented in
+#                    docs/epic-fanout.md; the knobs are the SY_FANOUT_* block of
+#                    assets/roster.conf.example.
 #   judge          — the judging-VALIDATOR lane (PRD #177). Records reasoned,
 #                    CITED verdicts on delivered criteria that declare no
 #                    verify_command — the ones no automated validator can reach.

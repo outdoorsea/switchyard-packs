@@ -232,6 +232,14 @@
 # ---------------------------------------------------------------------------
 # SY_FANOUT_THRESHOLD / SY_FANOUT_ENABLED — epic fan-out (switchyard PRD #372).
 #
+# These knobs tune a mechanism whose BEHAVIOUR — the threshold, the one-PR rule,
+# lease stewardship across a fan-out, the fold-back path and the concurrency cap
+# — is documented in the switchyard repo at docs/epic-fanout.md, alongside the
+# pack's other lanes. Read that before changing any SY_FANOUT_* value here: the
+# reasons these defaults are what they are (why a bad knob falls back instead of
+# refusing, why a cap of zero is floored to one, why a beat without lease_seconds
+# is worse than no beat) are all reasons not to "fix" one in isolation.
+#
 # A brakeman runs its build plan past the decomposer before building. Above the
 # threshold it mints one parent epic bead with a child per plan item, then
 # builds each child through the confined harness documented under FAN-OUT

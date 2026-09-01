@@ -47,9 +47,9 @@
 #
 # The env var keeps its shipped name (…_PASSES_PER_SHA) so a city that already
 # sets it does not silently lose its setting; the "SHA" in it now names the tree
-# sha. A marker written by the previous, commit-keyed build holds a commit sha,
-# which can never equal a tree sha, so it simply fails to match and authorises
-# one more pass — the fail-open direction, and a one-off cost per rig.
+# sha. A marker written by the previous, commit-keyed build is treated as ABSENT
+# by rule — see THE MARKER NAMES ITS KEY below — which authorises one more pass:
+# the fail-open direction, and a one-off cost per rig.
 #
 # FAIL OPEN, DELIBERATELY. Every unreadable state — no git, no state dir, a
 # corrupt marker — answers PROCEED. A broken gate that fails closed would silently
@@ -92,22 +92,52 @@ STATE="$(sy_state_dir)/refactor-scan.$SLUG.state"
 head="$(git -C "$REPO" rev-parse HEAD 2>/dev/null | awk 'NF' | head -n1)"
 tree="$(git -C "$REPO" rev-parse "HEAD^{tree}" 2>/dev/null | awk 'NF' | head -n1)"
 
-# Read the marker, which is EXACTLY one line of EXACTLY two fields:
-#   <40-hex-tree-sha> <decimal-count>
+# THE MARKER NAMES ITS KEY (switchyard PRD #413). KEY_KIND is the single place
+# this gate says which kind of git object its allowance is spent against, and
+# every marker it writes carries that word as its first field. Changing the key
+# means changing this constant, and every marker written under the superseded key
+# stops parsing on the spot.
 #
-# Anything else — extra fields, extra lines, a short or non-hex sha, a non-numeric
-# count, an empty file — is treated as ABSENT, which resolves to PROCEED. The
+# WHY A TAG AND NOT JUST A DIFFERENT HASH. A commit sha and a tree sha are both
+# 40 lowercase hex characters. Nothing in a bare "<40-hex> <count>" line says
+# which of the two its hash names, so a marker left by the previous commit-keyed
+# build is INDISTINGUISHABLE from one this build wrote: it parses clean, lands in
+# last_tree, and is then compared as though a pass had really been recorded
+# against that tree — and printed to the operator as "last scanned tree <a commit
+# sha>". That it does not also produce a wrong SKIP is an accident of SHA-1
+# spreading two object types over one space, not a decision this script makes,
+# and an unenforced second encoding is exactly the shape of defect that produced
+# this PRD. With the tag the outcome is a rule: a marker under a key that is not
+# the key in force is not evidence about the key in force, so it is ABSENT.
+#
+# ABSENT, NOT A THIRD STATE. A superseded marker resolves through the same empty
+# last_tree / zero last_n as a missing file and produces the same PROCEED, on one
+# code path, because that is the fail-open direction this gate is built around
+# (see FAIL OPEN above). Giving it a verdict of its own would only tempt a later
+# reader to give it a decision of its own. The cost is bounded and one-off: the
+# first pass after a key change is authorised where it might have been skipped —
+# one extra pass per rig, once, which is cheaper than migrating marker files.
+KEY_KIND=tree
+
+# Read the marker, which is EXACTLY one line of EXACTLY three fields:
+#   <key-kind> <40-hex-tree-sha> <decimal-count>
+#
+# Anything else — a different key kind, extra fields, extra lines, a short or
+# non-hex sha, a non-numeric count, an empty file, or the untagged two-field line
+# older builds wrote — is treated as ABSENT, which resolves to PROCEED. The
 # validation is strict on purpose: a lenient read of a corrupt marker such as
-# "<sha> 2 extra" would parse a count of 2 out of a file we cannot actually trust
-# and answer SKIP, which is the one direction this gate must never fail in.
+# "<kind> <sha> 2 extra" would parse a count of 2 out of a file we cannot
+# actually trust and answer SKIP, which is the one direction this gate must never
+# fail in.
 last_tree=""; last_n=0
 if [ -f "$STATE" ]; then
-  _parsed="$(awk '
+  _parsed="$(awk -v kind="$KEY_KIND" '
     NR > 1      { bad = 1; exit }
-    NF != 2     { bad = 1; exit }
-    $1 !~ /^[0-9a-f]{40}$/ { bad = 1; exit }
-    $2 !~ /^[0-9]+$/       { bad = 1; exit }
-    { sha = $1; n = $2 }
+    NF != 3     { bad = 1; exit }
+    $1 != kind  { bad = 1; exit }
+    $2 !~ /^[0-9a-f]{40}$/ { bad = 1; exit }
+    $3 !~ /^[0-9]+$/       { bad = 1; exit }
+    { sha = $2; n = $3 }
     END { if (!bad && sha != "") print sha, n+0 }
   ' "$STATE" 2>/dev/null)"
   if [ -n "$_parsed" ]; then
@@ -116,14 +146,16 @@ if [ -f "$STATE" ]; then
   fi
 fi
 
-# gate_stamp N — persist "<tree> N" via temp file + rename, so a pass killed
-# mid-write cannot leave a half-line. A failed write is silent and non-fatal: the
-# marker simply stays where it was, and the lane gets one more pass rather than
-# being retired by a disk problem.
+# gate_stamp N — persist "<key-kind> <tree> N" via temp file + rename, so a pass
+# killed mid-write cannot leave a half-line. The kind is stamped from the same
+# KEY_KIND the reader validates against, so the writer cannot drift from the
+# reader. A failed write is silent and non-fatal: the marker simply stays where
+# it was, and the lane gets one more pass rather than being retired by a disk
+# problem.
 gate_stamp() {
   mkdir -p "$(dirname "$STATE")" 2>/dev/null || return 0
   _tmp="$STATE.$$"
-  if printf '%s %s\n' "$tree" "$1" > "$_tmp" 2>/dev/null; then
+  if printf '%s %s %s\n' "$KEY_KIND" "$tree" "$1" > "$_tmp" 2>/dev/null; then
     mv -f "$_tmp" "$STATE" 2>/dev/null || rm -f "$_tmp" 2>/dev/null
   else
     rm -f "$_tmp" 2>/dev/null

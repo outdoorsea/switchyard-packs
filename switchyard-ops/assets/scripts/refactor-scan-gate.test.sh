@@ -34,7 +34,10 @@
 #   THE MERGE is the case that actually spends the money here, and it is the one
 #   a fixture is tempted to skip because it needs three commits and a branch. It
 #   is included in full: a marker stamped at a branch tip, then a --no-ff merge of
-#   that branch whose tree equals it byte for byte.
+#   that branch whose tree equals it byte for byte. Its assertions reach the pass
+#   COUNT the marker still holds, not just the refusal the gate printed — the
+#   difference is a gate that refuses once and re-arms, which leaks the PRD's 2N
+#   passes one call later and is invisible to an exit-code-only case.
 #
 # The negative controls matter as much: a real content change MUST re-arm the
 # gate, and a never-scanned repo MUST proceed. Without them, "the count did not
@@ -147,7 +150,7 @@ fi
 want_tree="$(git -C "$repo" rev-parse "HEAD^{tree}")"
 head_sha="$(git -C "$repo" rev-parse HEAD)"
 got="$(marker "$state" rigA)"
-if [ "$got" = "$want_tree 1" ]; then
+if [ "$got" = "tree $want_tree 1" ]; then
 	report ok "the stamped marker holds the tree object, not the commit sha"
 else
 	report FAIL "the stamped marker holds the tree object, not the commit sha" \
@@ -215,6 +218,17 @@ rm -rf "$state"
 #    exists. The marker is stamped to exhaustion at a branch tip; HEAD then
 #    becomes a --no-ff merge commit whose tree is byte-identical to that tip.
 #    A sha-keyed gate sees an unseen sha and hands out a fresh pair of passes.
+#
+#    PINNED ON THE COUNT, NOT ONLY THE VERDICT. One refusal is the cheap half of
+#    this case, and asserting it alone leaves the PRD's actual symptom uncovered:
+#    a gate that answers SKIP and then re-arms its own marker leaks the same 2N
+#    passes per tree, just one call later. That mutant — a `gate_stamp 0` on the
+#    refusal path — passes an exit-code-only version of this case while running
+#    UNBOUNDED passes at one tree, because each refusal hands the next call a
+#    fresh allowance. So the count is read where it lives, in the marker, and the
+#    refusal is exercised twice to show it is a standing verdict rather than a
+#    one-shot. The marker is compared against the one the exhausted tip left,
+#    which states "not reset" without restating the allowance's default.
 # ---------------------------------------------------------------------------
 state="$(new_state)"; repo="$state/rigA"; new_repo "$repo"
 base="$(git -C "$repo" symbolic-ref --short HEAD)"
@@ -223,18 +237,51 @@ commit_content "$repo"
 tip_tree="$(git -C "$repo" rev-parse "HEAD^{tree}")"
 run_gate "$state" check rigA "$repo" >/dev/null   # pass 1 at the tip
 run_gate "$state" check rigA "$repo" >/dev/null   # pass 2 — allowance spent
+tip_marker="$(marker "$state" rigA)"
 git -C "$repo" checkout -q "$base"
 git -C "$repo" merge -q --no-ff -m merge side
 merge_tree="$(git -C "$repo" rev-parse "HEAD^{tree}")"
 out="$(run_gate "$state" check rigA "$repo")"; rc=$?
+after_marker="$(marker "$state" rigA)"
+# A second refusal at the same merge HEAD. Under a gate that reset the count on
+# the way out, THIS is the call that proceeds — the leak, in the only place it
+# is observable from outside.
+out2="$(run_gate "$state" check rigA "$repo")"; rc2=$?
+# The fixture is only testing the PRD's case if the merge really is tree-identical
+# AND the tip really did exhaust the allowance. Either one silently untrue turns
+# every assertion below into a tautology.
+#
+# The exhaustion guard reads the COUNT FIELD alone, deliberately, and not the
+# whole marker: which object the key is belongs to case 2, and a guard that also
+# demanded the tree here would fire on a sha-keyed regression — swallowing this
+# case's own verdict behind "your fixture is broken" on the one regression it
+# exists to name.
+tip_n="${tip_marker##* }"
 if [ "$merge_tree" != "$tip_tree" ]; then
 	report FAIL "the merge fixture produces a tree-identical merge commit" \
 		"tip=$tip_tree merge=$merge_tree — fixture is not testing the PRD's case"
-elif [ "$rc" -eq 10 ]; then
-	report ok "a merge commit whose tree equals its parent's does not reset the count"
+elif [ "$tip_n" != 2 ]; then
+	report FAIL "the merge fixture exhausts the allowance at the branch tip" \
+		"marker=[$tip_marker] want count 2 — fixture is not testing the PRD's case"
 else
-	report FAIL "a merge commit whose tree equals its parent's does not reset the count" \
-		"rc=$rc out=$out"
+	if [ "$rc" -eq 10 ]; then
+		report ok "a merge commit whose tree equals its parent's does not reset the count"
+	else
+		report FAIL "a merge commit whose tree equals its parent's does not reset the count" \
+			"rc=$rc out=$out"
+	fi
+	if [ "$after_marker" = "$tip_marker" ]; then
+		report ok "the refused merge leaves the marker's tree and count exactly as the tip left them"
+	else
+		report FAIL "the refused merge leaves the marker's tree and count exactly as the tip left them" \
+			"after=[$after_marker] tip=[$tip_marker]"
+	fi
+	if [ "$rc2" -eq 10 ]; then
+		report ok "the merge is refused again on the next call — the refusal does not re-arm the gate"
+	else
+		report FAIL "the merge is refused again on the next call — the refusal does not re-arm the gate" \
+			"rc=$rc2 out=$out2"
+	fi
 fi
 rm -rf "$state"
 
@@ -267,10 +314,15 @@ fi
 rm -rf "$state"
 
 # ---------------------------------------------------------------------------
-# 9. CHANGEOVER. A marker left by the previous, commit-keyed build holds a
-#    commit sha — well-formed, parseable, and not this repo's tree. It must not
-#    be read as "already scanned"; the worst it may cost is one extra authorised
-#    pass, once per rig, which is the direction this gate is allowed to fail in.
+# 9. CHANGEOVER. A marker left by the previous, commit-keyed build is an
+#    untagged two-field line holding a commit sha. It must not be read as
+#    "already scanned"; the worst it may cost is one extra authorised pass, once
+#    per rig, which is the direction this gate is allowed to fail in.
+#
+#    This case is the end-to-end shape only. WHY it is absent — by the key-kind
+#    tag, a rule, rather than by the commit and tree hashes happening to differ —
+#    is pinned in refactor-scan-gate-marker.test.sh, which is the suite that can
+#    tell those two apart.
 # ---------------------------------------------------------------------------
 state="$(new_state)"; repo="$state/rigA"; new_repo "$repo"
 printf '%s %s\n' "$(git -C "$repo" rev-parse HEAD)" 2 >"$state/refactor-scan.rigA.state"

@@ -10,19 +10,22 @@ Your product is a proposal a human can say yes or no to in one read.
 
 ## Gate — your FIRST action, before you read anything
 
-Your evidence is a 6-month git window over one repo. If that repo's HEAD has not
-moved since the last pass, a scan now re-derives the same ranking from the same
-history. Noticing that mid-pass is worth nothing; the pass is already paid for.
-So check before you spend:
+Your evidence is a 6-month git window over one repo. If that repo's CONTENT has
+not moved since the last pass, a scan now re-derives the same ranking from the
+same history. Noticing that mid-pass is worth nothing; the pass is already paid
+for. So check before you spend:
 
 ```sh
 $PACK_DIR/assets/scripts/refactor-scan-gate.sh check {{ .Rig }} {{ .RigRoot }}
 ```
 
-- **`SKIP`** (exit 10) — say `IDLE: refactor scan gated, HEAD unchanged, exiting
+- **`SKIP`** (exit 10) — say `IDLE: refactor scan gated, tree unchanged, exiting
   turn.` and **stop immediately**. Do not run the git evidence commands, do not
   read source, do not call `list_prds` or `list_intake`. The whole point is
-  the reads you do not do.
+  the reads you do not do. **A `SKIP` at a commit sha you have never seen is not
+  a bug**: the gate keys on the repo's tree, so a merge or a message-only commit
+  moves HEAD without moving a byte of content, and the verdict prints both the
+  commit and the tree so you can tell which happened.
 - **`PROCEED`** (exit 0) — run the pass below.
 
 **Call it exactly once, and only when you mean to run the pass.** `check` is not
@@ -32,8 +35,8 @@ nothing you need to do differently if you end up filing nothing — an empty pas
 exactly the pass that must not repeat. If you want the verdict without consuming a
 pass (debugging the lane by hand), use `peek` in place of `check`.
 
-The gate fails **open**: if it cannot read HEAD, or the marker is unreadable, it
-says `PROCEED`. Do not second-guess a `PROCEED` and skip anyway — a lane that
+The gate fails **open**: if it cannot resolve the repo's HEAD or its tree, or the
+marker is unreadable, it says `PROCEED`. Do not second-guess a `PROCEED` and skip anyway — a lane that
 quietly stops running is a worse failure than one that runs once too often.
 
 ## The bar: evidence, not taste

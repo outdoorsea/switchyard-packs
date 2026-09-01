@@ -26,12 +26,30 @@
 # started the session: the scout's own first action. See the "Gate" section of
 # agents/refactor-scout/prompt.template.md.
 #
-# THE KEY: HEAD sha, with a small allowance of passes per sha
-# (REFACTOR_SCAN_PASSES_PER_SHA, default 2). A strict once-per-sha gate is
-# cheapest, but a repo whose first pass was under-served then gets no second look
-# until somebody happens to commit. Allowing exactly one re-look bounds that
-# without reopening the loop: a pinned clone that never moves costs two passes
-# total, ever, instead of two a day.
+# THE KEY: HEAD's TREE object — `rev-parse HEAD^{tree}` — with a small allowance
+# of passes per tree (REFACTOR_SCAN_PASSES_PER_SHA, default 2). A strict
+# once-per-tree gate is cheapest, but a repo whose first pass was under-served
+# then gets no second look until somebody happens to commit. Allowing exactly one
+# re-look bounds that without reopening the loop: a pinned clone that never moves
+# costs two passes total, ever, instead of two a day.
+#
+# WHY THE TREE AND NOT THE COMMIT (switchyard PRD #413). The premise this key
+# stands in for is about CONTENT: an unmoved repo means "a scan now re-derives
+# the same ranking from the same history". The commit sha only approximates that,
+# and the approximation breaks on exactly the commit kind this fleet produces
+# most. Across switchyard-forge's 207 commits there are 80 merges, and 42 of them
+# (52.5%) have a tree byte-identical to a parent. Each such commit is a new sha
+# over unchanged content, so a sha-keyed marker RESET the count: one tree seen
+# under N shas bought 2N passes instead of 2. Measured: three passes against a
+# ceiling of two. Keying on the tree spends the allowance per unit of content, so
+# tree-identical merges — and empty or message-only commits, which have the same
+# shape — share one allowance between them.
+#
+# The env var keeps its shipped name (…_PASSES_PER_SHA) so a city that already
+# sets it does not silently lose its setting; the "SHA" in it now names the tree
+# sha. A marker written by the previous, commit-keyed build holds a commit sha,
+# which can never equal a tree sha, so it simply fails to match and authorises
+# one more pass — the fail-open direction, and a one-off cost per rig.
 #
 # FAIL OPEN, DELIBERATELY. Every unreadable state — no git, no state dir, a
 # corrupt marker — answers PROCEED. A broken gate that fails closed would silently
@@ -61,17 +79,28 @@ case "$PASSES_PER_SHA" in ''|*[!0-9]*) PASSES_PER_SHA=2 ;; esac
 SLUG="$(printf '%s' "$RIG" | sed 's/[^A-Za-z0-9._-]/_/g')"
 STATE="$(sy_state_dir)/refactor-scan.$SLUG.state"
 
+# TWO IDENTITIES, DELIBERATELY. The TREE is what the gate decides on; the COMMIT
+# is what it says out loud. A human reading the lane's log recognises the sha
+# `git log` just printed them, not the tree object behind it, so a verdict that
+# named only the tree would read as a bug on the one case this change makes
+# possible: HEAD moved, the gate still says SKIP (a merge or a message-only
+# commit). Every verdict below therefore prints the commit AND the tree.
+#
+# `HEAD^{tree}` stays quoted. The script is /bin/sh, but it is also hand-run, and
+# in zsh a bare `HEAD^{tree}` is eaten as a glob/brace expression before git ever
+# sees the revspec.
 head="$(git -C "$REPO" rev-parse HEAD 2>/dev/null | awk 'NF' | head -n1)"
+tree="$(git -C "$REPO" rev-parse "HEAD^{tree}" 2>/dev/null | awk 'NF' | head -n1)"
 
 # Read the marker, which is EXACTLY one line of EXACTLY two fields:
-#   <40-hex-sha> <decimal-count>
+#   <40-hex-tree-sha> <decimal-count>
 #
 # Anything else — extra fields, extra lines, a short or non-hex sha, a non-numeric
 # count, an empty file — is treated as ABSENT, which resolves to PROCEED. The
 # validation is strict on purpose: a lenient read of a corrupt marker such as
 # "<sha> 2 extra" would parse a count of 2 out of a file we cannot actually trust
 # and answer SKIP, which is the one direction this gate must never fail in.
-last_sha=""; last_n=0
+last_tree=""; last_n=0
 if [ -f "$STATE" ]; then
   _parsed="$(awk '
     NR > 1      { bad = 1; exit }
@@ -82,19 +111,19 @@ if [ -f "$STATE" ]; then
     END { if (!bad && sha != "") print sha, n+0 }
   ' "$STATE" 2>/dev/null)"
   if [ -n "$_parsed" ]; then
-    last_sha="${_parsed% *}"
+    last_tree="${_parsed% *}"
     last_n="${_parsed#* }"
   fi
 fi
 
-# gate_stamp N — persist "<head> N" via temp file + rename, so a pass killed
+# gate_stamp N — persist "<tree> N" via temp file + rename, so a pass killed
 # mid-write cannot leave a half-line. A failed write is silent and non-fatal: the
 # marker simply stays where it was, and the lane gets one more pass rather than
 # being retired by a disk problem.
 gate_stamp() {
   mkdir -p "$(dirname "$STATE")" 2>/dev/null || return 0
   _tmp="$STATE.$$"
-  if printf '%s %s\n' "$head" "$1" > "$_tmp" 2>/dev/null; then
+  if printf '%s %s\n' "$tree" "$1" > "$_tmp" 2>/dev/null; then
     mv -f "$_tmp" "$STATE" 2>/dev/null || rm -f "$_tmp" 2>/dev/null
   else
     rm -f "$_tmp" 2>/dev/null
@@ -103,18 +132,21 @@ gate_stamp() {
 
 case "$MODE" in
 check|peek)
-  if [ -z "$head" ]; then
-    echo "PROCEED: cannot read HEAD of $REPO — gate fails open."
+  # Either identity unreadable is the fail-open case. The tree is the one the
+  # decision needs, but a repo that can produce a tree and not a HEAD is broken
+  # in some way this gate has no business ruling on either.
+  if [ -z "$head" ] || [ -z "$tree" ]; then
+    echo "PROCEED: cannot read HEAD or its tree in $REPO — gate fails open."
     exit 0
   fi
-  if [ "$head" != "$last_sha" ]; then
+  if [ "$tree" != "$last_tree" ]; then
     n=1
-    reason="$RIG is at $head; last scanned '${last_sha:-<never>}'."
+    reason="$RIG is at $head (tree $tree); last scanned tree '${last_tree:-<never>}'."
   elif [ "$last_n" -lt "$PASSES_PER_SHA" ]; then
     n=$((last_n + 1))
-    reason="$RIG still at $head; this is pass $n of the $PASSES_PER_SHA allowed at this commit."
+    reason="$RIG is at $head, whose tree $tree is the one last scanned; this is pass $n of the $PASSES_PER_SHA allowed at this content."
   else
-    echo "SKIP: $RIG is unchanged at $head and has already had $last_n pass(es) at this commit. The evidence window has not moved — a scan now would re-derive the same ranking. Exit the turn without reading anything."
+    echo "SKIP: $RIG is at $head, whose tree $tree has already had $last_n pass(es). The commit sha may have moved — a merge or a message-only commit does that without changing a byte — but the evidence window has not, so a scan now would re-derive the same ranking. Exit the turn without reading anything."
     exit 10
   fi
   # `check` STAMPS THE PASS ITSELF. It deliberately does not defer that to a
@@ -123,14 +155,15 @@ check|peek)
   #  1. A separate end-of-turn record is one more instruction the scout has to
   #     obey, and forgetting it restores the exact unbounded loop this gate
   #     exists to close — the worst possible failure, reintroduced by omission.
-  #  2. Two commands means two independent reads of HEAD. If HEAD advanced
-  #     between them, the pass that actually scanned commit A would be recorded
-  #     against commit B, and B could then be skipped having never been scanned.
-  #     One read and one write cannot race with themselves.
+  #  2. Two commands means two independent reads of the tree. If the repo
+  #     advanced between them, the pass that actually scanned tree A would be
+  #     recorded against tree B, and B could then be skipped having never been
+  #     scanned. One read and one write cannot race with themselves.
   #
   # The accepted cost: a session that dies after the gate still consumes an
-  # allowance. That is a bounded, self-healing loss — the next commit resets the
-  # count — and it also caps runaway spawning by sessions that crash on startup.
+  # allowance. That is a bounded, self-healing loss — the next change to the tree
+  # resets the count — and it also caps runaway spawning by crash-on-start
+  # sessions.
   # Use `peek` for the read-only form when inspecting the lane by hand.
   [ "$MODE" = "peek" ] || gate_stamp "$n"
   echo "PROCEED: $reason"

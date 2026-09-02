@@ -1,10 +1,14 @@
 #!/bin/sh
-# refactor-scan-gate check|peek RIG REPO — decide whether a refactor-scout pass
-# against REPO is worth paying for.
+# refactor-scan-gate check|peek|record|notes RIG REPO — decide whether a
+# refactor-scout pass against REPO is worth paying for, and carry what a pass
+# examined forward to the next one at the same content.
 #
 #   check  the gate proper: answers PROCEED or SKIP, and stamps the pass it just
 #          authorised. NOT read-only — one call per pass, at the top of the pass.
 #   peek   the same verdict without stamping, for inspecting the lane by hand.
+#   record RIG REPO CANDIDATE [REASON] — file one examined-and-discarded
+#          candidate against the tree in force. Bounded; see THE PASS RECORD.
+#   notes  print the record retained for the tree in force, or nothing.
 #
 # WHY THIS EXISTS (switchyard issue 163). The refactor-scout's evidence is a
 # 6-month git window over one repo. Two passes at the same commit derive the same
@@ -64,7 +68,7 @@ set -u
 # Keep these :? messages free of quotes, apostrophes and parentheses — the word
 # inside ${...} is still parsed for quoting, so a lone apostrophe in a usage
 # string opens a quote and breaks the whole file at parse time.
-MODE="${1:?refactor-scan-gate: MODE is required - check or peek}"
+MODE="${1:?refactor-scan-gate: MODE is required - check, peek, record or notes}"
 RIG="${2:?refactor-scan-gate: RIG is required}"
 REPO="${3:?refactor-scan-gate: REPO is required - path to the rig repo}"
 
@@ -162,6 +166,146 @@ gate_stamp() {
   fi
 }
 
+# ---------------------------------------------------------------------------
+# THE PASS RECORD (switchyard PRD #413 P1) — what a pass examined and threw out.
+#
+# The marker above says a pass HAPPENED. It says nothing about what that pass
+# looked at, so a second pass at the same tree re-derives the first pass's
+# discards before it can discover it is repeating itself — measured on one rig,
+# the opening third of a pass, bought nothing. The record is where a pass leaves
+# what it examined and rejected, so the next one starts from those rather than
+# re-walking to them.
+#
+# A SIDECAR, NOT MORE FIELDS ON THE MARKER. The marker is EXACTLY one line of
+# EXACTLY three fields and its reader rejects anything else into the fail-open
+# path. That strictness is the whole reason a superseded marker cannot be
+# misread, so the record must not be smuggled into it: appending lines would make
+# every marker this build writes unreadable to the builds already deployed across
+# the fleet, and they would each answer PROCEED forever. Two files, one key: the
+# sidecar carries the same KEY_KIND tag and the same tree sha, so the record and
+# the allowance are spent against the same unit of content.
+#
+# BOUNDED BY CONSTRUCTION (crit:1e59d388fd77). Three bounds, all enforced on
+# WRITE, so the file on disk is never larger than the ceiling even for an instant:
+#
+#   NOTE_MAX_ENTRIES   the most recent N records are kept; an N+1st evicts the
+#                      oldest. FIFO, not "append and hope something prunes".
+#   NOTE_MAX_CANDIDATE the candidate is truncated to this many bytes.
+#   NOTE_MAX_REASON    the reason is truncated to this many bytes.
+#
+# so the file cannot exceed NOTE_MAX_ENTRIES x NOTE_MAX_LINE bytes — 12 x 568,
+# under 7 KiB — no matter how many passes run, how many candidates each records,
+# or how long the strings it is handed are. NOTE_MAX_LINE is derived from the
+# other three rather than chosen, so the ceiling cannot drift from the caps that
+# produce it; note_read drops any line longer than it, which is how a file some
+# other hand grew is brought back under the bound instead of being served.
+#
+# DISCARDED WHEN THE TREE MOVES. The record is evidence about one tree, and a
+# tree that has moved makes it evidence about nothing. It is dropped in two
+# places, deliberately both:
+#
+#   - `check` unlinks the sidecar on the branch where the tree has moved. That is
+#     the active discard, and it runs once per pass at the top of the pass, so a
+#     rig that scans a new tree carries no bytes from the old one.
+#   - note_read serves only lines tagged with the key in force AND the tree in
+#     force, and note_record rewrites the file from that filtered read. So a
+#     sidecar left behind by a crash, a copy, or a build that never ran `check`
+#     is inert on read and gone on the next write.
+#
+# One rule would have done for the happy path; the pair is what makes "discarded"
+# true of the bytes on disk and not merely of what the reader chooses to believe.
+#
+# PRINTABLE ASCII, ONE RECORD PER LINE. The record is line-oriented and
+# tab-delimited, so a candidate or reason carrying a newline or a tab could
+# otherwise forge a second entry — including one tagged with a different tree.
+# note_clean maps every byte outside printable ASCII to a space before
+# truncating, which closes that and makes the byte caps exact (a byte is a
+# character in this alphabet, so no multibyte character is ever cut in half).
+# The cost is that non-ASCII text in a path or a reason is blanked, which is a
+# legibility loss in the record and never a wrong decision by the gate.
+#
+# FAIL OPEN, like everything else here. Every failure to read or write the
+# record is silent and non-fatal: a scout whose note could not be saved has
+# still done its pass, and a gate that aborted a pass over a sidecar would be
+# failing in the one direction this script must never fail in.
+NOTES="$(sy_state_dir)/refactor-scan.$SLUG.notes"
+NOTE_MAX_ENTRIES=12
+NOTE_MAX_CANDIDATE=120
+NOTE_MAX_REASON=400
+# kind + TAB + 40-hex + TAB + candidate + TAB + reason + newline.
+NOTE_MAX_LINE=$((${#KEY_KIND} + 1 + 40 + 1 + NOTE_MAX_CANDIDATE + 1 + NOTE_MAX_REASON + 1))
+# A file this writer never produces: note_read stops here rather than walking a
+# sidecar something else grew, so a corrupt one costs a bounded read, not a hang.
+NOTE_SCAN_LIMIT=200
+
+# note_clean MAX TEXT — TEXT reduced to at most MAX bytes of printable ASCII.
+# TEXT arrives through the environment, not argv: an awk operand that looks like
+# `name=value` is consumed as a variable assignment, and a reason such as
+# "coupling=high" is an ordinary thing for a scout to write.
+note_clean() {
+  NOTE_CLEAN_TEXT="$2" LC_ALL=C awk -v max="$1" 'BEGIN {
+    s = ENVIRON["NOTE_CLEAN_TEXT"]
+    gsub(/[^ -~]/, " ", s)
+    if (length(s) > max) s = substr(s, 1, max)
+    printf "%s", s
+  }' </dev/null 2>/dev/null
+}
+
+# note_read — the retained record for the tree in force, one entry per line, in
+# the order it was written. Anything tagged with another key kind or another
+# tree, malformed, or over the line bound is not this tree's evidence and is not
+# emitted; the last NOTE_MAX_ENTRIES survivors are, so even a file grown by some
+# other hand is served under the same bound the writer enforces.
+note_read() {
+  [ -f "$NOTES" ] || return 0
+  LC_ALL=C awk -F'\t' \
+    -v kind="$KEY_KIND" -v want="$tree" \
+    -v max="$NOTE_MAX_ENTRIES" -v maxlen="$NOTE_MAX_LINE" \
+    -v scan="$NOTE_SCAN_LIMIT" '
+    NR > scan              { exit }
+    NF != 4                { next }
+    $1 != kind             { next }
+    $2 != want             { next }
+    length($0) + 1 > maxlen { next }
+    { keep[++k] = $0 }
+    END {
+      start = (k > max ? k - max : 0)
+      for (i = start + 1; i <= k; i++) print keep[i]
+    }
+  ' "$NOTES" 2>/dev/null
+}
+
+# note_record CANDIDATE REASON — append one entry, then re-apply every bound.
+# The file is rewritten from note_read rather than appended to, which is what
+# makes the caps hold on disk rather than only in the reader: eviction, the
+# line bound and the tree filter are all applied by the same write. Temp file
+# plus rename, so a pass killed mid-write cannot leave a half-line.
+note_record() {
+  [ -n "$tree" ] || return 0
+  # A record naming no candidate is evidence about nothing and would only spend
+  # an entry, so it is dropped before it can evict a record that names one.
+  _cand="$(note_clean "$NOTE_MAX_CANDIDATE" "$1")"
+  _bare="$(printf '%s' "$_cand" | tr -d ' ')"
+  [ -n "$_bare" ] || return 0
+  _reason="$(note_clean "$NOTE_MAX_REASON" "$2")"
+  mkdir -p "$(dirname "$NOTES")" 2>/dev/null || return 0
+  _tmp="$NOTES.$$"
+  if {
+    note_read
+    printf '%s\t%s\t%s\t%s\n' "$KEY_KIND" "$tree" "$_cand" "$_reason"
+  } | tail -n "$NOTE_MAX_ENTRIES" >"$_tmp" 2>/dev/null; then
+    mv -f "$_tmp" "$NOTES" 2>/dev/null || rm -f "$_tmp" 2>/dev/null
+  else
+    rm -f "$_tmp" 2>/dev/null
+  fi
+}
+
+# note_discard — drop the record outright. Called where the tree has moved, so
+# the bytes go with the evidence they were about.
+note_discard() {
+  rm -f "$NOTES" 2>/dev/null || :
+}
+
 case "$MODE" in
 check|peek)
   # Either identity unreadable is the fail-open case. The tree is the one the
@@ -174,6 +318,14 @@ check|peek)
   if [ "$tree" != "$last_tree" ]; then
     n=1
     reason="$RIG is at $head (tree $tree); last scanned tree '${last_tree:-<never>}'."
+    # THE RECORD GOES WITH THE TREE IT WAS ABOUT (crit:1e59d388fd77). This is the
+    # branch that means "different content", so any sidecar still on disk is a
+    # note about a tree nobody is scanning any more. Unlink it here, at the top
+    # of the pass that supersedes it, rather than leaving it for note_record to
+    # filter out — a rig whose scout files nothing would otherwise keep the old
+    # tree's bytes indefinitely, which is exactly the accumulation this bounds.
+    # `peek` is read-only and discards nothing; it is the hand-inspection mode.
+    [ "$MODE" = "peek" ] || note_discard
   elif [ "$last_n" -lt "$PASSES_PER_SHA" ]; then
     n=$((last_n + 1))
     reason="$RIG is at $head, whose tree $tree is the one last scanned; this is pass $n of the $PASSES_PER_SHA allowed at this content."
@@ -201,8 +353,41 @@ check|peek)
   echo "PROCEED: $reason"
   exit 0
   ;;
+record)
+  # record RIG REPO CANDIDATE [REASON] — leave one examined-and-discarded
+  # candidate in this tree's record. Always exits 0: a note is bookkeeping for
+  # the NEXT pass, and a scout must never lose the pass it is running because
+  # the note could not be filed.
+  CANDIDATE="${4:-}"
+  REASON="${5:-}"
+  if [ -z "$CANDIDATE" ]; then
+    echo "refactor-scan-gate: record needs a CANDIDATE - nothing recorded." >&2
+    exit 0
+  fi
+  if [ -z "$tree" ]; then
+    echo "refactor-scan-gate: cannot read the tree in $REPO - nothing recorded." >&2
+    exit 0
+  fi
+  note_record "$CANDIDATE" "$REASON"
+  exit 0
+  ;;
+notes)
+  # notes RIG REPO — print the record retained for the tree in force, oldest
+  # first, or nothing at all. Read-only, and silent when there is nothing to
+  # say: no record, an unreadable tree and a record about a tree that has since
+  # moved are the same answer, because in each case this pass inherits nothing.
+  [ -n "$tree" ] || exit 0
+  note_read | while IFS="$(printf '\t')" read -r _kind _tree _cand _reason; do
+    if [ -n "$_reason" ]; then
+      echo "- $_cand: $_reason"
+    else
+      echo "- $_cand"
+    fi
+  done
+  exit 0
+  ;;
 *)
-  echo "refactor-scan-gate: unknown mode '$MODE' (want check or peek)" >&2
+  echo "refactor-scan-gate: unknown mode '$MODE' (want check, peek, record or notes)" >&2
   exit 2
   ;;
 esac

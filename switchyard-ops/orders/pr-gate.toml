@@ -22,6 +22,20 @@
 # interval controls detection latency, not mail volume. Tightening it does not
 # make the mayor's inbox noisier; widening it past a tier boundary just delays
 # the first report.
+#
+# THIS ORDER REPORTS; IT DOES NOT WORK (switchyard PRD #360 P2). switchyard now
+# mints a claimable `pr-review` bead per (PR, head sha) once a PR has aged past
+# its review grace window, and a brakeman drains it from the cloud pool: reviews
+# the PR, posts the verdict as evidence, and merges when CI is green. So the
+# tiered path SKIPS any PR whose review bead is open or claimed — the two lanes
+# must not both report one PR, and "nobody has picked this up" is simply false
+# while somebody has. The skip is a deferral, not a decision: it does not consume
+# the PR's tier, so a review that closes with the PR still unmerged (a
+# `request_changes` verdict is exactly that) is escalated on the next sweep.
+# An unreachable switchyard defers NOTHING — the gate reports as it always did
+# rather than going quiet on a bad read. Pinned by
+# assets/scripts/pr-gate.test.sh; promotion PRs are never probed, having no
+# review bead by construction.
 [order]
 description = "Report open item PRs aging past the review SLA, and integration PRs awaiting PRD acceptance, so published-but-unmerged work reaches the mayor"
 trigger = "cooldown"

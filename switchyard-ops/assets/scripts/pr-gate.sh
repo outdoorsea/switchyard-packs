@@ -51,9 +51,33 @@
 #     main and rebuilt. That is a legitimate long wait against a checkable
 #     state, NOT a stall, so it is reported for awareness at a much wider tier
 #     and never framed as a fault.
+#
+# DEFERRAL TO THE WORKING LANE — switchyard PRD #360 P2.
+# The premise the tiers were written on ("nothing merges an item PR") is no
+# longer unconditional. switchyard now mints a claimable `pr-review` bead per
+# (PR, head sha) once a PR has aged past its review grace window, and a brakeman
+# drains it from the cloud pool: reviews the PR, posts the verdict as evidence,
+# and merges when CI is green. That makes two lanes interested in one PR — this
+# one REPORTS, that one WORKS — and an aged PR now has two readings that demand
+# opposite actions from a mayor: "nobody has picked this up" versus "somebody
+# has, right now". Mailing the second as though it were the first is the same
+# mislabelling the 2026-08-04 correction above removed, so a PR whose review
+# bead is OPEN or CLAIMED is skipped in the tiered (item) path.
+#
+# THE TIER IS NOT CONSUMED BY A SKIP. The exclusion sits AFTER the once-per-tier
+# ledger is consulted and BEFORE it is written, so a deferred PR does not spend
+# its T1: when the review bead closes without the PR merging — a
+# `request_changes` verdict is exactly that — the next sweep finds the tier still
+# unreported and speaks. Writing the key first would convert "somebody is on it"
+# into permanent silence for that tier, which is strictly worse than the
+# double-report it set out to fix.
+#
+# Integration PRs are never probed: a promotion PR mints no review bead by
+# construction, so asking would spend a call to learn nothing.
 set -u
 
 . "$(dirname "$0")/../lib/roster.sh"
+. "$(dirname "$0")/../lib/switchyard-api.sh"
 
 sy_load_conf
 
@@ -98,11 +122,30 @@ trap 'rm -rf "$TMP"' EXIT INT TERM
 : > "$TMP/stalled"
 : > "$TMP/awaiting"
 
+# The switchyard reads that the deferral needs, resolved ONCE per sweep: the bearer
+# token and the project list it can reach. A sweep walks every rig, so re-reading
+# the list per rig would both cost a call each time and let a mid-cycle blip
+# answer differently for two rigs in the same pass.
+#
+# Both are ADVISORY. Empty means "cannot tell", and every consumer below then
+# behaves exactly as this order did before the deferral existed: it reports. A
+# switchyard that is down must not be able to silence a gate.
+sy_token="$(sy_api_token)"
+sy_projects=""
+[ -n "$sy_token" ] && sy_projects="$(sy_api_projects "$sy_token")"
+
 for rig in $(gc rig list --json 2>/dev/null | jq -r '(if type=="array" then . else (.rigs // []) end)[] | .name' 2>/dev/null); do
   default_branch=$(gc rig list --json 2>/dev/null | jq -r --arg r "$rig" '
     (if type=="array" then . else (.rigs // []) end)[]
     | select(.name==$r) | (.default_branch // "main")' 2>/dev/null)
   [ -n "$default_branch" ] || default_branch=main
+
+  # The switchyard project this rig drives, for the pr-review deferral below.
+  # Empty on every uncertain answer — no binding, a slug matching two workspaces,
+  # an unreadable project list — and an unresolvable project simply defers
+  # nothing, so a rig switchyard cannot place is reported exactly as before.
+  sy_project=""
+  [ -n "$sy_projects" ] && sy_project="$(sy_project_for_rig "$rig" "$sy_projects")"
 
   # `gc bd list` from the city root sees only the town ledger, so every read
   # must name its rig explicitly.
@@ -146,8 +189,11 @@ for rig in $(gc rig list --json 2>/dev/null | jq -r '(if type=="array" then . el
       continue  # not a github PR url; nothing this order can check
     fi
 
+    # headRefOid rides along for the pr-review deferral: switchyard keys a review
+    # bead on (repo, number, HEAD SHA) and retires the bead of a superseded sha,
+    # so the PR's current head is the only one anybody can be holding.
     meta=$(gh pr view "$num" --repo "$slug" \
-            --json state,baseRefName,headRefName,createdAt,reviewDecision,mergeable \
+            --json state,baseRefName,headRefName,headRefOid,createdAt,reviewDecision,mergeable \
             2>/dev/null)
     if [ -z "$meta" ]; then
       : > "$TMP/gh_broken"
@@ -159,6 +205,7 @@ for rig in $(gc rig list --json 2>/dev/null | jq -r '(if type=="array" then . el
 
     base=$(printf '%s' "$meta" | jq -r '.baseRefName // ""')
     head=$(printf '%s' "$meta" | jq -r '.headRefName // ""')
+    head_sha=$(printf '%s' "$meta" | jq -r '.headRefOid // ""')
     created=$(printf '%s' "$meta" | jq -r '.createdAt // ""')
     review=$(printf '%s' "$meta" | jq -r '.reviewDecision // ""')
     mergeable=$(printf '%s' "$meta" | jq -r '.mergeable // ""')
@@ -189,6 +236,27 @@ for rig in $(gc rig list --json 2>/dev/null | jq -r '(if type=="array" then . el
 
     key="$rig/$id#$num:$tier"
     grep -qxF "$key" "$SEEN" 2>/dev/null && continue
+
+    # DEFER TO THE WORKING LANE (switchyard PRD #360 P2) — the header's DEFERRAL
+    # note carries the reasoning. Three properties of the placement matter:
+    #
+    #   AFTER the ledger read, so a PR already reported at this tier costs no API
+    #   call, and BEFORE the ledger write, so a deferral does not spend the tier.
+    #
+    #   TIERED CLASSES ONLY. An integration PR is a promotion, which mints no
+    #   review bead by construction; probing one would spend a call to learn
+    #   nothing. The tiered path covers both `gc-item-*` heads and the `other`
+    #   class, because the mint is keyed on the PR being non-promotion content
+    #   rather than on a branch-name convention — excluding only literal item
+    #   branches would leave the rest double-reported.
+    #
+    #   FAIL OPEN. sy_pr_review_live is false for every uncertain answer, so an
+    #   unreachable switchyard leaves this order reporting as it always did.
+    if [ "$class" != integration ] &&
+       sy_pr_review_live "$sy_project" "$slug" "$num" "$head_sha" "$sy_token"; then
+      continue
+    fi
+
     printf '%s\n' "$key" >> "$SEEN"
 
     line="  $rig/$id  $url

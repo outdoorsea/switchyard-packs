@@ -224,3 +224,90 @@ sy_project_for_rig() {
         then "\(.[0].tenant_slug)/\(.[0].slug)"
         else empty end' 2>/dev/null | awk 'NF' | head -n1
 }
+
+# --- THE PR-REVIEW LANE'S LIVE-WORK PROBE (switchyard PRD #360 P2) -----------
+#
+# One question, asked from an ORDER: is a worker already on this pull request?
+# switchyard mints a claimable `pr-review` bead per (PR, head sha) once a PR has
+# aged past the review grace window, and a brakeman drains it from the cloud
+# pool. A reporting order that does not know this escalates the very PR the
+# working lane is holding, so the mayor is mailed about work that is already
+# moving — the double-report pr-gate's tier exclusion exists to prevent.
+#
+# NO NEW SERVER SURFACE. The probe is built from two things switchyard already
+# publishes: the bead id is a PURE FUNCTION of (repo, number, head sha)
+# (db.PRReviewBeadID — that determinism is what makes the mint exactly-once), and
+# GET /beads/{id}/delivery-evidence is a documented, project-scoped, 404-over-403
+# read that reports the bead's `status`. Deriving the id here rather than
+# listing the pool is what lets the probe see a CLAIMED bead: the pool read only
+# ever returns unclaimed work, so it answers "nobody has started" — the opposite
+# of the question. The one cost is that the derivation is stated twice, in Go and
+# here; TestPRReviewBeadIDShellDerivationMatches (internal/db) executes THIS
+# function and compares, so a change to either side reds a test instead of
+# silently switching the probe off.
+#
+# FAILS OPEN, in the reporting direction. Every one of these answers "not live"
+# when it cannot be sure — no token, no digest tool, an unreachable switchyard, a
+# 404, a body it cannot parse — so an unreadable switchyard leaves the caller
+# reporting exactly as it did before the probe existed. The inverse default would
+# let one bad read silence a whole gate, which is the failure class this pack
+# exists to catch.
+
+# sy_sha256_hex — the hex sha256 of STDIN, or empty when no digest tool exists.
+#
+# Three spellings because the pack runs on macOS controllers (shasum, from perl)
+# and Linux runners (sha256sum) alike, with openssl as the last resort. Each
+# prints the digest first except openssl, which prints it last.
+sy_sha256_hex() {
+  if command -v shasum >/dev/null 2>&1; then shasum -a 256 2>/dev/null | awk '{print $1}'; return 0; fi
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum 2>/dev/null | awk '{print $1}'; return 0; fi
+  if command -v openssl >/dev/null 2>&1; then openssl dgst -sha256 2>/dev/null | awk '{print $NF}'; return 0; fi
+  return 0
+}
+
+# sy_pr_review_bead_id REPO NUMBER HEAD_SHA — the pool bead id switchyard mints
+# to review that pull request at that head, or EMPTY when it cannot be derived.
+#
+# Mirrors db.PRReviewBeadID exactly: sha256 over `repo\0number\0head_sha`, the
+# first 12 hex digits, prefixed `prreview-<number>-`. The NUL separators are what
+# stop two different tuples colliding by concatenation, so they are not cosmetic.
+# Arguments are used verbatim — the Go side only trims surrounding whitespace and
+# does not case-fold, so the repo slug must be the canonical `owner/name` the PR
+# URL carries.
+sy_pr_review_bead_id() {
+  [ -n "${1:-}" ] && [ -n "${2:-}" ] && [ -n "${3:-}" ] || return 0
+  _sprbi_hash="$(printf '%s\000%s\000%s' "$1" "$2" "$3" | sy_sha256_hex | cut -c1-12)"
+  [ -n "$_sprbi_hash" ] || return 0
+  printf 'prreview-%s-%s' "$2" "$_sprbi_hash"
+}
+
+# sy_pr_review_live PROJECT REPO NUMBER HEAD_SHA TOKEN — exit 0 ONLY when
+# switchyard confirms an OPEN or CLAIMED pr-review bead for that pull request at
+# that head sha. Any other answer, including every failure, exits non-zero.
+#
+# `status <> closed` IS the criterion's "open or claimed": beads_mirror moves
+# open -> claimed -> in_progress -> closed, so the live states are exactly the
+# ones the working lane can still act on. A CLOSED bead is deliberately not live
+# — a review that landed a `request_changes` verdict leaves the PR unmerged and
+# nobody holding it, which is precisely when the reporting lane should speak
+# again.
+#
+# The head sha matters: switchyard retires a bead whose sha has been superseded,
+# so the bead for the PR's CURRENT head is the only one anybody is working.
+sy_pr_review_live() {
+  [ -n "${1:-}" ] || return 1   # no project resolved for this rig
+  [ -n "${5:-}" ] || return 1   # no token
+  command -v jq >/dev/null 2>&1 || return 1
+
+  _sprl_bead="$(sy_pr_review_bead_id "${2:-}" "${3:-}" "${4:-}")"
+  [ -n "$_sprl_bead" ] || return 1
+
+  _sprl_body="$(sy_api_get "/api/v1/projects/$1/beads/$_sprl_bead/delivery-evidence" "$5")"
+  [ -n "$_sprl_body" ] || return 1   # 404 (no such bead), or unreachable
+
+  _sprl_status="$(printf '%s' "$_sprl_body" | jq -r '.status // ""' 2>/dev/null)"
+  case "$_sprl_status" in
+    "" | closed) return 1 ;;
+    *) return 0 ;;
+  esac
+}

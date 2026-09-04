@@ -43,6 +43,13 @@
 # Configuration lives in roster.conf (all optional):
 #   STAGING_PROMOTE_RIGS  ""       rigs whose staging is promoted; empty = lane off
 #   STAGING_PROMOTE_FROM  staging  branch promoted into the rig default branch
+#
+# THE LANE'S FULL CONTRACT — what mints a review job, what merges, what is
+# never merged, the CodeRabbit fallback and every switch — is
+# docs/pr-review-lane.md in the switchyard repo these packs ship from, and is
+# reachable from packs/README.md's order manifest. Read it before changing
+# this order: a promotion PR is the one thing the review-and-merge lane
+# never merges, and this order is the only path by which one lands.
 [order]
 description = "Open and merge the staging-to-main promotion PR whenever staging is ahead and the combination proves green"
 trigger = "cooldown"

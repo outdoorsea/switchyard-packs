@@ -50,6 +50,14 @@
 #   REVIEW_LANE_HOLD_LABEL  do-not-merge  label that exempts a PR from the lane
 #   REVIEW_LANE_MARKER      Verdict: APPROVE  the approve literal (MUST match merge-lane's)
 #   REVIEW_ASSIGNMENT_TTL   5400          seconds an undelivered assignment suppresses re-dispatch
+#
+# THE LANE'S FULL CONTRACT — what mints a review job, what merges, what is
+# never merged, the CodeRabbit fallback and every switch — is
+# docs/pr-review-lane.md in the switchyard repo these packs ship from, and is
+# reachable from packs/README.md's order manifest. Read it before changing
+# this order: the marker literal this lane posts is the one merge-lane
+# matches, and a paraphrase in either place merges nothing while looking healthy
+# from both sides.
 [order]
 description = "Dispatch a reviewer session onto each open PR lacking a finished review on its current head, one PR per nudge, so merge-lane's review bar is met rather than starved"
 trigger = "cooldown"

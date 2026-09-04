@@ -197,10 +197,13 @@ eight orders, and a number in prose is the part nobody updates.
 | `pool-spawn` | 1m | Spawn one brakeman per rig with claimable pool demand and a free WIP slot, then direct-assign it the demand bead |
 | `publish-gate` | 5m | Report worker beads that reached *closed* carrying no pull request |
 | `pane-stall` | 10m | Report sessions idling with unsubmitted text on their input line — a stall no liveness check can see |
+| `merge-lane` | 10m | Merge reviewed, CI-green PRs into the integration base, one per rig per run — the pack's only `gh pr merge` for item PRs ([lane contract](../docs/pr-review-lane.md)) |
+| `review-sweep` | 15m | Dispatch a fallback reviewer onto one PR per nudge whose current head lacks a finished review, so `merge-lane`'s bar is met rather than starved ([lane contract](../docs/pr-review-lane.md)) |
 | `answer-sweep` | 20m | Keep one answerer alive per rig whose open-question queue is non-empty; reaps its own finished sessions first |
 | `judge-sweep` | 30m | Keep one judging-validator alive per rig whose judgment queue is non-empty; reaps its own finished sessions first |
 | `loop-health` | 30m | Pinned coordinators alive; escalate when the status probe lies |
 | `pr-gate` | 30m | Report open item PRs aging past the review SLA, and integration PRs awaiting PRD acceptance |
+| `staging-promote` | 30m | Promote the integration branch into the default branch through a promotion PR gated on its own trial-merge checks ([lane contract](../docs/pr-review-lane.md)) |
 | `integration-lane` | 2h | Bundle the currently-mergeable PRs onto one integration branch, test the **combination**, and hand the mayor one reviewable merge — it never merges |
 | `intake-sweep` | 4h | Nudge coordinators to triage their switchyard project, and enrich a bead from its PRD before slinging it |
 | `stray-reaper` | 6h | Sessions rooted at a stale city path |
@@ -223,9 +226,26 @@ nothing to hand off — only a session to start. Both run the same script
 **reap-then-spawn**, in that order.
 
 The ordering is load-bearing in both directions. Reaping first means the
-"is one already running?" guard is answered by a roster that no longer holds
+"is one already running?" guard is not answered by a roster still holding
 finished sessions; spawning after means a lane whose only session was just reaped
 is refilled in the same cycle rather than left unowned until the next one.
+
+**One roster read per cycle, and the reap is subtracted from it.** A cycle takes
+a single `gc session list --json --state all` snapshot up front
+(`SY_SESSION_SNAPSHOT` — the remedy `assets/lib/roster.sh` already documented for
+itself, which nothing had ever set) instead of the two reads per rig it used to
+pay: on the 11-rig city that exposed this, 22 reads became 1, and that alone is
+the difference between a sweep that finishes and one that does not.
+
+The subtlety is that the snapshot is captured *before* the reap while the guard
+is asked *after* it, so a session the reap just closed is still `active` in it.
+`lane_reap` therefore hands the refs it closed to `lane_live_count`, which
+subtracts them; the post-spawn re-probe asks for a **`fresh`** read instead,
+since the session it asks about postdates the snapshot. Dropping that
+subtraction is the plausible-looking simplification that leaves the lane the
+reap just emptied **unstaffed** — a silent stall, strictly worse than the loud
+timeout the snapshot replaced. The self-test's `M1` mutant reverts exactly that
+half and asserts the lane goes unstaffed, so it cannot be re-simplified back in.
 
 Four gates stand between a cycle and a spawn, and each fails in a chosen
 direction:
@@ -234,7 +254,7 @@ direction:
 |---|---|---|
 | rig has this lane's agent | the agent is not defined for the rig | falls back to the coordinator set |
 | rig not suspended | `gc rig suspend` names it | **spawns** — an unreadable `gc rig list` withholds nothing |
-| no live session already | one is already running | **does not spawn** — never stack a second |
+| no live session already | one is already running **and** its heartbeat is fresh | **does not spawn** — never stack a second |
 | lane queue non-empty | the queue is a confident `0` | **spawns** — only a confident zero withholds |
 
 A suspended rig is skipped for the *spawn* but still **reaped**: `gc rig suspend`
@@ -267,6 +287,85 @@ purpose: do not unify them.
 > reaped mid-validation leaves its claim staked until the lease expires on its
 > own. Reaping only closes the session.
 
+### Already running is not already working
+
+`lane_live_count` reads the session roster, and a roster answer is a statement
+about a *process*, not about work. A headless session exits when its pass ends
+and settles as `asleep` — the assumption the "no live session already" gate was
+built on. An `opencode` TUI does not: it returns to its prompt and stays `active`
+indefinitely. The judging lane sat that way for three days while `gc status`,
+tmux and switchyard's own agent roster all read healthy (switchyard PRD #329).
+
+So a rig that already has a live session is no longer simply skipped. It is asked
+a second question — **is that session still working?** — and the answer is the
+server's, not this script's: `briefing.liveness.agents[].state` is already
+computed against the project's own `stale_after_minutes`, so the threshold lives
+with the project that owns it and the shell never reimplements staleness
+arithmetic where it would drift from every other reader's answer. Any `fresh` ref
+for the lane wins, since two refs mid-handover still mean someone is working.
+
+A confidently stale heartbeat with real work waiting escalates **one rung per
+cycle**. The rung taken is printed to the order's own stdout — beside the
+`order exec` line an operator triaging a quiet lane is already reading — and
+remembered in a per-`(agent, rig)` marker under the pack state dir:
+
+| Rung | Lever | Why it sits here |
+|---|---|---|
+| `nudge` | `gc session nudge` | destroys nothing, so it is safe to spend on a merely *suspected* stall |
+| `reset-wake` | `gc session reset` **then** `gc session wake` | discards context, so not first; `reset` alone leaves the session `asleep`, so the pair is the rung |
+| `spawn` | a second session alongside | the only rung that spends a fresh session slot — and it deliberately **stacks**, because the guard that would forbid it counts the zombie as live, which is the reading two rungs have just disproved |
+
+**The recovery test is the heartbeat itself.** The next cycle re-reads it:
+recovered ⇒ the marker is cleared and the *next* stall starts at `nudge` again;
+still stale ⇒ the next rung. Escalation is driven by whether the lever worked,
+not by a clock, so a nudged session that goes back to work is never reset. After
+the top rung the ladder records `spawn-done` and declines, or a lane would
+collect a replacement session every cycle. The stacked session is **not** reaped
+here either: a heartbeat is not pane evidence, and pane evidence is the only
+thing this pack closes a session on.
+
+**This ladder fails CLOSED, which inverts every other gate in the file.** The
+queue check, the suspended-rig guard and the reaper all act when unsure, because
+their error costs a surplus session while their silence costs a stalled lane.
+This lever lands on a session that may be *working*, and interrupting a judge
+mid-criterion destroys work no later cycle recovers — so an unreadable briefing,
+a role with no liveness row, a `suspended` state (a human's deliberate pause) and
+an uncountable queue all decline to escalate. A drained queue is not a stall
+either: nothing to do is correct behaviour, and nudging it would page a working
+city every cycle. Held by the **`lane-idle-heartbeat self-test`** job
+(`bash scripts/lane-idle-heartbeat.test.sh`).
+
+### The sweep bounds its own cycle
+
+A cheaper sweep is still an unbounded one. `judge-sweep` did not complete once
+between 2026-08-04 and 2026-08-08 — 21 consecutive `order exec judge-sweep
+failed: context deadline exceeded` — so for four days nothing was reaped and
+nothing was spawned, and the only symptom was one line in a machine-wide log
+(gc bead `sw-jqrx`). Two knobs bound it, both overridable per city because the
+honest number depends on host load and rig count:
+
+| Knob | Default | Bounds |
+|---|---|---|
+| `LANE_SWEEP_BUDGET_SECONDS` | `600` | the whole sweep; `0` disables the cap for a hand-run debug sweep |
+| `LANE_ROSTER_TIMEOUT` | `120` | the one remaining `gc session list` read |
+
+Both sit deliberately *inside* any plausible order-exec deadline, so a sweep that
+cannot finish **says so** instead of being killed mid-rig with no record. An
+over-budget sweep names the rigs it never reached and states that nothing may be
+concluded about them — different from a rig that was checked and found healthy.
+An unreadable roster **ends** the sweep rather than grinding through per-rig reads
+toward a verdict already determined, since with no roster every rig takes the
+"cannot confirm absent" branch anyway.
+
+Both mail the mayor **once per episode**, through markers keyed per agent so the
+judge and answerer lanes cannot mute each other, and both clear on the first
+clean sweep — so the next occurrence reports again instead of being permanently
+filtered. Fail-open semantics are unchanged throughout: an unknown answer still
+declines to spawn and never fabricates a zero. Held by the **`lane-sweep-budget
+self-test`** job (`bash scripts/lane-sweep-budget.test.sh`), whose two mutants
+each revert one half of the fix — `M1` the reaped-ref subtraction, `M2` the
+snapshot — and require the matching contract to go red.
+
 ### Published before closed
 
 Review before merge used to be the hard part: gastown's refinery defaulted to
@@ -297,6 +396,43 @@ straight to it fails loudly.
 > publish step resolves the repo host from `git remote get-url origin` and uses `gh`
 > or `glab` accordingly; an unrecognised host escalates to the mayor rather than
 > closing the bead.
+
+### Reviewed, then merged — the lane past "PR open"
+
+`publish-gate` and `pr-gate` between them make sure a published PR cannot vanish
+and cannot age silently. Neither *moves* it. Three orders do, and together they
+are the pack's entire merge authority:
+
+- **`review-sweep`** dispatches one `reviewer` session per nudge onto a PR whose
+  current head carries no finished review — the fallback for when the repo's
+  standing reviewer (CodeRabbit) is absent or rate-limited. The verdict is a
+  comment carrying a marker literal, never a GitHub review, because the lane's
+  `gh` identity is usually the PR author's own account.
+- **`merge-lane`** merges a PR into the integration base once the repo's own bar
+  is met on the **current head**: CI green *and* a finished review. One merge per
+  rig per run, oldest first.
+- **`staging-promote`** promotes the integration branch into the default branch
+  through a promotion PR of its own — the only path by which anything reaches a
+  deploying branch. `merge-lane` never merges a promotion, and
+  `integration-lane` never merges anything at all.
+
+Switchyard's server side feeds this from the other end: a pull request that
+targets a configured landing branch, is not a promotion, and still lacks finished
+review evidence after a grace window mints one claimable `prreview-*` pool bead
+per `(PR number, head sha)`, refused to whoever published the PR and closeable
+only against a posted verdict.
+
+**The whole contract — what mints, what merges, what is never merged, the
+CodeRabbit fallback, every switch, and what has not shipped yet — is
+[`docs/pr-review-lane.md`](../docs/pr-review-lane.md)** in the switchyard repo
+these packs live beside. Read it before changing any of the three orders above:
+the marker literal `review-sweep` posts and the one `merge-lane` matches are the
+same string by contract, and a paraphrase in either place merges nothing while
+looking healthy from both sides.
+
+Every one of the three is **off by default**, switched on per rig in
+`roster.conf` (`REVIEW_LANE_RIGS`, `MERGE_LANE_RIGS`, `STAGING_PROMOTE_RIGS`).
+An empty list means the order exits without reading anything.
 
 ### The combination is the only thing nobody measures
 
@@ -661,11 +797,55 @@ misses, because a deletion there reads as a shorter diff, not a lost invariant.
 
 ## The judge: how a criterion gets read
 
-`judge` drains the awaiting-validation backlog: for each criterion carrying a
-merged, attached PR it posts `validate_criterion` with
+`judge` drains the awaiting-validation backlog one PRD at a time: for each
+criterion carrying a merged, attached PR it posts `validate_criterion` with
 `verdict_provenance="judgment"`, the `code_locations` it actually read, and a
 rationale. The server refuses a judgment verdict whose `code_locations` are empty
 (400), and that citation bar is the floor everything below is measured against.
+
+**A pass takes one target PRD.** The bound used to be a cross-PRD spend budget —
+*judge up to 8 criteria this pass* — so a session hopped PRDs, loading a different
+spec, a different set of pull requests and a different diff vocabulary for each,
+and spent its budget on the switching rather than on the judging. The observed end
+state was a session that had read enough unrelated deliveries to start refusing the
+next criterion as *too large*, for three days, while every health surface read fine
+(switchyard PRD #329 P1). A session now takes the **first** `validation_pending`
+entry whose `judge_reachable_crit_labels` is non-empty — the decision inbox already
+arrives ranked, so the lane takes that ranking rather than inventing a second one —
+calls `list_criteria` with `prd_id=<target>`, judges only that PRD, reports, and
+exits. It never **widens** to another PRD's labels mid-pass, and never **carries
+over** into a second PRD after draining one.
+
+The bound is only honest because two things hold it up. `wake_mode = "fresh"`
+(`agents/judge/agent.toml`) hands the next session a clean budget to resume the
+same PRD with — under `resume` the follow-on pass would inherit the spent context
+and meet the same cliff. And **"too large" is neither a verdict, a skip, nor a
+reason to retarget**: a criterion declined for the size of the PRD around it would
+be stranded forever, because every later session would decline it identically.
+Scoping to one PRD *without* that rule would be strictly worse than no bound.
+
+**The one exception is a target the session could not move at all.** A decline
+posts nothing to the server, and reachability does not remember declines —
+`judge_reachable_crit_labels` excludes only criteria already *failed* against
+exactly this delivery — so a head PRD whose remaining reachable criteria are all
+undecidable would be re-selected by every future session, declined wholesale, and
+lane throughput would go to zero behind it. So a session that posted **no verdict
+at all** on a target leaves that PRD exactly as it found it and advances to the
+next non-empty entry, **at most 3 targets in a session**. The trigger is *"I
+posted nothing"*, not *"I would rather judge something else"* — an unconditional
+advance is only the PRD-hopping restored — and the report names what was skipped
+(`ADVANCED past PRD #<id> — all <s> reachable criteria declined.`), because the
+PRD nobody can move is precisely the one a human needs named.
+
+**Report, then exit.** The target, one line per criterion with its verdict, and
+what remains. A judge that worked well and said nothing is indistinguishable from
+one that never received its prompt; and since a decline posts nothing to the
+server, the report is the only place a criterion no session can judge ever reaches
+a human. The bound, the advance and its cap are held by the **`judge
+single-PRD-gate self-test`** job (`bash scripts/judge-single-prd-gate.test.sh`),
+whose assertions are each scoped to their own section's line span — a whole-file
+grep still passes when a rule drifts into the wrong section, which is the misedit
+that guts a rule while leaving every word of it present.
 
 Three rules shape the read, because the failure mode here is not a wrong verdict.
 It is a **false `done`** — which retires a criterion nobody will look at again.

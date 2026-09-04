@@ -36,6 +36,13 @@
 # rather than going quiet on a bad read. Pinned by
 # assets/scripts/pr-gate.test.sh; promotion PRs are never probed, having no
 # review bead by construction.
+#
+# THE LANE'S FULL CONTRACT — what mints a review job, what merges, what is
+# never merged, the CodeRabbit fallback and every switch — is
+# docs/pr-review-lane.md in the switchyard repo these packs ship from, and is
+# reachable from packs/README.md's order manifest. Read it before changing
+# this order: this order REPORTS the PRs that lane WORKS, and the two
+# read the same queue from opposite ends.
 [order]
 description = "Report open item PRs aging past the review SLA, and integration PRs awaiting PRD acceptance, so published-but-unmerged work reaches the mayor"
 trigger = "cooldown"

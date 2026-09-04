@@ -50,6 +50,14 @@
 #   MERGE_LANE_BASE           staging       only PRs against this base are considered
 #   MERGE_LANE_HOLD_LABEL     do-not-merge  label that exempts a PR from the lane
 #   MERGE_LANE_REVIEW_MARKER  Verdict: APPROVE   literal marker a fallback review must carry
+#
+# THE LANE'S FULL CONTRACT — what mints a review job, what merges, what is
+# never merged, the CodeRabbit fallback and every switch — is
+# docs/pr-review-lane.md in the switchyard repo these packs ship from, and is
+# reachable from packs/README.md's order manifest. Read it before changing
+# this order: the marker literal this lane matches is the one review-sweep
+# posts, and a paraphrase in either place merges nothing while looking healthy
+# from both sides.
 [order]
 description = "Merge reviewed, CI-green pull requests into the staging base, one per rig per run, oldest first"
 trigger = "cooldown"

@@ -102,8 +102,19 @@ for rig in $MERGE_LANE_RIGS; do
         [.commits[]
          | select(.messageHeadline | test("^Merge (branch|remote-tracking branch) ") | not)
          | .committedDate] | max // ""' "$TMP/meta.json")
+      # The marker must be its OWN LINE, not a substring anywhere in the body:
+      # a `contains` match reads "I can't give this a `Verdict: APPROVE` until
+      # X" — a comment REFUSING approval — as approval. docs/pr-review-lane.md
+      # asks the reviewer agent to keep the approve literal out of a
+      # request-changes comment, but a convention binds only a cooperating
+      # agent, not a human reviewer or one from another toolchain. Kept
+      # identical to scripts/gh-merge-lane.sh: two lanes merging into one
+      # branch must not disagree about what counts as reviewed.
       fallback=$(jq -r --arg m "$MERGE_LANE_REVIEW_MARKER" --arg t "$last_commit" '
-        [.comments[]? | select(.body | contains($m)) | select(.createdAt > $t)]
+        [.comments[]?
+         | select([.body | split("\n")[] | sub("^[ \t]+"; "") | sub("[ \t\r]+$"; "")]
+                  | any(. == $m))
+         | select(.createdAt > $t)]
         | length' "$TMP/meta.json")
       [ "$fallback" != "0" ] || continue
     fi

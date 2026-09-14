@@ -245,18 +245,24 @@ prepare_worktree() { # <worktree> <logfile>
 
 # De-fang the repo's own PR-content guards when quoting a constituent's title.
 #
-# This lane AUTHORS a pull request into a repo that gates PR text:
-#   `prd-ref guard`   refuses more than one `PRD #N` across title/body/branch
-#   `issue-ref guard` matches the hyphenated `issue-N` bead token
+# This lane AUTHORS a pull request into a repo that gates PR text, and whose
+# webhook ATTACHES a merged PR to every PRD its text references:
+#   `PRD #91`   the global form
+#   `PRD SW-1`  the per-project key form (switchyard PRD #379 taught the
+#               auto-linker and the guard this one too, so it is now just as
+#               much a machine token as the hash form)
+#   `issue-249` the hyphenated bead token the close-loop acts on
 # A bundle body that quoted eight constituent titles verbatim would carry eight
-# `PRD #N` references and red its OWN checks — the lane would reliably produce
-# an unmergeable bundle and blame the constituents. Quote titles with the hash
-# and the hyphen removed: `PRD #91` -> `PRD 91`, `issue-249` -> `issue 249`.
-# The reference is still readable by a human and no longer a machine token.
-# This is the same convention CLAUDE.md prescribes for secondary mentions.
+# references and attach the bundle to all eight PRDs — the lane would reliably
+# produce a bundle that claims deliveries it did not make. Quote titles with the
+# token neutralized: `PRD #91` -> `PRD 91`, `PRD SW-1` -> `SW-1` (a BARE key form
+# is deliberately never a reference), `issue-249` -> `issue 249`. Each stays
+# readable by a human and is no longer a machine token. This is the same
+# convention CLAUDE.md prescribes for secondary mentions.
 sanitize_ref_tokens() {
   sed -e 's/PRD #\([0-9]\)/PRD \1/g' \
       -e 's/PRD#\([0-9]\)/PRD \1/g' \
+      -e 's/PRD \([A-Za-z][A-Za-z0-9]*-[0-9]\)/\1/g' \
       -e 's/[Ii]ssue-\([0-9]\)/issue \1/g'
 }
 

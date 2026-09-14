@@ -1743,13 +1743,25 @@ case_static_guards() {
 		report FAIL "constituent titles are sanitized before being quoted into the bundle body"
 	fi
 
-	# The sanitizer must actually neutralize both tokens.
+	# The sanitizer must actually neutralize EVERY token form the repo acts on —
+	# and it is exercised by SOURCING the lane's own function rather than by
+	# re-implementing its sed here, so a form added to one and not the other is a
+	# failure instead of a silent divergence. That divergence was real: switchyard
+	# PRD #379 taught the auto-linker the per-project key form `PRD SW-1`, which a
+	# copy of the old two-expression sed would still have quoted verbatim into a
+	# bundle body and attached the bundle to that PRD.
 	local out
-	out=$( { printf 'PRD #91 and issue-249\n' | sed -e 's/PRD #\([0-9]\)/PRD \1/g' -e 's/[Ii]ssue-\([0-9]\)/issue \1/g'; } )
-	if [ "$out" = "PRD 91 and issue 249" ]; then
-		report ok "the sanitizer neutralizes both PRD # and issue- tokens"
+	out=$(
+		# Lift the real function out of the lane and define it here, rather than
+		# sourcing the whole script (which would RUN it) or copying its sed (which
+		# is what let the two drift).
+		eval "$(sed -n '/^sanitize_ref_tokens() {/,/^}/p' "$LANE")"
+		printf 'PRD #91, PRD SW-1 and issue-249\n' | sanitize_ref_tokens
+	)
+	if [ "$out" = "PRD 91, SW-1 and issue 249" ]; then
+		report ok "the sanitizer neutralizes the PRD #, PRD KEY-N and issue- tokens"
 	else
-		report FAIL "the sanitizer neutralizes both PRD # and issue- tokens" "got: $out"
+		report FAIL "the sanitizer neutralizes the PRD #, PRD KEY-N and issue- tokens" "got: $out"
 	fi
 
 	# Documented where the pack's other orders are documented.

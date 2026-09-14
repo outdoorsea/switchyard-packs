@@ -1,0 +1,23 @@
+# skills-sync — the local half of the shared-skill distribution loop
+# (switchyard PRD #375, crit:1f1d1c093760). MECHANICAL, zero LLM.
+#
+# Per opted-in rig: read the sink's ownership manifests, ask the switchyard MCP's
+# list_skills for the project's effective manifest graded against what is
+# installed, and install or update every skill whose verdict is DETERMINED and
+# outdated — from its git source, at the manifest sha. Names gc materialized
+# (.gc-skill-ownership.json) are never written; a collision is mailed, not
+# resolved.
+#
+# OFF until SKILLS_SYNC_RIGS names a rig in roster.conf: this order writes into a
+# rig checkout, which is authority an operator grants deliberately.
+#
+# Hourly because a skill fixed upstream should reach every rig "on the next sync
+# pass" without anyone hand-copying files, and because a pass with nothing to do
+# costs one manifest read per rig — the server serves it from a 60s cache, and
+# every verdict then reads current. Every failed install is mailed to the mayor,
+# at most once per 24h per rig.
+[order]
+description = "Install/update org skills into each opted-in rig from the switchyard manifest, pinned by sha; never touches gc-owned skills"
+trigger = "cooldown"
+interval = "1h"
+exec = "$PACK_DIR/assets/scripts/skills-sync.sh"

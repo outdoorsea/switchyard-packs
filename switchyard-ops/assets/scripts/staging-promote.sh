@@ -24,11 +24,16 @@ REPORTED="$(sy_state_dir)/staging-promote.reported"
 mkdir -p "$(dirname "$LOG")" 2>/dev/null
 [ -f "$REPORTED" ] || : > "$REPORTED"
 
-# De-fang the two token forms the repo's guards act on: "PRD #N" attaches the
-# PR to that PRD, "issue-N" closes that issue on merge. The constituent PRs
-# already did both; the promotion must do neither.
+# De-fang the token forms the repo's guards act on: "PRD #N" and — since
+# switchyard PRD #379 taught the auto-linker the per-project key form — "PRD SW-1"
+# both ATTACH the PR to that PRD, and "issue-N" closes that issue on merge. The
+# constituent PRs already did both; the promotion must do neither. A key form is
+# neutralized by dropping the qualifier, because a BARE "SW-1" is deliberately
+# never a reference.
 defang() {
-  sed -e 's/PRD #\([0-9]\)/PRD \1/g' -e 's/issue-\([0-9]\)/issue \1/g'
+  sed -e 's/PRD #\([0-9]\)/PRD \1/g' \
+      -e 's/PRD \([A-Za-z][A-Za-z0-9]*-[0-9]\)/\1/g' \
+      -e 's/issue-\([0-9]\)/issue \1/g'
 }
 
 # One rollup verdict shared by both gates below: "<total> <pending> <bad>".

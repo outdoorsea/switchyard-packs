@@ -566,6 +566,31 @@
 # REVIEW_LANE_PRIMARY_LIMIT_MARKER="Review limit reached"
 
 # ---------------------------------------------------------------------------
+# Org skills sync (orders/skills-sync.toml) — the local half of the shared-skill
+# loop (switchyard PRD #375). Per named rig, every hour: read the rig's
+# <rig>/.claude/skills ownership manifests, ask switchyard-mcp's list_skills for
+# the project's effective skill manifest graded against what is installed, and
+# install or update every skill whose verdict is DETERMINED and outdated — from
+# its git source, at the manifest sha. Skills gc materialized (recorded in
+# .gc-skill-ownership.json) are never written; a collision is mailed to the
+# mayor, not resolved. OFF until SKILLS_SYNC_RIGS is set: the order writes into
+# a rig checkout, which is authority an operator grants deliberately.
+#
+# SKILLS_SYNC_RIGS — rigs to sync, space-separated. Each must resolve to a
+#   switchyard project (by slug, or via RIG_PROJECTS above). Empty = off.
+#
+# SKILLS_SYNC_SINK — where skills live, relative to the rig root. Default
+#   ".claude/skills", the same sink gc materializes into for Claude Code.
+#
+# SKILLS_SYNC_GIT_TIMEOUT — seconds one skill fetch may take. Default 120.
+#   GIT_TERMINAL_PROMPT is forced off, so a private skill repo this machine
+#   holds no credential for fails fast (and is mailed) rather than hanging.
+#
+# SKILLS_SYNC_RIGS=""
+# SKILLS_SYNC_SINK=".claude/skills"
+# SKILLS_SYNC_GIT_TIMEOUT="120"
+
+# ---------------------------------------------------------------------------
 # Factory balancer (orders/balance-sweep.toml) — demand-driven lane concurrency
 # (switchyard PRD #397).
 #

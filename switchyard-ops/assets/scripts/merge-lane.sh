@@ -22,6 +22,7 @@ MERGE_LANE_RIGS="${MERGE_LANE_RIGS:-}"
 MERGE_LANE_BASE="${MERGE_LANE_BASE:-staging}"
 MERGE_LANE_HOLD_LABEL="${MERGE_LANE_HOLD_LABEL:-do-not-merge}"
 MERGE_LANE_REVIEW_MARKER="${MERGE_LANE_REVIEW_MARKER:-Verdict: APPROVE}"
+MERGE_LANE_REJECT_MARKER="${MERGE_LANE_REJECT_MARKER:-Verdict: REQUEST CHANGES}"
 
 # Off by default: merge authority is granted per rig, deliberately, in
 # roster.conf. An empty list means this lane does not even read the queue.
@@ -83,6 +84,29 @@ for rig in $MERGE_LANE_RIGS; do
       [.reviews | group_by(.author.login)[] | max_by(.submittedAt)
        | select(.state == "CHANGES_REQUESTED")] | length' "$TMP/meta.json")
     [ "$blocked" = "0" ] || continue
+
+    # Review bar, part 1b: no standing marker REJECTION. The approve marker
+    # exists because GitHub refuses a formal review on your own PR, which is the
+    # lane's usual identity — so wiring only that half left the bar one-way: a
+    # reviewer could arm a merge but not stop one. Matched LOOSER than the
+    # approve marker on purpose (leading/trailing markdown decoration stripped),
+    # because the two fail in opposite directions: over-matching an approve
+    # merges something unreviewed, over-matching a reject only blocks something
+    # mergeable. A real rejection read `## Verdict: REQUEST CHANGES`. Superseded
+    # by the same author's later approve, which stays STRICT. Kept identical to
+    # scripts/gh-merge-lane.sh: two lanes into one branch must not disagree
+    # about what counts as reviewed.
+    rejected=$(jq -r --arg r "$MERGE_LANE_REJECT_MARKER" --arg m "$MERGE_LANE_REVIEW_MARKER" '
+      def unmark: sub("^[ \t>#*_`+-]+"; "") | sub("[ \t\r*_`]+$"; "");
+      def trim:   sub("^[ \t]+"; "")        | sub("[ \t\r]+$"; "");
+      [.comments[]?
+       | {who: (.author.login // ""), at: .createdAt,
+          rej: ([.body | split("\n")[] | unmark] | any(. == $r)),
+          app: ([.body | split("\n")[] | trim]   | any(. == $m))}
+       | select(.rej or .app)]
+      | group_by(.who) | map(max_by(.at))
+      | map(select(.rej)) | length' "$TMP/meta.json")
+    [ "${rejected:-0}" = "0" ] || continue
 
     # Review bar, part 2: a finished review. Either a real APPROVED review, or
     # a fallback review comment carrying the marker — but only one posted

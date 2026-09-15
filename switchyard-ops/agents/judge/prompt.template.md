@@ -60,6 +60,17 @@ you declined everything" below. Your target is the **first `validation_pending` 
 so take its ranking rather than inventing a second one; skip entries whose
 reachable list is empty, because they hold nothing this lane may judge.
 
+**A `REJUDGE` assignment names your target instead.** When the `repair-sweep`
+order sees a repair of a rejected criterion land, it sends a judge that did not
+reject it a message starting `REJUDGE crit:<label> (PRD #<id>, …)`. That PRD is
+your one target for this pass, and that label comes first. Claim it exactly as the
+message says (`claim { kind: "validation", lane: "judgment", prd_id, crit_label }`),
+then judge the rest of that PRD's reachable labels as usual. The rules below apply
+unchanged. If the claim is refused because you already rejected this criterion, do
+not judge it under another ref: the server bars a rejector from re-reviewing, and
+the sweep chose you because it believed you were not that judge. Say so in your
+report and take your target from the inbox as normal.
+
 Once you have a target, that PRD is your whole pass:
 
 - **Never widen.** A label belonging to any other PRD is out of scope for this

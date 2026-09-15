@@ -97,8 +97,14 @@ new_city() {
 	cat >"$city/agents.json" <<'JSON'
 {"agents":[{"qualified_name":"rigA/switchyard-ops.brakeman","pool":{"min":1},"suspended":false}]}
 JSON
+	# A live judge beside the brakeman: a delivered repair is now handed to a
+	# judge on the cycle that sees it (crit:3e5f212643ce, pinned in
+	# repair-rejudge-route.test.sh). Without one the sweep would try to start a
+	# judge, which this stub gc cannot do, and mail. "Alarm on nothing" below is
+	# about the REPAIR routing, so the city needs a judging lane.
 	cat >"$city/sessions.json" <<'JSON'
-{"sessions":[{"template":"rigA/switchyard-ops.brakeman","alias":"rigA-brakeman-adhoc-stub","state":"active"}]}
+{"sessions":[{"template":"rigA/switchyard-ops.brakeman","alias":"rigA-brakeman-adhoc-stub","state":"active"},
+             {"template":"rigA/switchyard-ops.judge","alias":"rigA-judge-adhoc-stub","state":"active"}]}
 JSON
 	echo '[]' >"$city/rigs.json"
 	echo '[{"slug":"rigA","tenant_slug":"stub"}]' >"$city/projects.json"

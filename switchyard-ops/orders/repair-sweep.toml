@@ -24,7 +24,10 @@
 # the sweep returns that repair to the queue on the cycle it notices, inside
 # the window, and exactly once (a fresh assignment marker suppresses a second).
 # A worker that DELIVERED leaves a closed bead awaiting a judge, which is not
-# re-routed at all. The sweep tells those apart from its marker stamps and the
+# re-routed to a worker. The same cycle hands it to an INDEPENDENT judge instead
+# (a live judge session that did not reject it, or one fresh session), once per
+# delivery, so a repaired criterion does not wait behind the judge-sweep's ranked
+# backlog. The sweep tells those apart from its marker stamps and the
 # project event feed (`criterion.reclaimed` / `bead.reclaimed`) since the
 # marker was written, so a lease that began and ended between two cycles is
 # still read as a lapse rather than as an ignored assignment.

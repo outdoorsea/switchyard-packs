@@ -82,9 +82,10 @@
 # three other states, and each wants a different answer:
 #
 #   * the worker DELIVERED the repair (bead closed, or a completion on the feed)
-#     and the criterion is waiting on a judge — route NOBODY, the judging lane
-#     owns it now; a repair re-routed here is the "multiplies" fault, one fresh
-#     worker per TTL on work that is already done;
+#     and the criterion is waiting on a judge — route no repair WORKER, the
+#     judging lane owns it now (and is handed it, see the REJUDGE section); a
+#     repair re-routed here is the "multiplies" fault, one fresh worker per TTL
+#     on work that is already done;
 #   * the worker's stake LAPSED or was RELEASED without a delivery — route it
 #     again NOW, once, and say so: waiting out the assignment window strands a
 #     repair nobody holds, and a second route on the next cycle would be the
@@ -105,6 +106,38 @@
 # turn is not re-routed, and it is retired the moment the rollup carries a NEWER
 # `fail` than the one that routed it — a second rejection is a new repair, and
 # the fresh marker it earns starts the lifecycle over.
+#
+# A DELIVERED REPAIR IS ROUTED TO AN INDEPENDENT JUDGE ON THE CYCLE THAT SEES IT
+# (crit:3e5f212643ce). "The judging lane owns it now" used to mean "wait": the
+# judge-sweep order starts a judge only when none is live, every 30m, and that
+# judge takes the FIRST PRD of the ranked inbox — so a repaired criterion queued
+# behind the whole awaiting-validation backlog and was judged whenever the lane
+# happened to reach it. The cycle that first stamps a marker `delivered` now
+# hands that one criterion to a judge by name:
+#
+#   * a LIVE judge on the rig whose identities (alias, session name, agent name)
+#     do not include the validator that rejected the attempt is nudged with a
+#     REJUDGE assignment naming the PRD and label;
+#   * otherwise ONE fresh judge session is started for the rig (at most one per
+#     cycle, however many repairs landed) and the assignment is queued to it —
+#     `--delivery queue`, because a nudge typed into a pane that is still booting
+#     is lost.
+#
+# INDEPENDENCE IS CHOSEN HERE AND ENFORCED BY THE SERVER. ClaimValidation refuses
+# a rejector's claim (409), so a sweep that nudged the rejecting judge would not
+# get a biased verdict. It would get no verdict at all, which is the stall this
+# check removes. So the rejector is never a target, and when the rejector's ref
+# is the lane's BARE agent name (the identity every session of that lane
+# registers) no session on the rig can be independent, and the sweep mails
+# rather than starts a judge the server will refuse.
+#
+# ONCE PER DELIVERY. A `rejudge` stamp is appended after the nudge succeeds, so
+# later cycles of the same delivery route nothing. A failed route leaves no stamp
+# and is retried on the next cycle, with mail. A second rejection retires the
+# marker as above, so the NEXT repair's delivery is routed again. A contract-lane
+# rejection (verdict provenance `contract`) is not the judge's to take: the
+# contract validator re-runs it. Such a rejection is stamped and logged, and no
+# judge is routed.
 set -u
 
 . "$(dirname "$0")/../lib/roster.sh"
@@ -152,6 +185,10 @@ REWORK_RIGS="${REWORK_RIGS:-}"
 # has not been consumed, and the next cycle is free to route it again.
 REPAIR_ASSIGNMENT_TTL="${REPAIR_ASSIGNMENT_TTL:-3600}"
 
+# The lane a repaired delivery is routed back to: the rig's judging-validator
+# (agents/judge), `<rig>/switchyard-ops.judge`. See the REJUDGE header above.
+JUDGE_SUFFIX=".judge"
+
 command -v jq >/dev/null 2>&1 || exit 0
 
 token="$(sy_api_token)"
@@ -179,6 +216,8 @@ now="$(date -u +%s)"
 routed=0
 failed=""
 dropped=""
+rejudged=0
+rejudge_failed=""
 TAB="$(printf '\t')"
 
 # prev_day DATE — the calendar day before DATE (YYYY-MM-DD), or empty.
@@ -441,6 +480,149 @@ repair_brief() {
   return 0
 }
 
+# lower TEXT — TEXT in lower case. Identity comparisons here are
+# case-insensitive, like the server's rejector match.
+lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+
+# independent_judge ROSTER AGENT REJECTOR — the alias of the most recently
+# active LIVE session of the judge agent AGENT in which REJECTOR is not one of
+# the identities, or empty when there is none.
+#
+# Same join predicate as sy_session_alias_for (`.template`, then the agent-name
+# fallbacks), so "which sessions are this lane" cannot drift from the rest of the
+# pack. Every identity a session can be named by is compared, because the
+# rejecting validator recorded whichever one it registered: gc's alias, the
+# session name/id, or the (adhoc) agent name the judge prompt registers as its
+# ref. An empty REJECTOR (a rollup row without one) excludes nobody, and the
+# server's claim gate still refuses a rejector.
+independent_judge() {
+  printf '%s' "$1" | jq -r --arg q "$2" --arg r "$(lower "$3")" '
+      [ (.sessions // [])[]
+        | select(((.closed // false) | not))
+        | (.agent // .agent_name // .qualified_name // "") as $n
+        | select((.template // "") == $q or $n == $q or ($n | startswith($q + "-adhoc-")))
+        | select((.state // "") == "active")
+        | select($r == ""
+                 or (([.alias, .name, .id, .agent, .agent_name, .qualified_name]
+                      | map(select(type == "string") | ascii_downcase)
+                      | index($r)) == null)) ]
+      | sort_by(.last_active // "") | reverse
+      | (.[0].alias // .[0].name // .[0].id // empty)' 2>/dev/null | awk 'NF' | head -n1
+}
+
+# spawn_judge RIG — start ONE fresh judge session on RIG and echo its identity,
+# empty when none could be read back. The bare invocation and identity readback
+# are lane-ensure's lane_spawn, so an unknown-flag gc build cannot turn this
+# spawn into a no-op either.
+spawn_judge() {
+  _sj_out="$(gc session new "$1/$SY_NS$JUDGE_SUFFIX" --no-attach 2>/dev/null)"
+  _sj_id="$(printf '%s' "$_sj_out" | jq -r '
+      (if type=="object" then (.session // .) else empty end)
+      | (.alias // .name // .session_name // .id // .session_id // "")' 2>/dev/null | awk 'NF' | head -n1)"
+  [ -n "$_sj_id" ] || _sj_id="$(printf '%s\n' "$_sj_out" | awk '/^[Ss]ession [^ ]+ created/{print $2; exit}')"
+  printf '%s' "$_sj_id"
+}
+
+# route_rejudge MARKER PROJECT RIG PRD LABEL — hand ONE delivered repair to an
+# independent judge and stamp MARKER `rejudge` when the nudge was accepted. See
+# the REJUDGE header section for the rules.
+#
+# Called directly and never in `$(...)`, because it updates the per-rig judge
+# roster cache and the cycle's counters. `_rj_`-prefixed locals for the reason
+# repair_brief gives.
+route_rejudge() {
+  _rj_marker="$1"
+  _rj_project="$2"
+  _rj_rig="$3"
+  _rj_prd="$4"
+  _rj_label="$5"
+  _rj_agent="$_rj_rig/$SY_NS$JUDGE_SUFFIX"
+  _rj_line="$(verdict_for "$rollups" "$_rj_prd" "$_rj_label")"
+  _rj_rejector="$(printf '%s\n' "$_rj_line" | cut -f1)"
+  _rj_ref="$(printf '%s\n' "$_rj_line" | cut -f2)"
+  _rj_at="$(printf '%s\n' "$_rj_line" | cut -f3)"
+  _rj_prov="$(printf '%s\n' "$_rj_line" | cut -f4)"
+
+  # A contract verdict is re-run by the contract validator. The judge takes only
+  # criteria that declare no runnable command, and would decline this one.
+  if [ "$_rj_prov" = contract ]; then
+    printf 'rejudge %s contract-lane\n' "$now" >>"$_rj_marker" 2>/dev/null || true
+    echo "repair-sweep: $_rj_rig/$_rj_label repair delivered; its rejection was a contract re-run, so the contract validator re-runs it"
+    return 0
+  fi
+
+  # The rejector registered as the lane's BARE agent name, which is the name
+  # every session of that lane registers, so no session here can be independent.
+  if [ -n "$_rj_rejector" ] && [ "$(lower "$_rj_rejector")" = "$(lower "$_rj_agent")" ]; then
+    rejudge_failed="$rejudge_failed $_rj_rig/$_rj_label(no-independent-judge:$_rj_rejector)"
+    return 0
+  fi
+
+  if [ "$judge_roster_read" -eq 0 ]; then
+    judge_roster_read=1
+    judge_roster="$(gc session list --json --state all 2>/dev/null)" || judge_roster=""
+  fi
+  if [ -z "$judge_roster" ]; then
+    rejudge_failed="$rejudge_failed $_rj_rig/$_rj_label(judge-lookup-failed)"
+    return 0
+  fi
+
+  _rj_target="$(independent_judge "$judge_roster" "$_rj_agent" "$_rj_rejector")"
+  _rj_how=live
+  if [ -z "$_rj_target" ]; then
+    # The balancer's judge target is a CEILING on this spawn, as it is on every
+    # spawn in this pack (PRD #397). A throttled lane is a decision, not a
+    # fault. Nothing is stamped, so the next cycle routes once the lane has
+    # capacity again.
+    if [ "$(sy_balancer_capped "$_rj_rig" judge 1)" = 0 ]; then
+      echo "repair-sweep: $_rj_rig/$_rj_label repair delivered; the judge lane is at the balancer's target of 0, re-judge waits a cycle"
+      return 0
+    fi
+    # ONE spawn per rig per cycle: a second repair delivered on the same rig in
+    # the same cycle is queued to the same fresh session, not a second one.
+    # `-` records a spawn that was tried this cycle and failed.
+    [ -n "$judge_spawned" ] || judge_spawned="$(spawn_judge "$_rj_rig")"
+    [ -n "$judge_spawned" ] || judge_spawned="-"
+    if [ "$judge_spawned" = "-" ]; then
+      rejudge_failed="$rejudge_failed $_rj_rig/$_rj_label(judge-spawn-failed)"
+      return 0
+    fi
+    _rj_target="$judge_spawned"
+    _rj_how=spawned
+  fi
+
+  _rj_msg="REJUDGE $_rj_label (PRD #$_rj_prd, project $_rj_project)
+
+A judge rejected this criterion, a repair was built, and the repaired delivery
+has now landed. It needs an INDEPENDENT judgment, and you were chosen because
+you are not the judge that rejected it (${_rj_rejector:-the rejecting validator was not recorded}).
+
+Make PRD #$_rj_prd your target for this pass and judge this criterion first:
+claim { kind: \"validation\", lane: \"judgment\", prd_id: $_rj_prd, crit_label: \"$_rj_label\" },
+read the REPAIRED delivery against the criterion, and record a cited verdict
+with validate_criterion. If the claim is refused because you already rejected
+this criterion, stop there. Do not judge it under another ref.
+
+The rejected attempt, which you are NOT judging: ${_rj_ref:-(not recorded)}${_rj_at:+, refused at $_rj_at}."
+
+  if [ "$_rj_how" = spawned ]; then
+    gc session nudge "$_rj_target" --delivery queue "$_rj_msg" </dev/null >/dev/null 2>&1
+  else
+    gc session nudge "$_rj_target" "$_rj_msg" </dev/null >/dev/null 2>&1
+  fi || {
+    rejudge_failed="$rejudge_failed $_rj_rig/$_rj_label(judge-nudge-failed:$_rj_target)"
+    return 0
+  }
+
+  if printf 'rejudge %s %s\n' "$now" "$_rj_target" >>"$_rj_marker" 2>/dev/null; then
+    rejudged=$((rejudged + 1))
+    echo "repair-sweep: $_rj_rig/$_rj_label repair delivered; routed to $_rj_how independent judge $_rj_target"
+  else
+    rejudge_failed="$rejudge_failed $_rj_rig/$_rj_label(rejudge-marker-write-failed)"
+  fi
+  return 0
+}
+
 for rig in $rigs; do
   project="$(sy_project_for_rig "$rig" "$projects")"
   [ -n "$project" ] || continue
@@ -525,6 +707,13 @@ $prev"
   rework_attempted=0
   rework_warming=0
   rework_capped=0
+
+  # Re-judge routing state, per rig and LAZY like the rework revival above: the
+  # session roster is read only when a delivered repair actually needs a judge,
+  # and at most one judge is spawned per rig per cycle (see route_rejudge).
+  judge_roster_read=0
+  judge_roster=""
+  judge_spawned=""
 
   # A HERE-DOC, NOT A PIPE. `printf ... | while read` runs the loop body in a
   # SUBSHELL, so every `routed`/`failed` this loop records would be discarded at
@@ -674,6 +863,11 @@ $prev"
       case "$ended" in
       delivered)
         mark_delivered "$marker"
+        # The repair is the judging lane's now. Hand it to an independent judge
+        # on THIS cycle, once per delivery (crit:3e5f212643ce). The judge-sweep
+        # remains the backstop if that judge never gets to it.
+        marker_stamped "$marker" rejudge ||
+          route_rejudge "$marker" "$project" "$rig" "$prd" "$label"
         continue
         ;;
       lapsed | released)
@@ -968,6 +1162,28 @@ A worker that is nudged and never claims is usually wedged, mid-compaction, or o
 This is not the same fault as 'could not route': there, no worker could be reached at all. Here one was reached and did not act. A criterion in BOTH mails has hit both faults in sequence and is the most urgent case in this report.
 
 Routed $routed repair assignment(s) this cycle in total." \
+    >/dev/null 2>&1
+fi
+
+# A DELIVERED REPAIR NO JUDGE COULD BE GIVEN IS ITS OWN ALARM (crit:3e5f212643ce).
+# The repair was built and landed, and nobody was put on judging it. This is a
+# different fault from both mails above, because no repair worker is missing:
+# the judge is. Each is retried next cycle (nothing was stamped), so this mail
+# repeats only while the fault does.
+if [ -n "$rejudge_failed" ]; then
+  gc mail send mayor \
+    -s "repair-sweep: could not route $(printf '%s' "$rejudge_failed" | wc -w | tr -d ' ') repaired delivery(ies) to an independent judge" \
+    -m "repair-sweep saw a repair of each of these rejected criteria delivered, and could not hand it to a judge that did not reject it:$rejudge_failed
+
+Routed $rejudged repaired delivery(ies) to an independent judge this cycle.
+
+no-independent-judge:<ref> means the rejecting judge registered under the judge lane's BARE agent name, which every session of that lane registers. The server refuses a rejector's claim, so no judge on that rig can re-review this criterion. Have the judge register a per-session ref, or have another rig's judge take it.
+judge-lookup-failed means 'gc session list --json' could not be read, so whether an independent judge is live is UNKNOWN.
+judge-spawn-failed means no independent judge was live and 'gc session new <rig>/$SY_NS$JUDGE_SUFFIX --no-attach' returned no session. Check that the judge agent is imported into the rig and that its provider is ready (judge-sweep mails about that separately).
+judge-nudge-failed:<session> means the judge session resolved but gc session nudge returned non-zero.
+rejudge-marker-write-failed means the judge WAS nudged and the route could not be recorded, so the next cycle will nudge again.
+
+Until this clears, each repaired criterion waits for the judge-sweep backstop instead of being judged now." \
     >/dev/null 2>&1
 fi
 

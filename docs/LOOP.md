@@ -47,6 +47,13 @@ triage, not by task assignment.
 
 ## The heartbeat (orders, not agents)
 
+> **Retired.** Every order below shipped in the `switchyard-ops` pack, which was
+> removed with switchyard-companion
+> ([`../README.md`](../README.md#gas-city-packs)); its lanes now run under
+> switchyard-conductor. The table is the design record, not a live schedule. One
+> order has no successor at all: `integration-lane` (PRD #340) was deleted with
+> the pack and nothing bundles pull requests or tests their combination today.
+
 Layer 3 encodes the loop as timed orders — cooldown trigger → wisp → dog
 executes → escalate to mayor on anomaly. No agent exists merely to run a clock.
 
@@ -56,7 +63,7 @@ executes → escalate to mayor on anomaly. No agent exists merely to run a clock
 | `answer-sweep` | 20m | Reap finished answerers, then keep one alive per rig whose open-question queue is non-empty |
 | `judge-sweep` | 30m | Reap finished judging-validators, then keep one alive per rig whose judgment queue is non-empty |
 | `loop-health` | 30m | Verify every pinned session has a live process **and** the status probe answers; wake what's down; escalate if the probe itself lies |
-| `integration-lane` | 2h | Bundle the currently-mergeable PRs onto one branch, test the **combination** the per-PR checks never measure, and hand a human one reviewable merge — it never merges itself |
+| `integration-lane` | 2h | *(removed, no successor)* Bundled the currently-mergeable PRs onto one branch, tested the **combination** the per-PR checks never measure, and handed a human one reviewable merge — it never merged itself |
 | `intake-sweep` | 4h | Nudge each coordinator to triage its project's intake and dispatched epics |
 | `nightly-retro` | 24h | Nudge the retro agent to draft daily reports and propose improvements |
 | `stray-reaper` | 6h | Flag sessions whose `GC_CITY` is not this city (relocated-root leftovers writing to the wrong store) |
@@ -65,9 +72,8 @@ executes → escalate to mayor on anomaly. No agent exists merely to run a clock
 Governing invariant: **every silent failure becomes mail to the mayor within one
 order cycle.**
 
-Those are the orders that carry the loop itself; the pack ships several more
-housekeeping sweeps. [`../README.md`](../README.md#what-switchyard-ops-gives-you)
-has the full manifest.
+Those are the orders that carried the loop itself; the pack also shipped several
+more housekeeping sweeps, and its full manifest went with it.
 
 ## Why `pool-spawn` exists
 

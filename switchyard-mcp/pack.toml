@@ -2,6 +2,22 @@
 # can drive switchyard (projects, blueprints, PRDs, epics, reports) via MCP
 # tools. Pure enhancement pack — no agents defined, just an overlay.
 #
+# The overlay is TWO files, and each does a job the other cannot:
+#
+#   overlay/.mcp.json               declares the server. This is the file the
+#                                   client actually reads for project-scoped MCP
+#                                   servers; it lands at the agent's project root.
+#   overlay/.claude/settings.json   pre-trusts it — `enabledMcpjsonServers` lists
+#                                   the servers a session may use WITHOUT the
+#                                   interactive "trust this server?" prompt that
+#                                   an unattended agent cannot answer.
+#
+# This file used to declare the server in settings.json under an `mcpServers`
+# key. Claude Code does not read that key: every agent in a rig importing the
+# pack started with zero switchyard tools, silently (issue 627). Declare servers
+# in .mcp.json; the only MCP key that belongs in settings.json is the pre-trust
+# list, and the two must name the same servers.
+#
 # Prerequisites:
 #   - `switchyard-mcp` binary on PATH. It is built from this same repo, two
 #     directories up — so the pack and the server it wires can never skew:
@@ -12,8 +28,9 @@
 #       2. the token file  ~/Library/Application Support/switchyard/token  (chmod 600)
 #     Recommended: run `switchyard-mcp login` once (browser flow) — it writes that token
 #     file, which every agent session then reads. This keeps the secret machine-local and
-#     out of gc config + git. (Do NOT hardcode SWITCHYARD_API_TOKEN in overlay/.claude/
-#     settings.json; that was the old approach and leaks the token into the repo.)
+#     out of gc config + git. (Do NOT hardcode SWITCHYARD_API_TOKEN in overlay/.mcp.json or
+#     overlay/.claude/settings.json; that was the old approach and leaks the token into the
+#     repo — and into the public packs mirror.)
 #
 # Usage — import PER RIG (not city-wide) in your city.toml, for each rig whose
 # crew should drive switchyard:

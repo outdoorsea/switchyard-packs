@@ -52,8 +52,11 @@ switchyard-mcp login                                            # writes a machi
 switchyard-mcp doctor                                           # verify resolution
 ```
 
-Never put `SWITCHYARD_API_TOKEN` in `overlay/.claude/settings.json` — that
-leaks it into git. The server resolves the token from the environment or a
+The overlay is two files: `overlay/.mcp.json` declares the server, and
+`enabledMcpjsonServers` in `overlay/.claude/settings.json` pre-trusts it so an
+unattended session is not stopped by a trust prompt. Never put
+`SWITCHYARD_API_TOKEN` in either — that leaks it into git and onto the public
+packs mirror. The server resolves the token from the environment or a
 `chmod 600` token file.
 
 ## Keep it honest

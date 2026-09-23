@@ -199,14 +199,27 @@ projects files into agent working dirs. `switchyard-mcp` is the whole pattern:
 ```
 packs/switchyard-mcp/
   pack.toml                      # [pack] name/schema only
-  overlay/.claude/settings.json  # { "mcpServers": { "switchyard": {...} } }
+  overlay/.mcp.json              # declares the server
+  overlay/.claude/settings.json  # pre-trusts it
 ```
 
 ```json
+// .mcp.json — the file the client reads for project-scoped MCP servers
 { "mcpServers": { "switchyard": {
-    "command": "switchyard-mcp",
+    "command": "switchyard-mcp", "args": [],
     "env": { "SWITCHYARD_BASE_URL": "https://switchyard.work" } } } }
 ```
+
+```json
+// .claude/settings.json — the standing answer to the "trust this server?" prompt
+{ "enabledMcpjsonServers": ["switchyard"] }
+```
+
+**Both files, always.** Declaring the server without pre-trusting it stops the
+first unattended session on an interactive trust prompt. And `mcpServers` in
+`settings.json` is read by nothing — the pack shipped exactly that for a while,
+and every agent in an importing rig came up with zero switchyard tools, silently
+(issue 627).
 
 Imported **per rig** (`[rigs.imports.switchyard-mcp]`), not city-wide. The API
 token is deliberately **not** in the overlay: the server self-resolves it from

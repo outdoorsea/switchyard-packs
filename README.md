@@ -28,7 +28,7 @@ the MCP tool surface, and the orders that use them, together.
 
 ```
 packs/onboarding/         first-run: pick your surface, connect it, drive switchyard
-packs/switchyard-mcp/     Layer 2 — overlay: switchyard MCP into a rig's crew
+packs/switchyard-mcp/     Layer 2 — overlay: .mcp.json + .claude/settings.json
 packs/examples/city/      a reference pack.toml + city.toml to copy
 packs/docs/OPERATING-MODEL.md   roles, layering, token economy, gotchas
 packs/docs/TOKEN-HARDENING.md   keep an idle fleet from paying to idle
@@ -179,7 +179,47 @@ source = "/path/to/switchyard/packs/switchyard-mcp"
 
 The overlay ships **no token**. The MCP server resolves it from
 `$SWITCHYARD_API_TOKEN` or a `chmod 600` machine-local token file. Never put a
-token in `overlay/.claude/settings.json`.
+token in `.mcp.json` or `.claude/settings.json` — both are version-controlled
+and republished to the public mirror.
+
+## What the `switchyard-mcp` overlay projects
+
+The overlay is **two files**, and each does a job the other cannot. `gc` projects
+both into every agent working directory in the importing rig, so they land where
+the client looks for them — at the agent's project root:
+
+```
+packs/switchyard-mcp/overlay/
+  .mcp.json               declares the server
+  .claude/settings.json   pre-trusts it
+```
+
+```json
+// .mcp.json — the file the client actually reads for project-scoped servers
+{ "mcpServers": { "switchyard": {
+    "command": "switchyard-mcp", "args": [],
+    "env": { "SWITCHYARD_BASE_URL": "https://switchyard.work" } } } }
+```
+
+```json
+// .claude/settings.json — enabledMcpjsonServers pre-trusts what .mcp.json declares
+{ "enabledMcpjsonServers": ["switchyard"] }
+```
+
+**Why both.** A `.mcp.json` alone is declared but not trusted: the first session
+to load it stops on an interactive "trust this MCP server?" prompt, which an
+unattended agent has nobody to answer. `enabledMcpjsonServers` is the standing
+answer to that prompt, and it is the **only** MCP key that belongs in
+`settings.json`.
+
+The pack used to declare the server in `.claude/settings.json` under an
+`mcpServers` key instead. Claude Code does not read that key at all, so every
+agent in a rig importing the pack started with **zero switchyard tools** — and
+nothing logged it (issue 627). That stanza is gone. If you add a second server to
+`.mcp.json`, add its name to `enabledMcpjsonServers` in the same commit: a
+declared-but-untrusted server is the prompt again, and a trusted name nothing
+declares pre-approves nothing. `internal/docreview`'s overlay tests hold both
+halves, deriving the expected pre-trust list from `.mcp.json` itself.
 
 ### Install gascity's build-artifact validator — nothing does it for you
 

@@ -45,9 +45,13 @@ provider = "claude"
   # model from opencode's OWN config. opencode is vendor-agnostic, so an
   # operator who authenticates it against the same vendor as `[workspace]
   # provider` above gets a judge and a security reviewer reasoning on the very
-  # model that wrote the code. Nothing detects that: the runtime-diversity CI
-  # job compares provider NAMES, and both halves still read "deepseek". Point
-  # opencode at a genuinely different vendor, or pin one here, e.g.:
+  # model that wrote the code. NOTHING DETECTS THAT — not here and not
+  # server-side. switchyard refuses a verdict signed by the builder's agent REF,
+  # and refuses (409) a judgment whose `validator_runtime` string equals the
+  # builder's recorded `claim_runtime` — but that second check is vacuous when
+  # either side sends no runtime, and it compares runtime STRINGS, not models,
+  # so two differently-named runtimes on one model pass. Point opencode at a
+  # genuinely different vendor, or pin one here, e.g.:
   #   args = ["--model", "deepseek/deepseek-v4-flash-free"]
   [providers.deepseek]
     base = "builtin:opencode"

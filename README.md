@@ -50,6 +50,13 @@ Work flows in one loop: **switchyard → local runtime → coordinator → worke
 pull request → human merge → back to switchyard.** The switchyard cloud is the
 backlog authority; everything else is a role on the machine that runs the work.
 
+The companion, brakeman, answerer and judge roles below retired with
+`switchyard-ops` (see the note above); their lanes now run under
+[switchyard-conductor](https://github.com/outdoorsea/switchyard-conductor). They
+are drawn dashed and marked **retired** so the table still explains the names
+older docs and beads use — a city importing only this repo's packs runs none of
+them.
+
 ```mermaid
 flowchart TB
   subgraph CLOUD["switchyard.work — backlog authority"]
@@ -57,54 +64,65 @@ flowchart TB
   end
   subgraph CITY["Gas City (one machine)"]
     subgraph RIG["per rig × N"]
-      comp["companion<br/>daemon · no LLM"]
-      coord["coordinator<br/>compass/magnet/… · pinned"]
-      pool["brakeman<br/>worker pool · ≤2"]
+      coord["coordinator<br/>compass/magnet/… · pinned<br/>switchyard-mcp overlay"]
       roles["gascity roles<br/>implementation-worker · publisher"]
     end
     subgraph CREW["city crew"]
       mayor["mayor<br/>city-local"]
       dog["dog pool · bd pack"]
     end
+    subgraph RETIRED["retired — now switchyard-conductor"]
+      comp["companion"]
+      pool["brakeman pool"]
+      qa["answerer · judge"]
+    end
   end
   human["human reviewer"]
-  PRD -->|sync approved work| comp
-  comp -->|mint local beads + notify| coord
-  coord -->|sling| pool
-  pool -->|runs sy-item-work via| roles
+  PRD -->|MCP tools: claim work| coord
+  coord -->|sling| roles
   roles -->|push + open PR| human
-  human -->|merges| comp
-  comp -->|report progress| PRD
+  human -->|merges| PRD
+  classDef retired stroke-dasharray: 5 5,opacity:0.6
+  class comp,pool,qa retired
 ```
 
 | Role | Layer | LLM? | Lifecycle | Job |
 |---|---|:--:|---|---|
 | **switchyard** | cloud | — | — | PRDs, epics, the claim pool — the source of truth |
-| **companion** | per-rig bridge | no | daemon | sync approved PRDs → local beads; report progress up |
-| **coordinator** (compass/magnet/…) | per-rig | yes | **pinned** | triage the rig's switchyard project; sling work to the pool |
-| **brakeman** | per-rig | yes | on-demand pool (≤2) | claim a bead → build in a scoped worktree → push → open a PR |
-| **answerer** | per-rig | yes | on-demand | drain open PRD questions |
-| **judge** | per-rig | yes — **independent model** | on-demand | drain the awaiting-validation backlog |
+| **coordinator** (compass/magnet/…) | per-rig | yes | **pinned** | triage the rig's switchyard project through the `switchyard-mcp` tools; sling work to the gascity roles |
 | gascity **roles** | per-rig | yes | stateless targets | `gc.implementation-worker`, `gc.publisher`, `gc.run-operator` — what a formula step dispatches to |
 | **mayor** | city | yes | always-on | human interface, city coordination, **every escalation lands here** |
 | **dog** | city | yes | on-demand pool | mechanical formula orders (stale-DB sweeps, GC) — from the `bd` pack |
+| ~~companion~~ | **retired** | no | — | was: sync approved PRDs → local beads; report progress up |
+| ~~brakeman~~ | **retired** | yes | — | was: claim a bead → build in a scoped worktree → push → open a PR |
+| ~~answerer~~ | **retired** | yes | — | was: drain open PRD questions |
+| ~~judge~~ | **retired** | yes | — | was: drain the awaiting-validation backlog |
 
-**Nothing merges on its own.** A brakeman opens a pull request and stops; a human
+**Nothing merges on its own.** A worker opens a pull request and stops; a human
 merges it. There is no refinery in a gascity city.
 
-**The judge does not share a brain with the workers.** The brakeman pool declares
-no provider and so runs the city default; `agents/judge/agent.toml` pins
-`provider = "deepseek"`, the same provider `security-scout` already requires, so
-builder and validator reason on different models and a model's blind spot cannot
-pass its own work. Identity independence — the judge's own agent ref, which the
-server's separation-of-duties rules key on — is a separate and weaker property:
-two refs can be one runtime. The server-side complement refuses a judgment whose
-recorded runtime matches the builder's. Both halves, and the `[[patches.agent]]`
-opt-out for a city that has not wired deepseek, are documented in that agent.toml.
-The pin itself is held by the **`judge runtime-diversity self-test`** CI job
-(`bash scripts/judge-runtime-diversity.test.sh`). A different runtime is only
-half of independence, though — what the judge *does* with it is
-[The judge: how a criterion gets read](#the-judge-how-a-criterion-gets-read).
+**The judge's pack-side runtime pin is gone.** The `provider` pin that once
+pointed the judging lane at a second vendor retired with the lane, and so did
+the CI self-test that checked it. What remains is server-side, in
+`validate_criterion`, and it is two refusals:
+
+- **The signing agent ref.** A verdict signed by the agent ref that worked the
+  criterion is refused, so no worker can sign off on its own work.
+- **The runtime string (409).** A judgment verdict whose `validator_runtime`
+  equals the `claim_runtime` the builder recorded when it claimed the criterion
+  is refused with `409`, because two agent refs inside one runtime slip past
+  the identity check. It is **vacuous when either side sends no runtime** — a
+  claim staked without `claim_runtime`, or a verdict without
+  `validator_runtime`, compares as before — and it compares runtime *strings*
+  (trimmed, case-insensitive), not models.
+
+So the runtime refusal holds only if both the building and the judging
+wrappers state their runtime, and even then two differently-named runtimes can
+still be one model, whose blind spot can pass its own work. A city that wants
+model independence authenticates its judging wrapper against a different vendor
+from `[workspace] provider`; nothing detects the case where it does not, which
+is spelled out where that choice is made, in the `[providers]` stanza of
+[`examples/city/city.toml`](examples/city/city.toml).
 
 **There is also no always-on watcher.** gastown's `witness`, `deacon` and `boot`
 have no gascity equivalent, so a quiet city is much cheaper to run — and nothing

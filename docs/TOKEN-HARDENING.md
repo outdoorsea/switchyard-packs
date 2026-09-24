@@ -64,8 +64,7 @@ The same cap applies to `answerer` and `judge`, but now as a second line of
 defence rather than the main one. Their sweeps did once fan out adhoc sessions
 faster than they drained; since PRD 299 each keeps at most one session alive per
 rig and reaps its own finished ones at the top of every cycle, so the population
-is bounded by the sweep itself rather than by this cap. See
-[`../README.md`](../README.md#the-sweep-lanes-reap-what-they-spawn).
+is bounded by the sweep itself rather than by this cap.
 
 ### 4. `intake-sweep` cadence
 `intake-sweep` (default `interval = "4h"`) nudges **every** coordinator into a

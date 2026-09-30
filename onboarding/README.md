@@ -46,6 +46,7 @@ machine-local file — **never** hardcode it into a client's settings.
 | **Single terminal** | one agent + `switchyard-mcp` + `AGENTS.md` — the minimal setup | [`single-terminal.md`](single-terminal.md) |
 | **Claude Code desktop** | the above, plus the `plugins/switchyard` slash commands | [`claude-code.md`](claude-code.md) |
 | **OpenAI desktop / Codex** | Codex or ChatGPT desktop with the MCP server; `AGENTS.md` is native | [`openai-desktop.md`](openai-desktop.md) |
+| **ChatGPT** | chatgpt.com Apps & Connectors over the remote MCP connector — a URL and a browser consent, nothing installed | [`chatgpt.md`](chatgpt.md) |
 | **Hermes** | Nous Research self-improving terminal agent + gateway; MCP-native, with per-server tool filtering | [`hermes.md`](hermes.md) |
 | **openclaw** | cross-platform personal assistant; MCP-capable, reads workspace `AGENTS.md` | [`openclaw.md`](openclaw.md) |
 | **Gas City** | the fleet: coordinators + `brakeman` workers on a heartbeat — **agent-executable setup runbook** | [`gas-city.md`](gas-city.md) |

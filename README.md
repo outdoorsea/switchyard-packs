@@ -139,11 +139,13 @@ problems, and you may want both:
 |  | `plugins/switchyard` | `packs/` |
 |---|---|---|
 | Consumer | any Claude Code session | agent sessions under `gc` |
-| Gives you | `/switchyard:*` slash commands | MCP overlay + timed orders |
+| Gives you | `/switchyard:*` slash commands | the `switchyard-mcp` overlay, projected into every agent in a rig |
 | Needs | Claude Code | a Gas City |
 
-A human driving switchyard by hand wants the plugin. A city that runs
-coordinators on a heartbeat wants the packs.
+A human driving switchyard by hand wants the plugin. A city whose crew should
+reach switchyard through the MCP tools wants the pack. (The timed orders and the
+coordinator heartbeat the packs used to add shipped in the retired
+`switchyard-ops`; see the note at the top.)
 
 ## Install
 

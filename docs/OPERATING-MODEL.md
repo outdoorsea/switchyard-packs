@@ -2,6 +2,15 @@
 
 *Design of record for any city consuming these packs. Companion: `LOOP.md`.*
 
+> **Layer 3 is retired.** Everything below that names `switchyard-ops` — its
+> orders (`pool-spawn`, `balance-sweep`, `loop-health`, …), the `brakeman` /
+> `answerer` / `judge` lanes, the `sy-item-work` worker lane and its fan-out
+> decomposer, `roster.conf` — shipped in that pack, which was removed with
+> switchyard-companion ([`../README.md`](../README.md#gas-city-packs)). Those
+> lanes run under switchyard-conductor, outside any city. What this repo still
+> ships is Layer 2, the `switchyard-mcp` overlay. The Layer-3 material is kept
+> as the design record it was, not as a description of a live city.
+
 ## Design stance
 
 Gas City is a generic agent runtime — sessions, rigs, packs, orders, formulas,
@@ -17,9 +26,9 @@ gascity evolve upstream, adaptations live in three small layers.
 └──────────────▲───────────────┬──────────────────────────────────┘
      MCP + webhooks            │ webhooks → switchyard intake
 ┌──────────────┴───────────────▼──────────────────────────────────┐
-│ LAYER 3  switchyard-ops (this repo): pool-spawn, loop-health,    │
-│          intake-sweep, nightly-retro, stray-reaper, config-drift │
-│          + brakeman / answerer / judge, and sy-item-work         │
+│ LAYER 3  switchyard-ops (RETIRED): pool-spawn, balance-sweep,    │
+│          loop-health, intake-sweep, nightly-retro, stray-reaper, │
+│          config-drift + brakeman / answerer / judge, sy-item-work│
 │ LAYER 2  switchyard-mcp overlay (this repo): MCP into every rig  │
 │ LAYER 1  gascity pack (pinned sha): the build workflow graph —   │
 │          formulas, role targets, artifact schemas                │
@@ -64,23 +73,24 @@ This repo names no agent and no rig. It describes positions; a city fills them.
 
 The mayor is **not** from a pack here. gascity ships no always-on crew, so
 `gc init` writes an `agents/mayor/` into the city and you declare its
-`[[named_session]]` yourself. This is load-bearing: every escalation in this
-pack is `gc mail send mayor`, and all 14 call sites redirect to `/dev/null`, so
-a city with no resident mayor loses its entire escalation path **silently**.
+`[[named_session]]` yourself. This is load-bearing: every escalation in the
+retired `switchyard-ops` pack was `gc mail send mayor` with the call redirected
+to `/dev/null`, and any order you write will escalate the same way, so a city
+with no resident mayor loses its entire escalation path **silently**.
 
 Note the dog pool comes from `bd` (the Dolt beads provider), not from the
 methodology pack — so it survives a Layer-1 swap. It is only needed for
-*formula* orders; all ten of this pack's own orders are `exec` scripts the
-controller runs directly.
+*formula* orders; every one of the retired pack's own orders was an `exec`
+script the controller ran directly.
 
 ### Per product rig (the delivery cell)
 
 | Role | From | Mode | Job |
 |---|---|---|---|
 | **coordinator** | city-local | pinned, `min=1` | The rig's brain: reconcile with switchyard, triage epics, set priorities, sling beads |
-| **brakeman** ×2–4 | switchyard-ops | on-demand | Workers: claim bead → worktree → build → push → open PR |
-| **answerer** | switchyard-ops | on-demand | Drains open PRD questions |
-| **judge** | switchyard-ops | on-demand | Drains the awaiting-validation backlog |
+| ~~**brakeman** ×2–4~~ | switchyard-ops (retired) | on-demand | Was: claim bead → worktree → build → push → open PR |
+| ~~**answerer**~~ | switchyard-ops (retired) | on-demand | Was: drain open PRD questions |
+| ~~**judge**~~ | switchyard-ops (retired) | on-demand | Was: drain the awaiting-validation backlog |
 | gascity **role targets** | gascity `roles` | stateless | `gc.implementation-worker`, `gc.publisher`, `gc.run-operator` — what the formula's steps dispatch *to* |
 
 gascity's roles are not sessions you scale; they are targets a formula step
@@ -90,31 +100,41 @@ names. The pool you size is `brakeman`.
 work costs one idle coordinator; a rig under load fans workers out to its cap. A
 suspended rig keeps its config and costs zero.
 
-That fan-out is Layer 3's, not the controller's: gc's `scale_check` cannot be
-relied on to spawn, so the `pool-spawn` order reads each rig's claimable demand
-itself and starts a worker for it — bounded by the pool's `max_active_sessions`,
-so elastic still means capped.
+That fan-out was Layer 3's, not the controller's: gc's `scale_check` cannot be
+relied on to spawn, so the `pool-spawn` order read each rig's claimable demand
+itself and started a worker for it — bounded by the pool's `max_active_sessions`,
+and, once `balance-sweep` (PRD #397) published a fresh `balancer.targets`, by
+`min(max_active_sessions, that lane's target)`: the balancer turned the dial
+within the operator's bounds and never above them. Elastic still meant capped.
 
-`switchyard-ops` discovers coordinators automatically — anything with
-`pool.min >= 1` that is not suspended. There is no roster to maintain.
+`switchyard-ops` discovered coordinators automatically — anything with
+`pool.min >= 1` that is not suspended — so there was no roster to maintain for
+that. With the pack retired, nothing in this repo discovers or nudges a
+coordinator; a pinned one wakes on its own `idle_timeout`.
 
 ### The singleton-alias exception
 
 A coordinator whose alias is held by a **manual** session must stay `min=0`.
 Pinning it `min=1` does not keep that session alive: the reconciler only counts
 sessions it spawned, so `min=1` mints a *second* session that fights the alias.
-Declare such agents in `roster.conf`'s `PINNED_EXTRA`; `loop-health` keeps them
-alive by waking the alias, and `config-drift` mails the mayor if anything
-re-pins them. This cost a real incident to learn; it is encoded here so it costs
-nobody else one.
+Under `switchyard-ops` such agents went in `roster.conf`'s `PINNED_EXTRA`:
+`loop-health` kept them alive by waking the alias, and `config-drift` mailed
+the mayor if anything re-pinned them. Both orders retired with the pack, so
+today the rule is just: leave it `min=0`. This cost a real incident to learn; it
+is encoded here so it costs nobody else one.
 
 ## The worker lane
 
-This is the one place Layer 3 knows something about Layer 1, so it is worth
+> **Retired** with `switchyard-ops` (and `switchyard-build`, which carried the
+> per-item fan-out decomposer PRD #372 hung beneath `implement`). Kept as the
+> design record of the lane switchyard-conductor now runs; see the note at the
+> top.
+
+This is the one place Layer 3 knew something about Layer 1, so it is worth
 stating plainly rather than leaving in a formula comment.
 
-A brakeman runs **`sy-item-work`** (this pack's formula), which extends
-gascity's `implementation-base` and adds a publish step:
+A brakeman ran **`sy-item-work`** (that pack's formula), which extended
+gascity's `implementation-base` and added a publish step:
 
 ```
 prepare-worktree → implement → publish → close-source-anchor

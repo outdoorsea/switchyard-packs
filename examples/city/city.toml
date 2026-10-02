@@ -7,8 +7,8 @@
 #
 # NOTE: `gc rig add` / `gc rig resume` REWRITE this file and drop comments.
 # After any gc command that rewrites config, re-check your [[patches.agent]]
-# blocks. The config-drift order mails the mayor when the tracked surface
-# diverges from git HEAD.
+# blocks. (The config-drift order that mailed the mayor when the tracked surface
+# diverged from git HEAD retired with the switchyard-ops pack.)
 
 [workspace]
 provider = "claude"
@@ -17,40 +17,36 @@ provider = "claude"
   [providers.claude]
     base = "builtin:claude"
 
-  # REQUIRED, even if you never authenticate deepseek's wrapper CLI.
-  #
-  # switchyard-ops' judge and security-scout name this provider deliberately —
-  # they validate and review code on a model that does not share the blind spots
-  # of the one that wrote it. A referenced-but-absent provider does NOT degrade
-  # gracefully: it rejects the WHOLE city config, so `gc agent list`,
-  # `gc order list` and `gc config show` all fail with "provider catalog is
-  # missing referenced providers", not just those agents.
+  # OPTIONAL now. This stanza was REQUIRED while the retired `switchyard-ops`
+  # pack's judge and security-scout agents named this provider — they validated
+  # and reviewed code on a model that does not share the blind spots of the one
+  # that wrote it. A city importing only `switchyard-mcp` has no pack agent
+  # naming a second provider, so nothing rejects a config without it; it stays
+  # in this reference because it is where the model-independence choice is
+  # written down. The rule it illustrates still holds for any agent you declare:
+  # a referenced-but-absent provider does NOT degrade gracefully, it rejects the
+  # WHOLE city config, so `gc agent list`, `gc order list` and `gc config show`
+  # all fail with "provider catalog is missing referenced providers".
   #
   # deepseek is a WRAPPED provider: it spawns the `opencode` CLI, which holds
   # its own credential store — so the binary to install and authenticate is
   # `opencode`, and no DEEPSEEK_API_KEY env var is involved.
-  #
-  # Declaring it is not the same as configuring it. judge-sweep tests the
-  # wrapper's own answer, so an unauthenticated opencode leaves the judge lane
-  # dormant with a named reason rather than in a silent spawn-fail loop;
-  # security-scan has no such probe yet, so there an unauthenticated wrapper
-  # still reaches the spawn and reads as a generic startup failure.
-  # (`gc doctor --fix` would add a `builtin:deepseek` alias, which is NOT what
-  # this pack's lanes run — write this stanza as shown.)
+  # (`gc doctor --fix` would add a `builtin:deepseek` alias instead — write the
+  # stanza as shown if you want the wrapper.)
   #
   # ⚠ WHICH MODEL OPENCODE RUNS IS NOT SET HERE, and that is the one thing to
   # get right about this stanza. `model` is a REJECTED provider key (see
   # packs/docs/GAS-CITY-MECHANICS.md), so a model can only be pinned through
   # `args`/`env` — and with neither, gc spawns bare `opencode`, which picks a
   # model from opencode's OWN config. opencode is vendor-agnostic, so an
-  # operator who authenticates it against the same vendor as `[workspace]
-  # provider` above gets a judge and a security reviewer reasoning on the very
-  # model that wrote the code. NOTHING DETECTS THAT — not here and not
-  # server-side. switchyard refuses a verdict signed by the builder's agent REF,
-  # and refuses (409) a judgment whose `validator_runtime` string equals the
-  # builder's recorded `claim_runtime` — but that second check is vacuous when
-  # either side sends no runtime, and it compares runtime STRINGS, not models,
-  # so two differently-named runtimes on one model pass. Point opencode at a
+  # operator who authenticates a judging wrapper against the same vendor as
+  # `[workspace] provider` above gets a judge reasoning on the very model that
+  # wrote the code. NOTHING DETECTS THAT — not here and not server-side.
+  # switchyard refuses a verdict signed by the builder's agent REF, and refuses
+  # (409) a judgment whose `validator_runtime` string equals the builder's
+  # recorded `claim_runtime` — but that second check is vacuous when either side
+  # sends no runtime, and it compares runtime STRINGS, not models, so two
+  # differently-named runtimes on one model pass. Point the wrapper at a
   # genuinely different vendor, or pin one here, e.g.:
   #   args = ["--model", "deepseek/deepseek-v4-flash-free"]
   [providers.deepseek]
@@ -64,26 +60,31 @@ name = "example-rig"
 prefix = "ex"
 default_branch = "main"
 
-# A bare `gc sling <bead>` with no target picks one of these at random. Name the
-# worker pool here and dispatch never has to know an agent's name.
-# (These keys must precede [rigs.imports] — a bare key after a subtable header
-# would be parsed as belonging to that subtable.)
-default_sling_targets = ["example-rig/switchyard-ops.brakeman"]
+# A bare `gc sling <bead>` with no target picks one of `default_sling_targets`
+# at random. This reference used to name the `brakeman` worker pool here
+# (`example-rig/switchyard-ops.brakeman`); that pool retired with the
+# switchyard-ops pack, and naming an agent no pack ships is exactly the kind of
+# reference a copied city cannot resolve. Nothing from this repo fills the slot
+# any more — the build lane runs under switchyard-conductor — so set it only if
+# you declare a worker agent of your own.
+# (If you do, these keys must precede [rigs.imports] — a bare key after a
+# subtable header would be parsed as belonging to that subtable.)
+# default_sling_targets = ["example-rig/<your-worker-agent>"]
 
 # NO formula_vars ARE REQUIRED HERE.
 #
 # If you are migrating a rig off the gastown lane, DELETE its
 # `formula_vars = { binding_prefix = "gastown." }` line. That setting existed
 # because gastown's mol-polecat-work rendered its refinery handoff target from
-# the binding of the pack that COOKED the formula (switchyard-ops), producing a
-# handoff to an agent nobody ships — silently stranding the bead. There is no
-# refinery and no handoff in a gascity city: the worker opens its own PR. The
-# setting is now inert, and leaving it in place is misleading rather than
-# harmful.
+# the binding of the pack that COOKED the formula (the since-retired
+# switchyard-ops), producing a handoff to an agent nobody ships — silently
+# stranding the bead. There is no refinery and no handoff in a gascity city:
+# the worker opens its own PR. The setting is now inert, and leaving it in
+# place is misleading rather than harmful.
 
   [rigs.imports]
     # gascity's role agents (gc.implementation-worker, gc.publisher,
-    # gc.run-operator, ...) — the targets sy-item-work's steps dispatch to.
+    # gc.run-operator, ...) — the targets gascity's formula steps dispatch to.
     # Bound as `gc` to match the binding its formulas expect.
     [rigs.imports.gc]
       source = "https://github.com/gastownhall/gascity-packs/tree/main/gascity/roles"
@@ -91,21 +92,23 @@ default_sling_targets = ["example-rig/switchyard-ops.brakeman"]
     [rigs.imports.switchyard-mcp]
       source = "https://github.com/outdoorsea/switchyard-packs/tree/main/switchyard-mcp"
       version = "sha:<pin-a-mirror-commit>"
-    # switchyard-ops is NOT imported here. Its single city-scope import
-    # (pack.toml) already gives this rig a brakeman pool; importing it again at
-    # rig scope would register every order a second time. Sling with:
-    #   gc sling example-rig/switchyard-ops.brakeman ex-1234
+    # switchyard-mcp is the ONLY pack this repo still publishes. The city-scope
+    # switchyard-ops import that once gave this rig a brakeman pool is retired
+    # (see pack.toml and packs/README.md); there is no second switchyard pack to
+    # import at either scope.
 
-# --- Coordinators: pinned. Workers: elastic. -------------------------------
+# --- Coordinators: pinned. ---------------------------------------------------
 # A coordinator is a long-lived crew agent that owns one rig's switchyard
-# project. Pin it with min_active_sessions = 1 and switchyard-ops will discover
-# it automatically — no roster to maintain.
+# project. Pin it with min_active_sessions = 1. (The retired switchyard-ops
+# pack discovered pinned coordinators automatically and nudged them on its
+# sweep cadence; nothing this repo ships does that now — a pinned coordinator
+# wakes on its own idle_timeout.)
 #
 # EXCEPTION — singleton aliases: if a coordinator's alias is held by a manual
 # session you start yourself, do NOT pin it. min=1 does not keep your session
 # alive (the reconciler only counts sessions it spawned); it mints a SECOND
-# session that fights the alias. Leave it min=0 and list it in
-# roster.conf's PINNED_EXTRA so loop-health wakes the alias instead.
+# session that fights the alias. Leave it min=0. (The roster.conf PINNED_EXTRA
+# list that once let loop-health wake such an alias retired with the pack.)
 #
 # [[patches.agent]]
 #   dir = "example-rig"
@@ -134,8 +137,8 @@ default_sling_targets = ["example-rig/switchyard-ops.brakeman"]
 # rig.
 #
 # Coordinators are the tier worth pinning and the tier worth watching. Pin them
-# min=1/max=1 so switchyard-ops discovers them automatically, then give the
-# mechanical ones a cheap model:
+# min=1/max=1 and raise the idle_timeout, so an idle city is not paying a fresh
+# LLM turn per coordinator per hour to find an empty queue:
 #
 # [[patches.agent]]
 #   name = "example-rig/coordinator"

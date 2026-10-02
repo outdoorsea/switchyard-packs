@@ -21,8 +21,12 @@ Every surface below is the same two things:
    into your project root or point your client's system prompt at it.
 
 That's it. A **single terminal** runs one such agent; a **Gas City** runs a
-*fleet* of them — coordinators and `brakeman` workers on a 24-hour heartbeat —
-but the brain (`AGENTS.md`) and the connection (`switchyard-mcp`) are identical.
+*crew* of them — a pinned coordinator per rig, with the `switchyard-mcp` overlay
+projected into every agent's working directory — but the brain (`AGENTS.md`)
+and the connection (`switchyard-mcp`) are identical. (The `brakeman` worker
+pool and the 24-hour heartbeat of timed orders shipped in the retired
+`switchyard-ops` pack; those lanes run under switchyard-conductor now, outside
+any city — see [`../README.md`](../README.md).)
 
 ## Shared prerequisites (once per machine)
 
@@ -49,13 +53,14 @@ machine-local file — **never** hardcode it into a client's settings.
 | **ChatGPT** | chatgpt.com Apps & Connectors over the remote MCP connector — a URL and a browser consent, nothing installed | [`chatgpt.md`](chatgpt.md) |
 | **Hermes** | Nous Research self-improving terminal agent + gateway; MCP-native, with per-server tool filtering | [`hermes.md`](hermes.md) |
 | **openclaw** | cross-platform personal assistant; MCP-capable, reads workspace `AGENTS.md` | [`openclaw.md`](openclaw.md) |
-| **Gas City** | the fleet: coordinators + `brakeman` workers on a heartbeat — **agent-executable setup runbook** | [`gas-city.md`](gas-city.md) |
+| **Gas City** | the crew: a pinned coordinator per rig, every agent carrying the `switchyard-mcp` overlay — **agent-executable setup runbook** | [`gas-city.md`](gas-city.md) |
 
 **Every light surface is the same three steps:** install the client, register
 `switchyard-mcp`, add `AGENTS.md`. The per-surface page only spells out *where*
-that client keeps its MCP config. **Gas City** is the heavy path — it wraps the
-same MCP overlay (`switchyard-mcp` pack) and adds the timed orders and worker
-pool; start from `examples/city/`.
+that client keeps its MCP config. **Gas City** is the heavy path — it projects
+the same MCP overlay (the `switchyard-mcp` pack) into a whole rig's crew under
+`gc`; start from `examples/city/`. It adds no timed orders and no worker pool
+any more — those retired with `switchyard-ops`.
 
 ## Keep the fleet honest (Gas City only)
 

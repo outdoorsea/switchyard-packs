@@ -181,10 +181,19 @@ interval = "30m"
 exec     = "$PACK_DIR/assets/scripts/lane-ensure.sh judge judging-validator"
 ```
 
-Orders are **mechanical `exec` scripts with no LLM cost**. The switchyard-ops
-convention is that an order decides *whether* to start a session; the judgment
-lives in the agent's prompt. This keeps a frequent cadence cheap: `pool-spawn`
-runs every 60s (1440×/day) and costs nothing until it finds real demand.
+> **Retired.** The order layer described here shipped in the `switchyard-ops`
+> pack, which was removed with switchyard-companion
+> ([`../README.md`](../README.md#gas-city-packs)); its lanes run under
+> switchyard-conductor. The mechanics are still how `gc` orders work; the
+> examples are the design record of a pack this repo no longer publishes.
+
+Orders are **mechanical `exec` scripts with no LLM cost** — the order body
+itself, that is. The switchyard-ops convention was that an order decides
+*whether* to start a session; the judgment lives in the agent's prompt, and
+the session it starts is a paid one, which is why the lanes that spawned LLM
+sessions (judge, security-scan, …) sat behind a pre-spawn demand gate that read
+the queue first. That kept a frequent cadence cheap: `pool-spawn` ran every 60s
+(1440×/day) and cost nothing until it found real demand.
 
 `$PACK_DIR` resolves to the installed pack root. Never hardcode the
 content-addressed cache path — it changes on every re-pin.
@@ -288,12 +297,15 @@ optimizes output length is optimizing the wrong term by two orders of magnitude.
 - **Rigs:** `gc-fremont` (HQ, prefix `gf`), `meety-local` (`ml`, suspended),
   `switchyard` (`sw`), `faultline` (`fa`).
 - **City imports:** `bd`, `core`, `gascity`. Rigs import `gascity/roles` as `gc`.
-- **`switchyard-ops` is NOT imported here.** The `gc.*` agents in this city
+- **`switchyard-ops` was NOT imported here**, and cannot be now: the pack is
+  retired and no longer on the mirror. The `gc.*` agents in this city
   (design-author, implementation-worker, gap-analyst, review-synthesizer, …) come
-  from `gascity/roles`, not from switchyard-ops.
+  from `gascity/roles`.
 - **`switchyard-mcp` is NOT imported** by any rig in `city.toml`.
 
-Both are prerequisites for switchyard-ops work landing in this city.
+The second is the one prerequisite that still exists for this city's crew to
+drive switchyard; the lanes `switchyard-ops` ran run under switchyard-conductor,
+outside any city.
 
 ---
 

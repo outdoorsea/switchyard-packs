@@ -59,9 +59,10 @@ executes → escalate to mayor on anomaly. No agent exists merely to run a clock
 
 | Order | Trigger | What runs |
 |---|---|---|
-| `pool-spawn` | 1m | Spawn a brakeman for each rig with claimable pool demand and a free WIP slot, and direct-assign it the demand bead |
+| `pool-spawn` | 1m | Spawn a brakeman for each rig with claimable pool demand and a free WIP slot, and direct-assign it the demand bead; the slot ceiling is `min(max_active_sessions, the balancer's published target)` when `balancer.targets` is present and fresh (PRD #397) |
+| `balance-sweep` | 5m | Measure the queue depth behind each parallel lane (brakeman, reviewer) and publish demand-driven concurrency targets to `balancer.targets`, clamped into operator-set `BALANCER_BOUNDS`; clamp both lanes to their floors while the reviewed-but-unmerged queue backs up; one JSON snapshot line of all six pipeline-stage depths per cycle. Off until `BALANCER_RIGS` names a rig (PRD #397) |
 | `answer-sweep` | 20m | Reap finished answerers, then keep one alive per rig whose open-question queue is non-empty |
-| `judge-sweep` | 30m | Reap finished judging-validators, then keep one alive per rig whose judgment queue is non-empty |
+| `judge-sweep` | 30m | Reap finished judging-validators, then keep one alive per rig whose judgment queue is non-empty; the balancer's target is a ceiling on that one spawn, so a published `0` holds the lane (PRD #397) |
 | `loop-health` | 30m | Verify every pinned session has a live process **and** the status probe answers; wake what's down; escalate if the probe itself lies |
 | `integration-lane` | 2h | *(removed, no successor)* Bundled the currently-mergeable PRs onto one branch, tested the **combination** the per-PR checks never measure, and handed a human one reviewable merge — it never merged itself |
 | `intake-sweep` | 4h | Nudge each coordinator to triage its project's intake and dispatched epics |

@@ -39,16 +39,24 @@ largest idle line item. Raise it on the non-interactive ones:
 ```toml
 [[patches.agent]]
   name = "<rig>/<coordinator>"
-  idle_timeout = "168h"      # switchyard-ops nudges it on a real cadence anyway
+  idle_timeout = "168h"      # it wakes on this timer and on an explicit nudge, nothing else
 ```
 
-The sweeps (`intake-sweep`, `answer-sweep`, `judge-sweep`) are what actually
-drive a coordinator's work, and those run on their own timers. A short
-`idle_timeout` on top of them buys nothing but no-op wakes.
+The retired `switchyard-ops` pack's sweeps (`intake-sweep`, `answer-sweep`,
+`judge-sweep`) used to drive a coordinator's work on their own timers, which
+made a short `idle_timeout` pure no-op wakes. Nothing this repo ships nudges a
+coordinator now, so the `idle_timeout` *is* its whole cadence: set it to how
+often you want a triage pass, and no shorter.
 
 Leave the **mayor** hot if a human talks to it.
 
 ### 2. Worker pool blast radius
+
+> **Retired.** The `brakeman`, `answerer` and `judge` pools shipped in
+> `switchyard-ops` ([`../README.md`](../README.md#gas-city-packs)); a city
+> importing only this repo's packs runs none of them, so there is no pool here
+> to cap. Kept as the record of why the cap existed.
+
 The `brakeman` pool defaults to `max_active_sessions = 4`. Under a drain-churn
 storm (the controller drains a mid-build worker that emitted no output for a few
 minutes → reconciler respawns it → repeat), that is several parallel full-prompt
@@ -67,6 +75,10 @@ rig and reaps its own finished ones at the top of every cycle, so the population
 is bounded by the sweep itself rather than by this cap.
 
 ### 4. `intake-sweep` cadence
+
+> **Retired** with `switchyard-ops`, like every order in this section; the
+> lever today is the coordinator's own `idle_timeout` (lever 1).
+
 `intake-sweep` (default `interval = "4h"`) nudges **every** coordinator into a
 triage pass — a forced LLM turn — even when its switchyard intake is empty (6
 no-op wakes/day/coordinator). The *right* fix is a mechanical emptiness gate
@@ -89,6 +101,10 @@ trim the two big legs 6→3 and collapse the 3+3 rounds to 1–2.
 
 ## Already cheap — do NOT "optimize" these
 
+> **Retired.** Every order below shipped in `switchyard-ops`; the list is the
+> design record of the cadence discipline, not a schedule a city built from
+> this repo runs.
+
 These orders run mechanical `exec` scripts with **no LLM**; leaving them frequent
 is correct:
 
@@ -99,9 +115,17 @@ is correct:
   *is* a paid worker. What keeps that honest is that it spawns one only when a
   rig has demand a worker could actually claim **and** a free WIP slot, so the
   spend tracks real queued work and is capped by the pool's
-  `max_active_sessions`. Do not stretch the cadence to save tokens: it buys
+  `max_active_sessions` — and, when `balance-sweep` has published a fresh
+  `balancer.targets`, by `min(max_active_sessions, the brakeman target)`
+  (PRD #397). Do not stretch the cadence to save tokens: it buys
   nothing (an idle city spawns nothing at 1m either) and costs the guarantee that
   a slung bead gets a worker within an order cycle.
+- `balance-sweep` (5 min) — reads each balanced rig's queue depths (the
+  switchyard claim pool, the repo's PR queues, unpromoted staging), writes
+  concurrency targets to `balancer.targets` and one snapshot line per cycle.
+  ~288 runs/day, zero LLM, and off entirely until `BALANCER_RIGS` names a rig
+  (PRD #397). It is the dial `pool-spawn` (above) and `judge-sweep` read as a
+  ceiling; stretching it only slows how fast a backed-up queue is answered.
 - `publish-gate` (5 min) — reads closed worker beads, mails the mayor about any
   with no PR. 288 runs/day, zero LLM, and it reports each bead once, so a
   standing problem does not become a standing bill.
@@ -117,23 +141,29 @@ wake ~weekly, not hourly. Don't "fix" them down.
 `gc` matches `[[patches.agent]]` on the **fully-qualified** instance name:
 
 - city-scoped agent → `mayor`
-- rig-scoped agent  → `<rig>/switchyard-ops.brakeman`, **one entry per rig**
+- rig-scoped agent  → `<rig>/<pack>.<agent>`, e.g. `<rig>/gc.implementation-worker`
+  for a gascity role, **one entry per rig**
 
-A bare leaf name (`brakeman`) or a pack-def name without a rig
-(`switchyard-ops.brakeman`)
+A bare leaf name (`implementation-worker`) or a pack-def name without a rig
+(`gc.implementation-worker`)
 fails with `agent "…" not found in merged config` and makes **`gc config show`
 exit 1 — the whole config is rejected.** There is no def-level fan-out; a
-rig-scoped agent needs an entry for every rig that runs it.
+rig-scoped agent needs an entry for every rig that runs it. (Older copies of
+this page used `<rig>/switchyard-ops.brakeman` as the example; that agent
+retired with its pack, and a patch naming it is now exactly this error.)
 
 Verify a patch actually landed:
 
 ```sh
-gc config show | grep -A12 'name = "brakeman"'   # shows the resolved idle_timeout / max_active_sessions
+gc config show | grep -A12 'name = "<coordinator>"'   # shows the resolved idle_timeout / max_active_sessions
 ```
 
 ## Copy-paste starter
 
-Put in `city.toml` under `[patches]`. Repeat both blocks for each rig.
+Put in `city.toml` under `[patches]`. Repeat the block for each rig. (The
+second block older copies carried, capping `<rig>/switchyard-ops.brakeman` at
+`max_active_sessions = 2`, names a pool no pack here ships any more — leave it
+out.)
 
 ```toml
 [[patches.agent]]
@@ -141,10 +171,6 @@ Put in `city.toml` under `[patches]`. Repeat both blocks for each rig.
   min_active_sessions = 1
   max_active_sessions = 1
   idle_timeout = "168h"
-
-[[patches.agent]]
-  name = "<rig>/switchyard-ops.brakeman"
-  max_active_sessions = 2
 ```
 
 ## Future work

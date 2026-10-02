@@ -67,7 +67,7 @@ cd ~/gc-<name>
 
 The `gascity` template already imports `bd`, `core`, and `gascity` (bound as
 `gc`, with `gascity/roles` as the default rig import), so Step 4 adds only
-`switchyard-ops` + `switchyard-mcp`.
+`switchyard-mcp` — the one pack this repo still publishes.
 
 `gascity` is also `gc init`'s default template, so a bare `gc init` gets you the
 same thing.
@@ -78,7 +78,7 @@ ls .gc pack.toml city.toml packs.lock >/dev/null && echo "scaffold ok"
 gc dolt health        # Server: running … (Dolt starts even with --no-start)
 ```
 
-## Step 4 — Add the first rig, then the switchyard packs  **(HUMAN)**
+## Step 4 — Add the first rig, then the switchyard pack  **(HUMAN)**
 
 A rig is a **local checkout of the product's git repo**. Clone the product first;
 `gc rig add` probes its `origin/HEAD` and writes canonical rig imports.
@@ -92,23 +92,25 @@ gc rig add /path/to/product-repo --name <rig> --prefix <p>
 # 2. confirm the template's imports (bd, core, gascity already present)
 gc import list
 
-# 3. switchyard heartbeat + brakeman pool — city-scope, ONCE:
-gc import add https://github.com/outdoorsea/switchyard-packs/tree/main/switchyard-ops
-
-# 4. switchyard MCP overlay — per-rig (the rig must exist first):
+# 3. switchyard MCP overlay — per-rig (the rig must exist first):
 gc import add https://github.com/outdoorsea/switchyard-packs/tree/main/switchyard-mcp --rig <rig>
 
 gc import install && gc import check
 ```
 
-Then add the **one required switchyard-ops setting** to your rig's block in
-`city.toml` — copy it verbatim from the reference
-[`examples/city/city.toml`](../examples/city/README.md) — and `gc reload`:
-- `default_sling_targets = ["<rig>/switchyard-ops.brakeman"]`
+There is **no city-scope switchyard import**. Older guides added
+`switchyard-ops` here — the timed-order heartbeat and `brakeman` worker pool —
+and a `default_sling_targets = ["<rig>/switchyard-ops.brakeman"]` line in the
+rig's `city.toml` block. That pack is retired and no longer on the mirror
+(root `README.md`): declaring it makes `gc import install` refuse the source,
+after which the declared-but-uninstalled import rejects the whole city config.
+Its lanes run under
+[switchyard-conductor](https://github.com/outdoorsea/switchyard-conductor),
+outside the city; add neither line.
 
-(If you are following an older guide: there is no `formula_vars = {
-binding_prefix = ... }` any more. It pinned the refinery handoff target, and
-there is no refinery — the worker opens its own PR.)
+(Likewise there is no `formula_vars = { binding_prefix = ... }` any more. It
+pinned the refinery handoff target, and there is no refinery — a worker opens
+its own PR.)
 
 Then install gascity's build-artifact validator into the **rig root** — **nothing
 does this for you**, and without it every implement step fails its exec check
@@ -128,8 +130,8 @@ cp -R "$GASCITY/schemas/build" "$RIG/schemas/"
 printf '\n.gc/\nschemas/build/\n' >> "$RIG/.gitignore"
 ```
 
-**Import `switchyard-ops` at city scope only** — a second `--rig` import
-double-registers every order (root README's scope table).
+**Import `switchyard-mcp` per rig only** — it is an overlay projected into that
+rig's agent working directories, never a city-wide import (root README).
 
 **Checkpoint:** `gc import check` passes; `packs.lock` has real SHAs.
 
@@ -149,22 +151,23 @@ gc start              # start the controller + reconcile agents up
 
 ```sh
 gc dolt health                         # Server: running … healthy
-gc agent list | grep -E 'brakeman|answerer|judge|mayor'   # crew present
+gc agent list | grep -E '<rig>/|mayor'  # gascity's role agents expanded into the rig, plus the mayor
 gc doctor                              # expect green; order-firing warnings settle after a tick
 ```
 `gc import install` does **not** materialize formulas — the supervisor does, a
 tick later. If `gc bd formula list` looks short right after install, wait a cycle.
 
-**Checkpoint:** `gc dolt health` is healthy and `gc agent list` shows a
-`brakeman` pool in your rig.
+**Checkpoint:** `gc dolt health` is healthy and `gc agent list` shows gascity's
+`gc.*` role agents in your rig. (No `brakeman` pool appears: that pool shipped
+in the retired `switchyard-ops` pack, and nothing this runbook installs
+replaces it in-city.)
 
 ## Step 7 — Harden token spend
 
 New crew defaults wake often and re-bill their prompt each time. Apply the
-`[[patches.agent]]` blocks from [`../docs/TOKEN-HARDENING.md`](../docs/TOKEN-HARDENING.md)
-to `city.toml` (coordinator `idle_timeout`, `brakeman` `max_active_sessions`),
-then `gc reload`. Verify with
-`gc config show | grep -A12 'name = "brakeman"'`.
+`[[patches.agent]]` block from [`../docs/TOKEN-HARDENING.md`](../docs/TOKEN-HARDENING.md)
+to `city.toml` (the coordinator's `idle_timeout`), then `gc reload`. Verify with
+`gc config show | grep -A12 'name = "<coordinator>"'`.
 
 ## Step 8 — Connect to switchyard + first work  **(HUMAN)**
 
@@ -175,19 +178,18 @@ then `gc reload`. Verify with
    ```
 2. In a coordinator session, run the [`AGENTS.md`](AGENTS.md) loop: `whoami` →
    `set_scope` → `get_project_briefing` → triage `list_intake`.
-3. Dispatch a bead to the pool: `gc sling <rig>/switchyard-ops.brakeman <bead-id>`
-   (or bare `gc sling <bead-id>` — `default_sling_targets` routes it).
-4. Wait one minute, then `gc session list`. The `pool-spawn` order should have
-   started a brakeman and assigned it that bead — no manual `gc session new`.
-   Nothing there after a couple of cycles means the bead is not *claimable*
-   demand (already assigned, or a self-blocked molecule root rather than the work
-   bead), or the pool is at `max_active_sessions`; a genuine spawn-or-assign
-   failure mails the mayor, so check the mayor's inbox too.
+3. There is no in-city worker pool to dispatch to. The `brakeman` pool, the
+   `pool-spawn` order that staffed it, and the judge / answerer / review lanes
+   all shipped in the retired `switchyard-ops` pack; they run under
+   [switchyard-conductor](https://github.com/outdoorsea/switchyard-conductor)
+   now, which needs no city and is set up outside this runbook. What this city
+   gives you is a crew that reaches the switchyard backlog through the MCP
+   tools.
 
-**Done.** The city now runs the 24-hour loop from
-[`../docs/LOOP.md`](../docs/LOOP.md). Keep it honest with
-[`../docs/TOKEN-HARDENING.md`](../docs/TOKEN-HARDENING.md) and the `config-drift`
-order.
+**Done.** The city's crew now drives switchyard. Keep its idle bill honest with
+[`../docs/TOKEN-HARDENING.md`](../docs/TOKEN-HARDENING.md);
+[`../docs/LOOP.md`](../docs/LOOP.md) is the design record of the 24-hour cadence
+the retired heartbeat ran, not a schedule this city executes.
 
 ---
 

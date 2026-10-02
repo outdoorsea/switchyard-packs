@@ -7,7 +7,9 @@
 #   Layer 0  gc core .......... sessions, rigs, mail, beads, orders, wisps
 #   Layer 1  gascity .......... the build-methodology pack (pinned, unforked)
 #   Layer 2  switchyard-mcp ... overlay: switchyard MCP into every rig's crew
-#   Layer 3  switchyard-ops ... this city's own heartbeat (timed orders)
+#   Layer 3  (retired) ........ the timed-order heartbeat and worker pool that
+#                               shipped as switchyard-ops; its lanes now run
+#                               under switchyard-conductor, outside the city
 
 [pack]
 name = "example-city"
@@ -30,17 +32,20 @@ schema = 2
     source = "https://github.com/gastownhall/gascity/tree/main/examples/bd"
     version = "sha:<pin-a-gascity-commit>"
 
-  # --- Layer 3: the city heartbeat + the worker pool -------------------------
-  # This ONE import yields both: the timed orders, and a brakeman pool in every
-  # rig. Do not also import it per-rig — that double-registers every order.
-  # switchyard-packs is the PUBLIC mirror of switchyard's packs/ tree — clone it
-  # anonymously, pin a commit. Prefer `gc import add <url>` over hand-editing:
-  # it resolves the sha and writes packs.lock for you.
-  [imports.switchyard-ops]
-    source = "https://github.com/outdoorsea/switchyard-packs/tree/main/switchyard-ops"
-    version = "sha:<pin-a-mirror-commit>"
+  # --- Layer 3: NO city-scope import from switchyard any more -----------------
+  # The city heartbeat + worker pool used to arrive here as ONE city-scope
+  # import, `switchyard-ops`. That pack is retired and no longer published to
+  # the mirror (see packs/README.md), so declaring it is an outage, not a stale
+  # line: the source resolves to nothing, `gc import install` refuses it, and
+  # the declared-but-uninstalled import then rejects the WHOLE city config
+  # before `gc register` or `gc start` runs. Its lanes run under
+  # switchyard-conductor, which needs no city, no `gc` and no import.
 
-# Layer 2 (switchyard-mcp) is imported PER RIG, not city-wide — see city.toml.
+# Layer 2 (switchyard-mcp) — the only pack this repo still publishes — is
+# imported PER RIG, not city-wide — see city.toml. switchyard-packs is the
+# PUBLIC mirror of switchyard's packs/ tree — clone it anonymously, pin a
+# commit. Prefer `gc import add <url> --rig <rig>` over hand-editing: it
+# resolves the sha and writes packs.lock for you.
 
 # The mayor is CITY-LOCAL, not from a pack.
 #
@@ -48,9 +53,10 @@ schema = 2
 # already declared. gascity ships no always-on crew at all — it is a methodology
 # pack, not a session-topology one — so `gc init` writes an `agents/mayor/` into
 # the city itself and you declare its session here. Without this block nothing
-# is resident, and every `gc mail send mayor` in switchyard-ops' orders (the
-# pack's entire escalation path) silently goes nowhere: those calls are all
-# `>/dev/null 2>&1`, so a missing mayor produces no error, just silence.
+# is resident, and every `gc mail send mayor` — the escalation path the retired
+# switchyard-ops orders used, and the one any order you write will use —
+# silently goes nowhere when redirected to /dev/null: a missing mayor produces
+# no error, just silence.
 [[named_session]]
   template = "mayor"
   mode = "always"

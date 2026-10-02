@@ -29,18 +29,19 @@ gc register && gc start           # register the city, start the supervisor
 does, a tick later. If `gc bd formula list` looks short immediately after an
 install, wait a cycle before concluding anything is wrong.
 
-## Configure switchyard-ops for this city
+## Nothing to configure for the heartbeat — it retired
 
-Everything city-specific lives outside the pack, in an un-versioned file:
-
-```sh
-cp "$(gc import why switchyard-ops --path)/assets/roster.conf.example" \
-   "<city>/.gc/runtime/packs/switchyard-ops/roster.conf"
-```
-
-With no `roster.conf` at all, switchyard-ops still works: it derives its roster
-from `gc agent list --json` (every agent with `pool.min >= 1` that is not
-suspended). You only need the file for singleton aliases and the retro agent.
+This section used to tell you to copy `switchyard-ops`' `roster.conf.example`
+into the installed pack runtime and set its per-lane opt-ins (and, later, the
+`BALANCER_*` bounds that were the factory balancer's only switch). Both the file
+and the pack that read it are gone — `switchyard-ops` is retired and no longer
+on the mirror (see [`../../README.md`](../../README.md)) — so there is nothing
+to create here. `switchyard-mcp` reads no roster: a rig's switchyard scope comes
+from the MCP scope resolver and the `rig { action: "bind" }` binding
+([docs/city-setup.md](../../../docs/city-setup.md#4-rosterconf--retired-with-the-pack-that-read-it)).
+The lanes those opt-ins gated run under
+[switchyard-conductor](https://github.com/outdoorsea/switchyard-conductor),
+which holds its own configuration outside this city.
 
 ## Get the switchyard MCP working
 
@@ -61,8 +62,9 @@ packs mirror. The server resolves the token from the environment or a
 
 ## Keep it honest
 
-If your city root is a git repo, the `config-drift` order mails the mayor when
-tracked config diverges from `HEAD`. Track `pack.toml`, `packs.lock`, and your
-agent definitions; **never** track `.gc/`, `.beads/`, worktrees, or `.env`. Use
+If your city root is a git repo, track `pack.toml`, `packs.lock`, and your
+agent definitions (the `config-drift` order that mailed the mayor when they
+diverged from `HEAD` retired with `switchyard-ops`, so the diff is yours to
+run); **never** track `.gc/`, `.beads/`, worktrees, or `.env`. Use
 a whitelist `.gitignore` (ignore `/*`, then re-include) — a blacklist leaks the
 first artifact nobody thought of.

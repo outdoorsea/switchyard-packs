@@ -34,7 +34,7 @@ Execution rules:
 
 Done when ALL of these hold:
 - `switchyard-mcp doctor` exits 0 (token resolves, server accepts it),
-- `gc dolt health` is healthy and `gc agent list` shows a `brakeman` pool in the rig,
+- `gc dolt health` is healthy and `gc config show` loads the city config cleanly,
 - over the switchyard MCP, `whoami` -> `list_projects` -> `get_project_briefing`
   returns my projects and a claimable-work count.
 

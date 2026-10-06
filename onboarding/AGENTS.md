@@ -44,8 +44,9 @@ Run the sequence in order; each step consumes the last:
 create_blueprint → draft_prd → set_prd_phases (if phased)
   → prd_question(action='ask', ask={...})
     (+ action='recommend' with your proposed answer)
-  → prd_action(action='approve', approve={...}) → create_beads_from_prd
+  → prd_action(action='approve', approve={...})   # also dispatches the beads
 ```
+Call `create_beads_from_prd` only to re-dispatch an approved PRD.
 For any decision the team should weigh in on, use `prd_question(action='ask')` — keep the
 decision **on the PRD** where the team can see and answer it. Do **not** ask
 out-of-band through a host prompt or modal.
